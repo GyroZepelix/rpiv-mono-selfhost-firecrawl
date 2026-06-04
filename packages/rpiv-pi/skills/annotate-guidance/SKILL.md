@@ -137,7 +137,7 @@ You are tasked with generating architecture guidance files for a brownfield proj
    - **Free-text with ❓ Question: prefix** — when the question is open-ended and options can't be predicted (discovery, "what am I missing?", corrections). Example:
      "❓ Question: Integration scanner found no background job registration for this area. Is that expected, or is there async processing I'm not seeing?"
 
-   **Batching**: When you have 2-4 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
+   **Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 
    **Incorporate developer input:**
 

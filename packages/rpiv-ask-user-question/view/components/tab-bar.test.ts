@@ -2,6 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { makeTheme } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it, vi } from "vitest";
+import { MAX_QUESTIONS } from "../../tool/types.js";
 import { TabBar, type TabBarProps } from "./tab-bar.js";
 
 const theme = makeTheme() as unknown as Theme;
@@ -101,16 +102,14 @@ describe("TabBar.render", () => {
 		expect(line).toContain("Q2");
 	});
 
-	it("truncates rather than overflowing when 4 long headers exceed width", () => {
+	it("truncates rather than overflowing when 15 long headers exceed width", () => {
 		const tb = makeBar(
 			buildProps({
-				questions: [
-					{ header: "VeryLongHeaderOne", question: "" },
-					{ header: "VeryLongHeaderTwo", question: "" },
-					{ header: "VeryLongHeaderThree", question: "" },
-					{ header: "VeryLongHeaderFour", question: "" },
-				],
-				totalTabs: 5,
+				questions: Array.from({ length: MAX_QUESTIONS }, (_, i) => ({
+					header: `VeryLongHeader${i + 1}`,
+					question: "",
+				})),
+				totalTabs: MAX_QUESTIONS + 1,
 			}),
 		);
 		for (const w of [40, 60, 80, 120]) {

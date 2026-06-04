@@ -164,7 +164,7 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
 
    ✅ Extract the 2 concrete options and call `ask_user_question`: "Where is the prompt bloat landing?". Header: "Bloat source". Options: "Named bundled agents (Recommended)" (Skills dispatch `codebase-analyzer` etc. — `prompt_mode: "replace"`, no parent inheritance); "General-purpose agent" (`default-agents.ts:11-28` — `promptMode: "append"`, inherits full parent prompt).
 
-   **Batching**: When you have 2-4 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
+   **Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 
    **CRITICAL**: Ask ONE question at a time. Wait for the answer before asking the next. Lead with your most significant finding.
 

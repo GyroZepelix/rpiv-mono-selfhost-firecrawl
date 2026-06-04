@@ -283,7 +283,7 @@ The 8-column header is retained when only one source returns; only rows from the
 
    **Code finding caveat**: when a code finding's root cause is in the design's Architecture (not just plan transcription), the patch belongs upstream. Either (a) Edit the design artifact and re-run `/skill:plan`, or (b) apply the fix to the plan's Phase code fence and annotate the resolution with `applied (plan-local; design follow-up: <design path>)`. Option (a) is cleaner; option (b) is acceptable for tactical fixes.
 
-   **Order and batching**: blockers sequentially (resolution may invalidate later rows). Concerns and suggestions: batch up to 4 independent rows per `ask_user_question` call. Independent = different files / different intents AND neither recommendation references the other's location; otherwise sequential.
+   **Order and batching**: blockers sequentially (resolution may invalidate later rows). Concerns and suggestions: batch up to 15 independent rows per `ask_user_question` call. Independent = different files / different intents AND neither recommendation references the other's location; otherwise sequential.
 
 2. **Flip status to ready**: once every row has a `resolution` (or the table is empty per Step 4's no-findings / failure-fallback path), Edit frontmatter `status: in-review` → `status: ready`. Artifact is now implement-ready.
 
