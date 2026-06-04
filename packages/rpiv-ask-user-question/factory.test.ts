@@ -2,7 +2,7 @@ import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import { createMockPi } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAskUserQuestionTool } from "./ask-user-question.js";
-import type { QuestionAnswer, QuestionnaireResult } from "./tool/types.js";
+import { MAX_QUESTIONS, type QuestionAnswer, type QuestionnaireResult } from "./tool/types.js";
 
 /** Narrowed tool-result shape for test assertions. */
 interface ToolResult {
@@ -717,69 +717,42 @@ describe("ask_user_question — multi-question tab cycling flow", () => {
 	});
 });
 
-describe("ask_user_question — MAX_QUESTIONS (4 questions) complete flow", () => {
-	const fourParams = {
-		questions: [
-			{
-				question: "Q1?",
-				header: "H1",
-				options: [
-					{ label: "A", description: "A option" },
-					{ label: "A2", description: "A2 option" },
-				],
-			},
-			{
-				question: "Q2?",
-				header: "H2",
-				options: [
-					{ label: "B", description: "B option" },
-					{ label: "B2", description: "B2 option" },
-				],
-			},
-			{
-				question: "Q3?",
-				header: "H3",
-				options: [
-					{ label: "C", description: "C option" },
-					{ label: "C2", description: "C2 option" },
-				],
-			},
-			{
-				question: "Q4?",
-				header: "H4",
-				options: [
-					{ label: "D", description: "D option" },
-					{ label: "D2", description: "D2 option" },
-				],
-			},
-		],
+describe("ask_user_question — MAX_QUESTIONS (15 questions) complete flow", () => {
+	const maxParams = {
+		questions: Array.from({ length: MAX_QUESTIONS }, (_, i) => ({
+			question: `Q${i + 1}?`,
+			header: `H${i + 1}`,
+			options: [
+				{ label: `A${i + 1}`, description: `A${i + 1} option` },
+				{ label: `B${i + 1}`, description: `B${i + 1} option` },
+			],
+		})),
 	};
 
-	it("answer all 4 questions with auto-advance, then submit", async () => {
+	it("answer all 15 questions with auto-advance, then submit", async () => {
 		const tool = register();
 		const { custom } = driveCustom((c) => {
-			c.handleInput(KEY.ENTER); // Q1 → Q2
-			c.handleInput(KEY.ENTER); // Q2 → Q3
-			c.handleInput(KEY.ENTER); // Q3 → Q4
-			c.handleInput(KEY.ENTER); // Q4 → Submit tab
+			for (let i = 0; i < MAX_QUESTIONS; i++) {
+				c.handleInput(KEY.ENTER);
+			}
 			c.handleInput(KEY.ENTER); // Submit
 		});
 		const ctx = { hasUI: true, ui: { custom } } as never;
-		const r = (await tool.execute?.("tc", fourParams as never, undefined as never, undefined as never, ctx)) as
+		const r = (await tool.execute?.("tc", maxParams as never, undefined as never, undefined as never, ctx)) as
 			| ToolResult
 			| undefined;
 		expect(r?.details.cancelled).toBe(false);
-		expect(r?.details.answers).toHaveLength(4);
+		expect(r?.details.answers).toHaveLength(MAX_QUESTIONS);
 		const labels = r?.details.answers.map((a: QuestionAnswer) => a.answer);
-		expect(labels).toEqual(["A", "B", "C", "D"]);
+		expect(labels).toEqual(Array.from({ length: MAX_QUESTIONS }, (_, i) => `A${i + 1}`));
 		// Phase 3 envelope: single CC-style sentence chain.
-		expect(r?.content[0].text).toContain('"Q1?"="A".');
-		expect(r?.content[0].text).toContain('"Q4?"="D".');
+		expect(r?.content[0].text).toContain('"Q1?"="A1".');
+		expect(r?.content[0].text).toContain(`"Q${MAX_QUESTIONS}?"="A${MAX_QUESTIONS}".`);
 		expect(r?.content[0].text).toMatch(/^User has answered your questions:/);
 		expect(r?.content[0].text).toMatch(/You can now continue with the user's answers in mind\.$/);
 	});
 
-	it("cancel after answering 2 of 4 → partial answers preserved", async () => {
+	it("cancel after answering 2 of 15 → partial answers preserved", async () => {
 		const tool = register();
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.ENTER); // Q1 → Q2
@@ -787,7 +760,7 @@ describe("ask_user_question — MAX_QUESTIONS (4 questions) complete flow", () =
 			c.handleInput(KEY.ESC); // cancel on Q3
 		});
 		const ctx = { hasUI: true, ui: { custom } } as never;
-		const r = (await tool.execute?.("tc", fourParams as never, undefined as never, undefined as never, ctx)) as
+		const r = (await tool.execute?.("tc", maxParams as never, undefined as never, undefined as never, ctx)) as
 			| ToolResult
 			| undefined;
 		expect(r?.details.cancelled).toBe(true);

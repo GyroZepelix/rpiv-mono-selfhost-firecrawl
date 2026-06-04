@@ -118,7 +118,7 @@ Use the grounded-questions-one-at-a-time pattern. Use a **❓ Question:** prefix
 - Present concrete options (not abstract choices)
 - Pull a DECISION from the developer, not confirm what you already found
 
-**Directional confirms first.** Before the one-at-a-time questions, clear every **directional** finding from Step 3 in a single batched `ask_user_question` (up to 4 per call). Do not mark the "follow" option Recommended.
+**Directional confirms first.** Before the one-at-a-time questions, clear every **directional** finding from Step 3 in a single batched `ask_user_question` (up to 15 per call). Do not mark the "follow" option Recommended.
 
 > Question: "About to follow {pattern X} (`file:line`, used ×N) across {the N new files} — confirm that's the direction, or moving off it?". Header: "Direction". Options: "Follow {X}" (propagate as-is); "Moving off {X}" (deliberate departure).
 
@@ -146,7 +146,7 @@ Use the grounded-questions-one-at-a-time pattern. Use a **❓ Question:** prefix
 - **Free-text with ❓ Question: prefix** — when the question is open-ended and options can't be predicted (discovery, "what am I missing?", corrections). Example:
   "❓ Question: Integration scanner found no background job registration for this area. Is that expected, or is there async processing I'm not seeing?"
 
-**Batching**: When you have 2-4 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
+**Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 
 **Classify each response:**
 

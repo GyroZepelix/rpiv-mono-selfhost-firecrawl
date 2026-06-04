@@ -72,7 +72,7 @@ ask_user_question({
       ],
       multiSelect?: boolean,       // default false
     },
-    // … 1-4 questions total
+    // … 1-15 questions total
   ]
 })
 ```

@@ -117,7 +117,7 @@ Walk the lazy tree depth-first, parent before child. Expand the next layer (buil
    - **`shape`** (architectural choice — which seam, which pattern, which integration point) — frame **dialectically**: name the tradeoff axis, not a winner. Each option's `description` MUST state what it optimizes for AND what it sacrifices, in the form "optimizes <X>, loses <Y>" (or "optimizes <X>, costs <Y>"). The lead option still carries `(Recommended)` with a one-line rationale, but the framing forces the developer to pick a side of an explicit tension rather than rubber-stamp a winner. Generate at least 2 candidate options before scoring — never present a single option masquerading as a choice. `file:line` citations required on every option that references existing code. Mirrors the `packages/rpiv-pi/skills/research/SKILL.md:103-142` checkpoint pattern. If no precedent exists, switch to ungrounded mode and label options as "convention A / convention B" with explicit "no codebase precedent" — the dialectic framing (X vs Y tradeoff) still applies.
 
      **Anti-rescoping**: if the probe finds something that could substitute for the requested build (e.g., feature already exists but isn't wired up), surface as an `intent` question with `file:line` — never silently redirect. Offer both "use what's there" and "build as asked".
-   - **`detail`** (acceptance criteria · routine sub-decisions inside any branch) — batchable when 2-4 sibling leaves are independent.
+   - **`detail`** (acceptance criteria · routine sub-decisions inside any branch) — batchable when 2-15 sibling leaves are independent.
 
 2. **Recommended answer** (`scope` / `shape` / `detail`): derive from intent + Step 3 evidence + project conventions. Every non-intent question carries a recommendation labeled `(Recommended)`.
 
@@ -134,7 +134,7 @@ Walk the lazy tree depth-first, parent before child. Expand the next layer (buil
    - **Cross-cutting answer** ("we also need audit / rate limiting / X" — affects multiple branches): Mark the new node as cross-cutting and **re-queue** it. When the walk reaches each affected parent (functional / non-functional / constraints), the cross-cutter fires under that parent's context. Same node, multiple parents resolved sequentially.
    - **Defer** ("not sure, leave for later"): Add to Open Questions. Resolve the node by deferral. Continue.
 
-6. **Batching**: When 2-4 sibling `detail` leaves are independent (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential. Do not batch `scope` or `shape` questions.
+6. **Batching**: When 2-15 sibling `detail` leaves are independent (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential. Do not batch `scope` or `shape` questions.
 
 7. **Termination — depth check, not bucket-fill**: stop the loop when:
    - (a) every branch has a Decision or a Deferral, AND
