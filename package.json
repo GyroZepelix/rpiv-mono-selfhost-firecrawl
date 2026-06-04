@@ -6,6 +6,11 @@
 	"workspaces": [
 		"packages/*"
 	],
+	"pi": {
+		"extensions": [
+			"./packages/rpiv-web-tools/index.ts"
+		]
+	},
 	"scripts": {
 		"check": "biome check --write --error-on-warnings . && tsc --noEmit -p tsconfig.base.json",
 		"build:site": "npm run build --workspace=@juicesharp/rpiv-site",
