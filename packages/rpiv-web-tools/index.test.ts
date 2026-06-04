@@ -6,7 +6,11 @@ import { beforeEach, describe, expect, it, type vi } from "vitest";
 import registerWebTools from "./index.js";
 import {
 	clearCloneCache,
+	configureFirecrawl,
 	configureSearxng,
+	FIRECRAWL_DEFAULT_URL,
+	FIRECRAWL_PROVIDER_META,
+	FirecrawlProvider,
 	SEARXNG_DEFAULT_URL,
 	SEARXNG_PROVIDER_META,
 	SearxngProvider,
@@ -34,6 +38,7 @@ beforeEach(() => {
 	delete process.env.YOUCOM_API_KEY;
 	delete process.env.JINA_API_KEY;
 	delete process.env.FIRECRAWL_API_KEY;
+	delete process.env.FIRECRAWL_API_URL;
 	delete process.env.PERPLEXITY_API_KEY;
 	delete process.env.SEARXNG_API_KEY;
 	delete process.env.SEARXNG_URL;
@@ -1023,7 +1028,9 @@ describe("config round-trip with all providers", () => {
 		const { captured } = registerAndCapture();
 		const ctx = createMockCtx({ hasUI: true });
 		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce("Firecrawl");
-		(ctx.ui.input as ReturnType<typeof vi.fn>).mockResolvedValueOnce("new-firecrawl-key");
+		(ctx.ui.input as ReturnType<typeof vi.fn>)
+			.mockResolvedValueOnce("https://api.firecrawl.dev/v1")
+			.mockResolvedValueOnce("new-firecrawl-key");
 		await captured.commands.get("web-tools")?.handler("", ctx as never);
 		const saved = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
 		expect(saved.provider).toBe("firecrawl");
@@ -1031,6 +1038,7 @@ describe("config round-trip with all providers", () => {
 		expect(saved.apiKeys.tavily).toBe("tavily-key");
 		expect(saved.apiKeys.jina).toBe("jina-key");
 		expect(saved.apiKeys.firecrawl).toBe("new-firecrawl-key");
+		expect(saved.baseUrls.firecrawl).toBe("https://api.firecrawl.dev/v1");
 	});
 });
 
@@ -1226,6 +1234,206 @@ describe("/web-tools command", () => {
 		} finally {
 			rmSync(CONFIG_PATH, { recursive: true, force: true });
 		}
+	});
+});
+
+// Firecrawl defaults to the hosted API but can point at a self-hosted
+// Firecrawl-compatible endpoint. Hosted use still requires an API key;
+// self-hosted URLs may omit Authorization entirely.
+describe("web_search.execute — firecrawl configurable URL", () => {
+	const FIRECRAWL_OK_BODY = JSON.stringify({
+		success: true,
+		data: [{ title: "T", url: "https://result.example", description: "snippet" }],
+	});
+
+	it("uses env URL (wins over config and default)", async () => {
+		process.env.FIRECRAWL_API_URL = "http://env-firecrawl:3002/v1";
+		process.env.FIRECRAWL_API_KEY = "env-key";
+		writeConfig({ provider: "firecrawl", baseUrls: { firecrawl: "http://config-firecrawl:3002/v1" } });
+		const stub = stubFetch([
+			{
+				match: (u) => u.startsWith("http://env-firecrawl:3002/v1/"),
+				response: () => new Response(FIRECRAWL_OK_BODY, { status: 200 }),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "hello" }, undefined as never, undefined as never, createMockCtx());
+		const callUrl = new URL(stub.calls[0].url);
+		expect(`${callUrl.protocol}//${callUrl.host}${callUrl.pathname}`).toBe("http://env-firecrawl:3002/v1/search");
+	});
+
+	it("falls back to config URL when env is unset", async () => {
+		writeConfig({ provider: "firecrawl", baseUrls: { firecrawl: "http://config-firecrawl:3002/v1" } });
+		const stub = stubFetch([
+			{
+				match: (u) => u.startsWith("http://config-firecrawl:3002/v1/"),
+				response: () => new Response(FIRECRAWL_OK_BODY, { status: 200 }),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		expect(stub.calls[0].url).toContain("http://config-firecrawl:3002/v1/search");
+	});
+
+	it("falls back to hosted default URL when neither env nor config is set", async () => {
+		process.env.FIRECRAWL_API_KEY = "hosted-key";
+		writeConfig({ provider: "firecrawl" });
+		const stub = stubFetch([
+			{
+				match: (u) => u.startsWith(`${FIRECRAWL_DEFAULT_URL}/`),
+				response: () => new Response(FIRECRAWL_OK_BODY, { status: 200 }),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		expect(stub.calls[0].url).toContain(`${FIRECRAWL_DEFAULT_URL}/search`);
+	});
+
+	it("omits Authorization for self-hosted URL when no key is configured", async () => {
+		writeConfig({ provider: "firecrawl", baseUrls: { firecrawl: "http://self-hosted:3002/v1" } });
+		const stub = stubFetch([
+			{
+				match: (u) => u.startsWith("http://self-hosted:3002/v1/"),
+				response: () => new Response(FIRECRAWL_OK_BODY, { status: 200 }),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		const headers = stub.calls[0].init?.headers as Record<string, string>;
+		expect(headers.Authorization).toBeUndefined();
+	});
+});
+
+describe("web_fetch.execute — firecrawl configurable URL", () => {
+	it("uses custom /scrape endpoint without requiring a key", async () => {
+		writeConfig({ provider: "firecrawl", baseUrls: { firecrawl: "http://self-hosted:3002/v1" } });
+		const stub = stubFetch([
+			{
+				match: (u) => u === "http://self-hosted:3002/v1/scrape",
+				response: () =>
+					new Response(
+						JSON.stringify({ success: true, data: { markdown: "extracted", metadata: { title: "T" } } }),
+						{
+							status: 200,
+						},
+					),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_fetch")
+			?.execute?.("tc", { url: "https://example.com" }, undefined as never, undefined as never, createMockCtx());
+		expect(stub.calls[0].url).toBe("http://self-hosted:3002/v1/scrape");
+		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("extracted") });
+	});
+});
+
+describe("/web-tools command — firecrawl", () => {
+	it("prompts URL first, then optional key, and persists both", async () => {
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce("Firecrawl");
+		const inputMock = ctx.ui.input as ReturnType<typeof vi.fn>;
+		inputMock.mockResolvedValueOnce("http://firecrawl:3002/v1").mockResolvedValueOnce("firecrawl-key");
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+		const saved = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(saved).toMatchObject({
+			provider: "firecrawl",
+			baseUrls: { firecrawl: "http://firecrawl:3002/v1" },
+			apiKeys: { firecrawl: "firecrawl-key" },
+		});
+		expect(inputMock.mock.calls).toHaveLength(2);
+		expect(String(inputMock.mock.calls[0][0])).toMatch(/URL/i);
+		expect(String(inputMock.mock.calls[1][0])).toMatch(/key/i);
+	});
+
+	it("marks firecrawl configured when only an API key is set", async () => {
+		writeConfig({ apiKeys: { firecrawl: "firecrawl-key" } });
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+		const labels = (ctx.ui.select as ReturnType<typeof vi.fn>).mock.calls[0][1] as string[];
+		expect(labels).toContain("Firecrawl (configured)");
+	});
+
+	it("--show surfaces the resolved firecrawl URL and its source", async () => {
+		process.env.FIRECRAWL_API_URL = "http://firecrawl:3002/v1";
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		await captured.commands.get("web-tools")?.handler("--show", ctx as never);
+		const msg = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		expect(msg).toContain("firecrawl url: http://firecrawl:3002/v1");
+		expect(msg).toContain("source: env");
+	});
+});
+
+describe("FIRECRAWL_PROVIDER_META", () => {
+	it("declares the API key and base URL env vars", () => {
+		expect(FIRECRAWL_PROVIDER_META.envVar).toBe("FIRECRAWL_API_KEY");
+		expect(FIRECRAWL_PROVIDER_META.baseUrlEnvVar).toBe("FIRECRAWL_API_URL");
+	});
+});
+
+describe("FirecrawlProvider constructor", () => {
+	it("accepts http baseUrl", () => {
+		expect(() => new FirecrawlProvider({ baseUrl: "http://localhost:3002/v1" })).not.toThrow();
+	});
+
+	it("accepts https baseUrl", () => {
+		expect(() => new FirecrawlProvider({ baseUrl: "https://firecrawl.example/v1" })).not.toThrow();
+	});
+
+	it("rejects file:// scheme", () => {
+		expect(() => new FirecrawlProvider({ baseUrl: "file:///etc/passwd" })).toThrow(/must use http/);
+	});
+
+	it("rejects an unparseable URL", () => {
+		expect(() => new FirecrawlProvider({ baseUrl: "not a url" })).toThrow(/is not a valid URL/);
+	});
+});
+
+describe("configureFirecrawl", () => {
+	function makeUi(inputs: Array<string | null | undefined>) {
+		const calls: Array<{ label: string; placeholder: string }> = [];
+		const ui = {
+			async input(label: string, placeholder: string) {
+				calls.push({ label, placeholder });
+				return inputs.shift();
+			},
+		};
+		return { ui, calls };
+	}
+
+	it("returns null when the user cancels at the URL prompt", async () => {
+		const { ui } = makeUi([undefined]);
+		expect(await configureFirecrawl(ui, {})).toBeNull();
+	});
+
+	it("returns null when the user cancels at the API-key prompt", async () => {
+		const { ui } = makeUi(["http://firecrawl:3002/v1", undefined]);
+		expect(await configureFirecrawl(ui, {})).toBeNull();
+	});
+
+	it("uses FIRECRAWL_DEFAULT_URL and null apiKey when both inputs are empty and no current values exist", async () => {
+		const { ui } = makeUi(["", ""]);
+		expect(await configureFirecrawl(ui, {})).toEqual({ baseUrl: FIRECRAWL_DEFAULT_URL, apiKey: null });
+	});
+
+	it("keeps current values when both inputs are empty", async () => {
+		const { ui } = makeUi(["", ""]);
+		expect(await configureFirecrawl(ui, { baseUrl: "http://kept:3002/v1", apiKey: "kept-key" })).toEqual({
+			baseUrl: "http://kept:3002/v1",
+			apiKey: "kept-key",
+		});
 	});
 });
 

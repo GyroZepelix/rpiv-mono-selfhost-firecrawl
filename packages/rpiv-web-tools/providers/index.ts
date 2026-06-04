@@ -13,7 +13,14 @@ import { YOUCOM_PROVIDER_META } from "./youcom.js";
 export { BRAVE_API_KEY_ENV_VAR, BRAVE_PROVIDER_META, BraveProvider } from "./brave.js";
 export { EXA_API_KEY_ENV_VAR, EXA_PROVIDER_META, ExaProvider } from "./exa.js";
 export { createSearchProvider, type ProviderCredentials } from "./factory.js";
-export { FIRECRAWL_API_KEY_ENV_VAR, FIRECRAWL_PROVIDER_META, FirecrawlProvider } from "./firecrawl.js";
+export {
+	configureFirecrawl,
+	FIRECRAWL_API_KEY_ENV_VAR,
+	FIRECRAWL_API_URL_ENV_VAR,
+	FIRECRAWL_DEFAULT_URL,
+	FIRECRAWL_PROVIDER_META,
+	FirecrawlProvider,
+} from "./firecrawl.js";
 // URL interceptors live in providers/interceptors/. The github primitives
 // (parseGitHubUrl, GitHubUrlInfo, etc.) are re-exported from there.
 export {

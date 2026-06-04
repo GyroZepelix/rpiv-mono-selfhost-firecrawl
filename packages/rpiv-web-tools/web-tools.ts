@@ -530,11 +530,15 @@ export function registerWebSearchConfigCommand(pi: ExtensionAPI): void {
 				...PROVIDERS.filter((p) => p.name !== activeProvider),
 			];
 			const hasKey = (p: ProviderMeta) => {
-				// Self-hosted providers are "configured" once they have a base URL
-				// (env or config). The bare default URL doesn't count — it's just a
-				// hint that the user hasn't touched the setting yet.
+				// URL-configurable providers are "configured" once they have a
+				// non-default base URL or an API key. The bare default URL doesn't
+				// count — it's just a hint that the user hasn't touched the setting yet.
 				if (p.baseUrlEnvVar) {
-					return Boolean(process.env[p.baseUrlEnvVar]?.trim() || current.baseUrls?.[p.name]?.trim());
+					return Boolean(
+						process.env[p.baseUrlEnvVar]?.trim() ||
+							current.baseUrls?.[p.name]?.trim() ||
+							resolveProviderApiKey(p.name, current),
+					);
 				}
 				return resolveProviderApiKey(p.name, current) !== undefined;
 			};

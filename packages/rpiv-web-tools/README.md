@@ -24,7 +24,7 @@ Pick one as the active backend; switch any time without losing the others' keys.
 | Exa | `EXA_API_KEY` | [exa.ai](https://exa.ai) | native extraction (plain text) |
 | You.com | `YOUCOM_API_KEY` | [you.com](https://you.com) | native extraction (markdown) |
 | Jina | `JINA_API_KEY` | [jina.ai/reader](https://jina.ai/reader) | native extraction (markdown) |
-| Firecrawl | `FIRECRAWL_API_KEY` | [firecrawl.dev](https://firecrawl.dev) | native extraction (markdown) |
+| Firecrawl | `FIRECRAWL_API_KEY` / `FIRECRAWL_API_URL` | [firecrawl.dev](https://firecrawl.dev) or self-hosted | native extraction (markdown) |
 | Perplexity | `PERPLEXITY_API_KEY` | [docs.perplexity.ai](https://docs.perplexity.ai/) | raw HTTP → htmlToText, `raw: true` available |
 | SearXNG | `SEARXNG_URL` (+ optional `SEARXNG_API_KEY`) | self-hosted | raw HTTP → htmlToText, `raw: true` available |
 | Ollama | `OLLAMA_HOST` / `OLLAMA_API_KEY` | local or [ollama.com](https://ollama.com) | native extraction |
@@ -109,21 +109,61 @@ Throws on invalid URL, non-http(s) protocol, private/loopback hostnames (SSRF gu
 
 ## Commands
 
-- **`/web-tools`** - pick the active provider and set its API key interactively.
+- **`/web-tools`** - pick the active provider and set its API key and/or base URL interactively.
   Providers already configured show `(configured)`; the active one is listed first with a `✓`.
-  Pressing Enter on an empty input keeps the existing key for the chosen provider while
+  Pressing Enter on an empty input keeps existing values for the chosen provider while
   persisting the provider switch. Pass `--show` to see all per-provider keys (masked), env var status,
-  and current URL interceptor states (see [§GitHub URL interceptor](#github-url-interceptor)).
+  provider URLs, and current URL interceptor states (see [§GitHub URL interceptor](#github-url-interceptor)).
 
-## API key resolution (per active provider)
+## API key and URL resolution (per active provider)
 
-First match wins:
+API key resolution, first match wins:
 
 1. The active provider's environment variable: `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `YOUCOM_API_KEY`, `JINA_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY`, `SEARXNG_API_KEY`, or `OLLAMA_API_KEY`
 2. `apiKeys.<provider>` field in `~/.config/rpiv-web-tools/config.json`
 3. Legacy `apiKey` field (Brave only — auto-migrated to the new shape on next save)
 
 The active provider is `config.provider` (set by `/web-tools`); falls back to `brave` if absent.
+
+## Firecrawl (hosted or self-hosted)
+
+By default, Firecrawl points at Firecrawl Cloud:
+
+```bash
+export FIRECRAWL_API_KEY=…
+# Optional: override the API base URL for a self-hosted Firecrawl-compatible endpoint
+export FIRECRAWL_API_URL=http://localhost:3002/v1
+```
+
+Resolution order for the URL: `FIRECRAWL_API_URL` env var → `baseUrls.firecrawl` in `~/.config/rpiv-web-tools/config.json` → default `https://api.firecrawl.dev/v1`. `/web-tools` prompts for the URL first and the API key second.
+
+`web_search` calls:
+
+```http
+POST <firecrawl-url>/search
+```
+
+`web_fetch` calls:
+
+```http
+POST <firecrawl-url>/scrape
+```
+
+Firecrawl Cloud requires `FIRECRAWL_API_KEY` or `apiKeys.firecrawl`. Self-hosted endpoints may omit the key; when no key is configured, the provider omits the `Authorization` header.
+
+Example config:
+
+```json
+{
+  "provider": "firecrawl",
+  "baseUrls": {
+    "firecrawl": "http://localhost:3002/v1"
+  },
+  "apiKeys": {
+    "firecrawl": "optional-key"
+  }
+}
+```
 
 ## SearXNG (self-hosted)
 

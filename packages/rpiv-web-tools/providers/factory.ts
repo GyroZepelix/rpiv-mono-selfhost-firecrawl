@@ -35,7 +35,7 @@ export function createSearchProvider(name: string, creds: ProviderCredentials): 
 		case "jina":
 			return new JinaProvider(apiKey);
 		case "firecrawl":
-			return new FirecrawlProvider(apiKey);
+			return new FirecrawlProvider({ apiKey: creds.apiKey, baseUrl: creds.baseUrl ?? "" });
 		case "perplexity":
 			return new PerplexityProvider(apiKey);
 		case "searxng":
