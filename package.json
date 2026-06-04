@@ -8,7 +8,8 @@
 	],
 	"pi": {
 		"extensions": [
-			"./packages/rpiv-web-tools/index.ts"
+			"./packages/rpiv-web-tools/index.ts",
+			"./packages/rpiv-ask-user-question/index.ts"
 		]
 	},
 	"scripts": {
