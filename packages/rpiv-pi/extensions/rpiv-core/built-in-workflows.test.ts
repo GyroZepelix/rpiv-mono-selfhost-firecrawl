@@ -56,9 +56,11 @@ import {
 	SHIP_DIMENSIONS,
 	shipGatePasses,
 	shipVerdictOutcome,
+} from "./built-in-workflows.js";
 import { codeGatePasses, planGatePasses, sliceGatePasses, unitFailedDimensions } from "./built-ins/gates.js";
 import { seedOnlyFindings } from "./built-ins/index.js";
-} from "./built-in-workflows.js";
+import { writeScopeVerdict } from "./built-ins/scope-checks.js";
+import { writeStructureVerdict } from "./built-ins/shared.js";
 import { deriveOutcomes } from "./outcome-derivation.js";
 import { BUNDLED_SKILLS_DIR } from "./paths.js";
 import { buildSkillContractsFromFrontmatter } from "./skill-contracts-source.js";
@@ -7296,6 +7298,38 @@ describe("build implement-scope-check (lane-level scope floor)", () => {
 		expect(String(data.feedback)).not.toMatch(/packages\/b\/y\.ts/);
 	});
 
+	// Honest pass-through: the excess pick is a DEFERRAL, not a pass;
+	// its note names the downstream adjudicator so the recap's routingNotes
+	// surface it. takeRouteNote is read-and-clear, so each assertion drains
+	// what the pick just attached.
+	const edgeOf = (wf: string) => {
+		const edge = findWorkflow(wf).edges["implement-scope-check"];
+		if (typeof edge !== "function") throw new Error(`${wf} implement-scope-check edge is not an EdgeFn`);
+		return edge;
+	};
+	const routeState = (verdict: string) =>
+		({ named: { "implement-scope-check": [{ data: { verdict } }] } }) as unknown as RunView;
+
+	it("excess pick attaches the pass-through note naming validate; the pass pick attaches none", () => {
+		const edge = edgeOf("build");
+		expect((edge as EdgeFn)({ state: routeState("excess"), output: undefined })).toBe("reconcile");
+		expect(takeRouteNote(edge)).toBe("pass-through: implement-scope-check defers to validate");
+		// A clean pass needs no explanation.
+		expect((edge as EdgeFn)({ state: routeState("pass"), output: undefined })).toBe("reconcile");
+		expect(takeRouteNote(edge)).toBeUndefined();
+		// The quarantine arm and the integrity stop are unchanged: no note on
+		// untracked-only (its verdict speaks via the quarantine manifest), and the
+		// integrity stop keeps its own note.
+		expect((edge as EdgeFn)({ state: routeState("untracked-only"), output: undefined })).toBe("scope-quarantine");
+		expect(takeRouteNote(edge)).toBeUndefined();
+	});
+
+	it("vet twin: the excess pick names code-review (the review loop adjudicates, not validate)", () => {
+		const edge = edgeOf("vet");
+		expect((edge as EdgeFn)({ state: routeState("excess"), output: undefined })).toBe("reconcile");
+		expect(takeRouteNote(edge)).toBe("pass-through: implement-scope-check defers to code-review");
+	});
+
 	describe("validate-report scope acceptance", () => {
 		// Seed the two acceptance channels onto the floor's RunView: the latest
 		// validation row (data.verdict + data.blockers) and, when given, the
@@ -7434,6 +7468,116 @@ describe("build implement-scope-check (lane-level scope floor)", () => {
 			for (const name of ["build", "ship"]) {
 				expect(findWorkflow(name).stages["implement-scope-check"]?.reads, name).toEqual(["plans", "goal"]);
 			}
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Verdict envelope scores — the two deterministic verdict writers' tier arms,
+// pinned directly on the WRITERS (not the stages). `score`/`severity` have zero
+// routing consumers (gates key off `pass` + severity-floor folds); these pins
+// freeze what the persisted JSON says so a tier change can never drift
+// silently. Plain-findings emissions stay byte-identical to the pre-widening
+// shape: no `advisory` key, no `declaredBy`/`accepted` (key-omission idiom).
+// ---------------------------------------------------------------------------
+describe("verdict envelope scores (writeStructureVerdict / writeScopeVerdict)", () => {
+	let tmpDir: string;
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "rpiv-verdict-envelope-"));
+	});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+	const fsHandle = { kind: "fs", path: ".rpiv/artifacts/plans/p.md" } as const;
+	const fsArtifact = { handle: { kind: "fs", path: ".rpiv/artifacts/plans/p.md" } } as const;
+	const structurePath = (who: string) => join(tmpDir, ".rpiv/artifacts/verdicts", `${who}__p.json`);
+	const scopePath = () => join(tmpDir, ".rpiv/artifacts/verdicts", "implement-scope-check__p.json");
+
+	it("writeStructureVerdict tiers: pass ⇒ 100/none, blocking ⇒ 0/high, all-advisory ⇒ null/low (data + persisted JSON)", () => {
+		const pass = writeStructureVerdict("structure-check", fsHandle, [], tmpDir);
+		expect(pass.data).toMatchObject({ dimension: "structure", pass: true, score: 100, severity: "none" });
+		const blocking = writeStructureVerdict("structure-check", fsHandle, [{ detail: "d", where: "w" }], tmpDir);
+		expect(blocking.data).toMatchObject({ pass: false, score: 0, severity: "high" });
+		const advisory = writeStructureVerdict(
+			"structure-check",
+			fsHandle,
+			[{ detail: "d", where: "w", advisory: true }],
+			tmpDir,
+		);
+		expect(advisory.data).toMatchObject({ pass: false, score: null, severity: "low" });
+		// The persisted JSON carries the same honest tiers.
+		expect(JSON.parse(readFileSync(structurePath("structure-check"), "utf-8"))).toMatchObject({
+			pass: false,
+			score: null,
+			severity: "low",
+		});
+	});
+
+	it("writeStructureVerdict plain-findings persisted JSON is byte-identical to the pre-widening shape", () => {
+		writeStructureVerdict("structure-check", fsHandle, [{ detail: "stale cite", where: "plans/p.md:12" }], tmpDir);
+		expect(readFileSync(structurePath("structure-check"), "utf-8")).toBe(
+			JSON.stringify(
+				{
+					dimension: "structure",
+					pass: false,
+					score: 0,
+					severity: "high",
+					artifact: ".rpiv/artifacts/plans/p.md",
+					findings: [{ detail: "stale cite", where: "plans/p.md:12" }],
+					feedback: "stale cite",
+				},
+				null,
+				2,
+			),
+		);
+	});
+
+	it("writeScopeVerdict tiers: pass ⇒ 100/none, untracked-only ⇒ 0/medium, excess ⇒ 0/high, advisory-only ⇒ null/low", () => {
+		const pass = writeScopeVerdict(fsArtifact, [], "pass", tmpDir);
+		expect(pass.data).toMatchObject({ dimension: "scope", pass: true, score: 100, severity: "none" });
+		const untracked = writeScopeVerdict(fsArtifact, [{ detail: "d", where: "w" }], "untracked-only", tmpDir);
+		expect(untracked.data).toMatchObject({ pass: false, score: 0, severity: "medium" });
+		const excess = writeScopeVerdict(fsArtifact, [{ detail: "d", where: "w" }], "excess", tmpDir);
+		expect(excess.data).toMatchObject({ pass: false, score: 0, severity: "high" });
+		const advisory = writeScopeVerdict(fsArtifact, [{ detail: "d", where: "w", advisory: true }], "excess", tmpDir);
+		expect(advisory.data).toMatchObject({ pass: false, score: null, severity: "low" });
+		expect(JSON.parse(readFileSync(scopePath(), "utf-8"))).toMatchObject({
+			pass: false,
+			score: null,
+			severity: "low",
+		});
+	});
+
+	it("writeScopeVerdict plain-findings persisted JSON is byte-identical (no advisory key, no declaredBy)", () => {
+		writeScopeVerdict(fsArtifact, [{ detail: "stray write", where: "packages/a/stray.ts" }], "excess", tmpDir);
+		expect(readFileSync(scopePath(), "utf-8")).toBe(
+			JSON.stringify(
+				{
+					dimension: "scope",
+					pass: false,
+					verdict: "excess",
+					score: 0,
+					severity: "high",
+					artifact: ".rpiv/artifacts/plans/p.md",
+					findings: [{ detail: "stray write", where: "packages/a/stray.ts" }],
+					feedback: "stray write",
+				},
+				null,
+				2,
+			),
+		);
+	});
+
+	it("advisory-only and a validate-report acceptance compose on one envelope (disjoint key sets)", () => {
+		const out = writeScopeVerdict(fsArtifact, [{ detail: "d", where: "w", advisory: true }], "excess", tmpDir, {
+			declaredBy: "validate-report",
+			accepted: ["packages/a/x.ts"],
+		});
+		expect(out.data).toMatchObject({
+			score: null,
+			severity: "low",
+			declaredBy: "validate-report",
+			accepted: ["packages/a/x.ts"],
 		});
 	});
 });

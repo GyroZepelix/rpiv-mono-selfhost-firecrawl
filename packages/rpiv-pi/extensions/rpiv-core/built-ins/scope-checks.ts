@@ -99,30 +99,31 @@ type ScopeVerdict = "pass" | "untracked-only" | "excess";
  * NOT round-stamped (unlike grade's timestamped slug): each fix-loop round
  * overwrites the file — the route reads the accumulating channel, and on disk
  * only the latest round's scope verdict matters; round-stamp here if a consumer
- *
- * The optional 5th param stamps acceptance provenance: `declaredBy`/
- * `accepted` ride the envelope ONLY when a validate-report acceptance
- * declared them (the key-omission idiom — every uninformed emission omits
- * both keys, so the persisted JSON stays byte-identical to the pre-widening
- * shape; vet's call site passes nothing).
- * ever needs the history. Severity mirrors the tier ("medium" untracked-only,
- * "high" tracked excess) for TRAIL LEGIBILITY ONLY — no consumer folds it:
- * routing reads `verdict`, and validate's adjudication reads `findings`.
+ * ever needs the history. Severity mirrors the tier ("low" all-advisory,
+ * "medium" untracked-only, "high" tracked excess) for TRAIL LEGIBILITY ONLY —
+ * no consumer folds it: routing reads `verdict`, and validate's adjudication
+ * reads `findings`. The advisory tier is DORMANT at this writer's call sites
+ * (`scopeFinding` emits no `advisory` key) — the contract is encoded for the
+ * day one is. The optional `acceptance` param stamps `declaredBy`/`accepted`
+ * onto the envelope ONLY when a validate-report acceptance declared them
+ * (key-omission idiom — every uninformed emission omits both, so the persisted
+ * JSON stays byte-identical to the pre-widening shape).
  */
 const writeScopeVerdict = (
 	artifact: FsArtifact,
-	acceptance?: { declaredBy: "validate-report" | null; accepted: string[] },
-	findings: { detail: string; where: string }[],
+	findings: { detail: string; where: string; advisory?: true }[],
 	verdict: ScopeVerdict,
 	cwd: string,
+	acceptance?: { declaredBy: string | null; accepted: string[] },
 ): Omit<Output, "meta"> => {
 	const pass = verdict === "pass";
+	const advisoryOnly = findings.length > 0 && findings.every((f) => f.advisory === true);
 	const data = {
 		dimension: "scope",
 		pass,
 		verdict,
-		score: pass ? VERDICT_PASS_SCORE : VERDICT_FAIL_SCORE,
-		severity: pass ? "none" : verdict === "untracked-only" ? "medium" : "high",
+		score: pass ? VERDICT_PASS_SCORE : advisoryOnly ? null : VERDICT_FAIL_SCORE,
+		severity: pass ? "none" : advisoryOnly ? "low" : verdict === "untracked-only" ? "medium" : "high",
 		artifact: handleToString(artifact.handle),
 		findings,
 		feedback: pass ? "" : findings.map((f) => f.detail).join(" "),
@@ -437,4 +438,4 @@ const scopeQuarantine = ({ state, cwd }: ScriptContext): Omit<Output, "meta"> =>
 };
 
 export type { ScopeVerdict };
-export { implementScopeCheck, implementScopeCheckVet, scopeQuarantine };
+export { implementScopeCheck, implementScopeCheckVet, scopeQuarantine, writeScopeVerdict };

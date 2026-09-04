@@ -275,21 +275,33 @@ const STITCH_SCRIPT = join(
  * tracked excess to downstream adjudication (build threads the verdict to
  * validate via `--scope`; vet's review loop sees the whole diff) instead of
  * halting, the citation-floor precedent (demote where a remedy or adjudicator
- * exists). "untracked-only" takes the deterministic `scope-quarantine` arm.
+ * exists). The excess pick is an HONEST pass-through: it attaches a route note
+ * naming the downstream adjudicator (`opts.deferredTo` — validate on build,
+ * code-review on vet) so the end-of-run recap's `routingNotes` can surface the
+ * deferral; the pass pick attaches no note (a clean pass needs no
+ * explanation). "untracked-only" takes the deterministic `scope-quarantine`
+ * arm.
  * Anything else — a missing or corrupt verdict — terminates ("stop" with a
  * route note): the integrity clause every de-halting change has preserved.
  * A `match` cannot send two enum values to one target, hence `defineRoute`;
  * `readsData: false` — the route consults the stage's published channel, not
  * its projected output (matching the other deterministic-floor routes).
  */
-const scopeFloorGate = (): EdgeFn => {
+const scopeFloorGate = (opts: { deferredTo: string }): EdgeFn => {
 	const route: EdgeFn = defineRoute(
 		["reconcile", "scope-quarantine", "stop"],
 		({ state }) => {
 			const verdict = (state.named["implement-scope-check"]?.at(-1)?.data as { verdict?: unknown } | undefined)
 				?.verdict;
 			if (verdict === "untracked-only") return "scope-quarantine";
-			if (verdict === "pass" || verdict === "excess") return "reconcile";
+			if (verdict === "pass") return "reconcile";
+			if (verdict === "excess") {
+				// Honest pass-through: the floor did not PASS, it DEFERRED — record why
+				// on the routing row (the recap's routingNotes) instead of a silent
+				// reconcile that reads like a clean pass.
+				setRouteNote(route, `pass-through: implement-scope-check defers to ${opts.deferredTo}`);
+				return "reconcile";
+			}
 			setRouteNote(
 				route,
 				`implement-scope-check verdict ${JSON.stringify(verdict ?? null)} is not a ScopeVerdict — terminated (integrity stop)`,
@@ -466,9 +478,10 @@ const vetWorkflow = defineWorkflow({
 		implement: "implement-scope-check",
 		// Scope-check still gates onward into `reconcile` (not validate): the
 		// coherence backstop runs after the write-set is judged. Tiered route —
-		// see scopeFloorGate: pass/excess ⇒ reconcile, untracked-only ⇒ the
-		// quarantine arm, missing/corrupt verdict ⇒ STOP.
-		"implement-scope-check": scopeFloorGate(),
+		// see scopeFloorGate: pass/excess ⇒ reconcile (excess carries the
+		// code-review pass-through note), untracked-only ⇒ the quarantine arm,
+		// missing/corrupt verdict ⇒ STOP.
+		"implement-scope-check": scopeFloorGate({ deferredTo: "code-review" }),
 		// Deterministic re-entry after the quarantine arm: a plain string edge
 		// (non-counted, mirroring build's validate-fix hop) with guaranteed
 		// progress — quarantined paths leave the dirty set, so the re-check
@@ -595,9 +608,6 @@ const validateFixGate = (): EdgeFn => {
 	return route;
 };
 
-const buildWorkflow = defineWorkflow({
-	name: "build",
-	description:
 /**
  * The fix-arm note for a dead grade unit — the dimension soft-halted (after
  * its re-dispatch, when the panel wires one) and left no verdict to fold.
@@ -664,7 +674,9 @@ const codeDemoteRoute: EdgeFn = defineRoute(
 	{ readsData: false },
 );
 
-
+const buildWorkflow = defineWorkflow({
+	name: "build",
+	description:
 		"Ship, sliced: capture the verbatim brief as a goal artifact (the north star the quality gates' completeness/correctness dimensions and validate anchor against) → research the brief → derive a goal-anchored acceptance inventory (the executable standard of completion, frozen before any plan so it cannot inherit the plan's scope; the completeness gates anchor on it and validate executes its evidence commands) → decompose it into vertical slices → two-phase slice gate (a deterministic floor — dependency-cycle freedom + brief-coverage conservation so a slice-fix can't pass by dropping scope — then one LLM design-readiness judgment that each slice is chewable by a single design pass) with a slice-fix loop → design each slice in parallel → one consolidated developer checkpoint (accept or adjust the proposed interfaces/data types, adjustments applied surgically and cascaded to dependents) → synthesize hierarchically (per-cluster sub-plans → one merged plan) → tier-scaled quality-panel gate (a one-slice, <=2-phase run grades correctness+completeness only; larger or previously-failing runs grade the full completeness/correctness/actionability/pattern-following/architecture-fit roster) where a dimension's fresh HIGH-severity, risk-ruling, or regressed-pass blocking verdict gets one confirming second judgment before it buys a plan-fix round (a first-time medium finding routes straight to the surgical fix) → elaborate code per phase in parallel → splice it into the plan → re-grade the code-bearing plan (same tier + confirm contract) → implement → implement-scope-check → reconcile → validate → commit. Research-led; three automated gates plus one human design checkpoint, before design, before code, and after the splice.",
 	start: "goal",
 	stages: {
@@ -1055,10 +1067,12 @@ const codeDemoteRoute: EdgeFn = defineRoute(
 		// validate adjudicates them via the --scope thread — the citation floor's
 		// demote-and-adjudicate precedent); untracked-only ⇒ the deterministic
 		// scope-quarantine arm; a missing/corrupt verdict ⇒ STOP (integrity
-		// clause). Sourced from the scope-check's published verdict channel (the
+		// clause). The excess pick attaches the pass-through note naming validate
+		// (the recap's routingNotes surface the deferral). Sourced from the
+		// scope-check's published verdict channel (the
 		// stage key for an outcome-less `produces.script`, per
 		// `resolvePublishName`); `readsData: false` suppresses the outputSchema lint.
-		"implement-scope-check": scopeFloorGate(),
+		"implement-scope-check": scopeFloorGate({ deferredTo: "validate" }),
 		// Deterministic re-entry after the quarantine arm: a plain string edge
 		// (non-counted, mirroring validate-fix's hop) with guaranteed progress —
 		// quarantined paths leave the dirty set, so the re-check either passes or

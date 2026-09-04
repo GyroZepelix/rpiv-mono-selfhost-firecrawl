@@ -272,6 +272,17 @@ export interface RunRecap {
 	 */
 	failureReason?: string;
 	/**
+	 * Route-note recap: every note-bearing FORWARD routing row's `note`,
+	 * verbatim, in trail order. Stop-row notes are EXCLUDED — the
+	 * completed→stopped refinement renders a stop's note exactly once, as
+	 * `failureReason` (`stopped at <stage>: <note>`); a trail-order echo would
+	 * double-render it. Set only when at least one such row exists; absent
+	 * (never `[]`) otherwise, so note-less and legacy trails project
+	 * byte-identically. Rides EVERY outcome — a failed run may carry earlier-hop
+	 * notes (a gate explained itself before a later stage blew up).
+	 */
+	routingNotes?: string[];
+	/**
 	 * Workflow name (matches `Workflow.name` at run-time) projected from the
 	 * header. `undefined` when the header row is missing or malformed (a
 	 * degraded trail with stage rows still returns a recap; the gap surfaces
