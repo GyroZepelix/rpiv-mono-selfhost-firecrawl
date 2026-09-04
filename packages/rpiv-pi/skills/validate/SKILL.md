@@ -18,6 +18,20 @@ contract:
           enum: [in-progress, in-review, ready]
         verdict:
           enum: [pass, fail]
+        blockers:
+          type: array
+          items:
+            type: object
+            required: [command, file]
+            properties:
+              id:
+                type: string
+              command:
+                type: string
+              file:
+                type: string
+              line:
+                type: number
   consumes:
     reads:
       plans: {}

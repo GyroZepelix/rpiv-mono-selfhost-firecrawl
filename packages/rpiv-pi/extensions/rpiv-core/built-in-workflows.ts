@@ -879,6 +879,11 @@ const codeDemoteRoute: EdgeFn = defineRoute(
 		// (threaded via --scope); missing verdict ⇒ STOP. No schema is declared
 		// (matching slice-check/plan-cite-check — the route reads the channel).
 		// Reads `goal` for the run-start baseline that subtracts pre-existing dirt.
+		// On a validate-fix re-entry the floor additionally accepts the latest
+		// report's blockers-named writes as declared scope — a validate-fix hop's
+		// targeted repair is the one writer the plan cannot declare (it predates
+		// the report); fail-closed on missing/older remediation (see
+		// validateReportAcceptance).
 		"implement-scope-check": produces.script({ reads: ["plans", "goal"], run: implementScopeCheck }),
 		// Deterministic remedy arm for the untracked-only tier: move (never
 		// delete) run-created untracked excess under .rpiv/tmp/scope-quarantine/
@@ -1257,6 +1262,10 @@ const shipWorkflow = defineWorkflow({
 		// Lane-level scope floor — build's latest-only variant (vet uses the
 		// union variant for its fix loop; ship has no loop, so the latest plan's
 		// declared write-set is the whole contract). Pass ⇒ reconcile; fail ⇒ STOP.
+		// The shared run function carries the validate-report acceptance: a
+		// validate-fix hop's blocker-named writes are accepted as declared scope
+		// (fail-closed on missing/older remediation) — ship's single bounded
+		// validate-fix hop re-enters here, landing exactly that shape.
 		"implement-scope-check": produces.script({ reads: ["plans", "goal"], run: implementScopeCheck }),
 		// Deterministic post-implement reconciliation — build's run-function
 		// verbatim. Pass ⇒ validate; fail ⇒ ONE bounded reconcile-fix hop

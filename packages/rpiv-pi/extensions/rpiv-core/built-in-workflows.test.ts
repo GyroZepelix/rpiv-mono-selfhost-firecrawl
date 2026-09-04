@@ -7295,6 +7295,147 @@ describe("build implement-scope-check (lane-level scope floor)", () => {
 		expect(String(data.feedback)).not.toMatch(/packages\/a\/x\.ts/);
 		expect(String(data.feedback)).not.toMatch(/packages\/b\/y\.ts/);
 	});
+
+	describe("validate-report scope acceptance", () => {
+		// Seed the two acceptance channels onto the floor's RunView: the latest
+		// validation row (data.verdict + data.blockers) and, when given, the
+		// latest remediation digest row whose meta.ts must STRICTLY postdate the
+		// report — the publication-order discriminator of a validate-fix hop.
+		const seedChannels = (opts: { validationTs: string; blockers?: unknown; remediationTs?: string }): RunView => {
+			const state = seed(
+				".rpiv/artifacts/plans/p.md",
+				plan(['"packages/a/foo.ts"'], 1),
+				".rpiv/artifacts/goal/baseline-t.json",
+				[],
+			) as { named: Record<string, unknown> };
+			state.named.validation = [
+				{
+					...out(".rpiv/artifacts/validation/r1.md"),
+					data: { verdict: "fail", blockers: opts.blockers },
+					meta: { ts: opts.validationTs },
+				},
+			];
+			if (opts.remediationTs !== undefined) {
+				state.named.remediation = [
+					{
+						...out(".rpiv/artifacts/plans/p.md"),
+						data: { changed: true },
+						meta: { ts: opts.remediationTs },
+					},
+				];
+			}
+			return state as unknown as RunView;
+		};
+		const blocker = (file: string) => ({ id: "b1", command: "npm test", file });
+
+		it("accepts a blocker-named dirty path on the validate-fix re-entry (verdict folds to pass, data + persisted JSON stamped)", () => {
+			const state = seedChannels({
+				validationTs: "2026-09-04T10:00:00-0400",
+				// Named twice (deduped) and out of order (sorted) — the accepted set is a
+				// deduped, sorted file list.
+				blockers: [blocker("packages/z/late.ts"), blocker("packages/b/fix.ts"), blocker("packages/b/fix.ts")],
+				remediationTs: "2026-09-04T11:00:00-0400",
+			});
+			dirty("packages/a/foo.ts"); // declared by the plan
+			dirty("packages/b/fix.ts"); // named by a blockers entry → accepted
+			dirty("packages/z/late.ts"); // named by a blockers entry → accepted
+			const result = scopeRun()({ cwd: tmpDir, input: undefined, state });
+			expect(result.data.pass).toBe(true);
+			expect(result.data.findings).toEqual([]);
+			expect(result.data.declaredBy).toBe("validate-report");
+			expect(result.data.accepted).toEqual(["packages/b/fix.ts", "packages/z/late.ts"]);
+			const persisted = JSON.parse(
+				readFileSync(join(tmpDir, ".rpiv/artifacts/verdicts/implement-scope-check__p.json"), "utf-8"),
+			);
+			expect(persisted.declaredBy).toBe("validate-report");
+			expect(persisted.accepted).toEqual(["packages/b/fix.ts", "packages/z/late.ts"]);
+		});
+
+		it("an UNNAMED dirty twin of the accepted hop stays the sole finding (the named path never rides --scope into validate)", () => {
+			const state = seedChannels({
+				validationTs: "2026-09-04T10:00:00-0400",
+				blockers: [blocker("packages/b/fix.ts")],
+				remediationTs: "2026-09-04T11:00:00-0400",
+			});
+			dirty("packages/a/foo.ts"); // declared
+			dirty("packages/b/fix.ts"); // named → accepted
+			dirty("packages/c/stray.ts"); // unnamed → the sole finding
+			const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
+			expect(data.pass).toBe(false);
+			expect(data.verdict).toBe("excess");
+			expect(String(data.feedback)).toMatch(/packages\/c\/stray\.ts/);
+			expect(String(data.feedback)).not.toMatch(/packages\/b\/fix\.ts/);
+			expect((data.findings as { where: string }[]).map((f) => f.where)).toEqual(["packages/c/stray.ts"]);
+		});
+
+		it("refuses when the validation report is NEWER than the remediation (the re-validation shape)", () => {
+			const state = seedChannels({
+				validationTs: "2026-09-04T12:00:00-0400",
+				blockers: [blocker("packages/b/fix.ts")],
+				remediationTs: "2026-09-04T11:00:00-0400",
+			});
+			dirty("packages/a/foo.ts");
+			dirty("packages/b/fix.ts"); // named, but the newer report supersedes → finding
+			const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
+			expect(data.pass).toBe(false);
+			expect(String(data.feedback)).toMatch(/packages\/b\/fix\.ts/);
+			expect(data.declaredBy).toBeUndefined();
+			expect(data.accepted).toBeUndefined();
+		});
+
+		it("refuses with no remediation row (the first entry / a quarantine re-entry)", () => {
+			const state = seedChannels({
+				validationTs: "2026-09-04T10:00:00-0400",
+				blockers: [blocker("packages/b/fix.ts")],
+			});
+			dirty("packages/a/foo.ts");
+			dirty("packages/b/fix.ts");
+			const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
+			expect(data.pass).toBe(false);
+			expect(String(data.feedback)).toMatch(/packages\/b\/fix\.ts/);
+			expect(data.declaredBy).toBeUndefined();
+		});
+
+		it("refuses non-array blockers and skips malformed entries (fail-closed)", () => {
+			for (const malformed of ["oops", undefined, [{ no: "file" }]]) {
+				const state = seedChannels({
+					validationTs: "2026-09-04T10:00:00-0400",
+					blockers: malformed,
+					remediationTs: "2026-09-04T11:00:00-0400",
+				});
+				dirty("packages/a/foo.ts");
+				dirty("packages/b/fix.ts");
+				const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
+				expect(data.pass, `blockers=${JSON.stringify(malformed)}`).toBe(false);
+				expect(String(data.feedback), `blockers=${JSON.stringify(malformed)}`).toMatch(/packages\/b\/fix\.ts/);
+			}
+		});
+
+		it("accepted paths match VERBATIM — no twin expansion (naming x.ts accepts x.ts, never x.test.ts)", () => {
+			const state = seedChannels({
+				validationTs: "2026-09-04T10:00:00-0400",
+				blockers: [blocker("packages/b/fix.ts")],
+				remediationTs: "2026-09-04T11:00:00-0400",
+			});
+			dirty("packages/a/foo.ts");
+			dirty("packages/b/fix.ts"); // named → accepted
+			dirty("packages/b/fix.test.ts"); // NOT named; acceptance is verbatim → finding
+			const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
+			expect(data.pass).toBe(false);
+			expect((data.findings as { where: string }[]).map((f) => f.where)).toEqual(["packages/b/fix.test.ts"]);
+			expect(data.accepted).toEqual(["packages/b/fix.ts"]);
+		});
+
+		it("the stage reads stay [plans, goal] — acceptance reads defensively off state.named, never halting the first entry", () => {
+			// The acceptance reads `validation`/`remediation` off `state.named`
+			// WITHOUT declaring them: a declared read halts the first, pre-validate
+			// entry (channels still unfilled). Build and ship share the run function,
+			// so both stay reads-verbatim.
+			for (const name of ["build", "ship"]) {
+				expect(findWorkflow(name).stages["implement-scope-check"]?.reads, name).toEqual(["plans", "goal"]);
+			}
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------
