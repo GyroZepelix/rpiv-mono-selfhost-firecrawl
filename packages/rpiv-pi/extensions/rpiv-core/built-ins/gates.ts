@@ -522,6 +522,74 @@ const sliceGatePasses = (state: RunView): boolean => {
 	if (!allDimensionsPass(state.named["slice-check"])) return false;
 	return allDimensionsPass(fresh, roster) || citeDischargeCoversCurrentMap(state);
 };
+
+/**
+ * The verdict fields the seed-only cite classification consults — the ONE
+ * spelling shared by the route predicate (`seedOnlyCiteFail`), the discharge
+ * stamp (`citeRemedyDischarged`), and the seed-lift stage, so all three agree
+ * on what a "seed-only cite fail" is. `where` rides the findings for the
+ * lift stage's slice-target parse; the classification itself reads only
+ * `requires`.
+ */
+type SeedOnlyVerdict = {
+	pass?: boolean;
+	remedy?: string;
+	findings?: readonly { requires?: unknown; where?: unknown }[];
+};
+
+/**
+ * A verdict is a SEED-ONLY cite fail when it failed, its `remedy` is `"cite"`
+ * or absent (an omitted marker must not divert a pure-bookkeeping fail into
+ * the structural re-cut arm), it carries at least one finding, and EVERY
+ * finding demands a concrete string `requires` seed. A finding without a
+ * `requires` is unverifiable — a verdict mixing one in is a structural
+ * demand and takes the normal fix arm, exactly as a `remedy` naming another
+ * repair would.
+ */
+const seedOnlyFindings = (v: SeedOnlyVerdict | undefined): boolean => {
+	if (v?.pass !== false) return false;
+	if (v.remedy !== undefined && v.remedy !== "cite") return false;
+	const findings = Array.isArray(v.findings) ? v.findings : [];
+	return (
+		findings.length > 0 && findings.every((f) => f != null && typeof f.requires === "string" && f.requires.length > 0)
+	);
+};
+
+/**
+ * The seed-only classification over the run state: the LATEST
+ * `design-readiness` verdict (via `latestVerdictPerDimension` — deliberately
+ * the same consultation `citeRemedyDischarged` makes, not a fresh-verdict
+ * filter) is a seed-only cite fail. The `slice-grade` edge consults this to
+ * route the deterministic seed lift instead of the structural fix arm.
+ */
+const seedOnlyCiteFail = (state: RunView): boolean =>
+	seedOnlyFindings(
+		latestVerdictPerDimension(state.named["slice-verdicts"]).get("design-readiness")?.data as
+			| SeedOnlyVerdict
+			| undefined,
+	);
+
+/**
+ * Stuck detection for the seed-lift loop: the gate still fails, the verdict is
+ * seed-only, and the LATEST post-verdict fix publication is the seed lift
+ * itself — no later re-slice has superseded it. A lift that already ran and
+ * still left the gate red cannot be helped by re-grading (the verdict is
+ * unchanged) or re-lifting (the dedup makes the second lift a no-op), so the
+ * `slice-check` edge routes the structural fix arm instead of another panel.
+ * Timestamps are the channel-tail `meta.ts` comparison (ISO-8601 compares
+ * lexicographically); a missing timestamp reads not-stuck — the fail-closed
+ * direction here is the ordinary re-grade, never a stuck loop.
+ */
+const seedLiftStuck = (state: RunView): boolean => {
+	if (sliceGatePasses(state)) return false;
+	if (!seedOnlyCiteFail(state)) return false;
+	const verdictTs = latestVerdictPerDimension(state.named["slice-verdicts"]).get("design-readiness")?.meta?.ts;
+	const liftTs = state.named["slice-seed-lift"]?.at(-1)?.meta?.ts;
+	const resliceTs = state.named.slices?.at(-1)?.meta?.ts;
+	if (typeof verdictTs !== "string" || typeof liftTs !== "string" || liftTs <= verdictTs) return false;
+	return typeof resliceTs !== "string" || liftTs > resliceTs;
+};
+
 // The single authority the new `subplan-check` edge consults — the twin of
 // `sliceGatePasses`, but carrying no LLM-verdict roster or risk flags: the
 // `subplan-check` floor is the sole (deterministic) dimension on its channel.
@@ -667,7 +735,11 @@ export {
 	procedureSatisfiesDuty,
 	type RiskRecord,
 	rulingEffectivePass,
+	type SeedOnlyVerdict,
 	SLICE_DIMENSIONS,
+	seedLiftStuck,
+	seedOnlyCiteFail,
+	seedOnlyFindings,
 	sliceGatePasses,
 	subplanGatePasses,
 	verdictRiskRulings,

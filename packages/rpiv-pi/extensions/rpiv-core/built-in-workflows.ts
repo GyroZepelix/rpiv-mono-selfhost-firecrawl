@@ -77,9 +77,12 @@ import {
 	SLICE_DIMENSIONS,
 	SYNTH_CLUSTER_FANOUT,
 	scopeQuarantine,
+	seedLiftStuck,
+	seedOnlyCiteFail,
 	shipGatePasses,
 	shipVerdictOutcome,
 	sliceGatePasses,
+	sliceSeedLift,
 	sliceStructureCheck,
 	subplanCoverageCheck,
 	subplanGatePasses,
@@ -607,18 +610,24 @@ const unitFailedNote = (dims: readonly string[]): string =>
 
 /** The slice gate's grade edge — design-readiness pass ⇒ design; a dead
  *  dimension unit ⇒ slice-fix with the note (a verdict-less dead dimension is
- *  never a classification candidate). Belt-and-suspenders for the live graph:
+ *  never a classification candidate). A SEED-ONLY cite fail (every finding
+ *  naming a concrete seed to add) ⇒ the deterministic `slice-seed-lift` arm,
+ *  which appends the seeds and re-enters `slice-check` for the discharge
+ *  stamp; anything else ⇒ slice-fix. Belt-and-suspenders for the live graph:
  *  the slice roster is one dimension, so a double miss makes the generation
  *  all-failed and `haltWhenAllFailed` halts at the panel close before any
- *  route runs — the arm pins the route contract for any future multi-dimension
+ *  route runs — the arms pin the route contract for any future multi-dimension
  *  slice roster and for constructed-state trails. */
 const sliceGradeRoute: EdgeFn = defineRoute(
-	["slice-design", "slice-fix"],
+	["slice-design", "slice-seed-lift", "slice-fix"],
 	({ state }) => {
 		if (sliceGatePasses(state)) return "slice-design";
 		const unitFailed = unitFailedDimensions(state, "slices", "slice-verdicts", SLICE_DIMENSIONS);
-		if (unitFailed.length > 0) setRouteNote(sliceGradeRoute, unitFailedNote(unitFailed));
-		return "slice-fix";
+		if (unitFailed.length > 0) {
+			setRouteNote(sliceGradeRoute, unitFailedNote(unitFailed));
+			return "slice-fix";
+		}
+		return seedOnlyCiteFail(state) ? "slice-seed-lift" : "slice-fix";
 	},
 	{ readsData: false },
 );
@@ -702,6 +711,15 @@ const codeDemoteRoute: EdgeFn = defineRoute(
 			outcome: rpivBucketOutcome("slices"),
 			reads: ["slices", fanin("slice-verdicts"), fanin("slice-check")],
 		}),
+		// Deterministic seed lift — the engine-owned half of the cite remedy: a
+		// seed-only design-readiness fail (every finding demanding a concrete
+		// `requires` citation) is repaired by appending the seeds to the named
+		// slices' `Draws on` lines in place, never by a full re-slice + re-grade.
+		// Publishes on its OWN stage channel (a script stage cannot carry an
+		// outcome; the in-place amend keeps `latestFsArtifact(state, "slices")`
+		// resolving the same amended file), then re-enters `slice-check`, whose
+		// re-run stamps the cite discharge the gate folds on — no second panel.
+		"slice-seed-lift": produces.script({ reads: ["slices", fanin("slice-verdicts")], run: sliceSeedLift }),
 		// Design every slice in parallel.
 		"slice-design": produces({ skill: "design-slice", loop: SLICE_DESIGN_FANOUT }),
 		// One consolidated developer checkpoint over EVERY per-slice design, at the
@@ -910,17 +928,32 @@ const codeDemoteRoute: EdgeFn = defineRoute(
 		// already passes, so re-grading would only re-roll a flappy judgment. Also
 		// skips after a fix for a `remedy: "cite"` fail once `slice-check` has
 		// deterministically verified the demanded seeds landed on a structurally
-		// unchanged map (the `citeDischarged` stamp — see `citeRemedyDischarged`).
-		// First pass (no verdict yet) ⇒ not satisfied ⇒ into `slice-grade`.
+		// unchanged map (the `citeDischarged` stamp — see `citeRemedyDischarged`),
+		// and after a seed lift for the same reason.
+		// First pass (no verdict yet) ⇒ not satisfied ⇒ into `slice-grade`. A
+		// seed lift that already ran and left the gate red is STUCK — re-grading
+		// or re-lifting cannot change the outcome — so the fail branch routes
+		// the structural fix arm BEFORE the re-grade fallthrough.
 		"slice-check": defineRoute(
-			["slice-design", "slice-grade"],
-			({ state }) => (sliceGatePasses(state) ? "slice-design" : "slice-grade"),
+			["slice-design", "slice-fix", "slice-grade"],
+			({ state }) => (sliceGatePasses(state) ? "slice-design" : seedLiftStuck(state) ? "slice-fix" : "slice-grade"),
 			{ readsData: false },
 		),
-		// Design-readiness gate BEFORE any design. Structure + design-readiness pass⇒ design; any fails ⇒
-		// slice-fix and loop back. Bounded by the runner's maxBackwardJumps (default 3).
+		// Design-readiness gate BEFORE any design. Structure + design-readiness pass ⇒
+		// design; a SEED-ONLY cite fail (every finding naming a concrete seed to add) ⇒
+		// the deterministic `slice-seed-lift` arm, which appends the seeds and re-enters
+		// `slice-check` for the discharge stamp — a full re-slice + re-grade for pure
+		// citation bookkeeping repairs nothing the verdict flagged; anything else ⇒
+		// slice-fix and loop back. (A dimension whose re-dispatch produced no verdict
+		// takes the fix arm ahead of the seed-only check — a verdict-less dead
+		// dimension is never seed-only.) Bounded by the runner's maxBackwardJumps
+		// (default 3).
 		"slice-grade": sliceGradeRoute,
 		"slice-fix": "slice-check",
+		// Deterministic re-entry after the seed lift: the re-run structure check
+		// stamps the discharge the gate folds on (a plain string edge — the
+		// counted decision is the slice-grade route's lift pick).
+		"slice-seed-lift": "slice-check",
 		// Design fanout → consolidated human checkpoint → hierarchical synthesis.
 		"slice-design": "design-review",
 		"design-review": "subplan",

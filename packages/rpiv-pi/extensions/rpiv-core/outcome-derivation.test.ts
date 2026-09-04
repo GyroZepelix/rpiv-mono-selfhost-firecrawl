@@ -360,6 +360,39 @@ describe("equivalence — built-in workflows", () => {
 		"ship::implement",
 	]);
 
+	/**
+	 * The script produces stages (a `run` function IS the envelope — no outcome
+	 * is derived) across the built-in workflows, as declared keys. The census
+	 * is DERIVED from the declared partitions (EXPECTED + EXPLICIT_OUTCOMES +
+	 * SCRIPT_STAGES), so adding a script stage fails the per-stage guard naming
+	 * the stage and its bucket — never a context-free count mismatch — and a
+	 * REMOVED stage fails the stale-entry assertion below. Keep this set in
+	 * lockstep with the workflows' `produces.script` stages.
+	 */
+	const SCRIPT_STAGES = new Set([
+		"build::slice-check",
+		"build::subplan-check",
+		"build::goal",
+		"build::plan-cite-check",
+		"build::code-cite-check",
+		"build::implement-scope-check",
+		"build::scope-quarantine",
+		"build::reconcile",
+		"build::plan-snapshot",
+		"build::code-snapshot",
+		"build::plan-demote",
+		"build::code-demote",
+		"build::slice-seed-lift",
+		"vet::goal",
+		"vet::implement-scope-check",
+		"vet::scope-quarantine",
+		"vet::reconcile",
+		"ship::goal",
+		"ship::plan-cite-check",
+		"ship::implement-scope-check",
+		"ship::reconcile",
+	]);
+
 	// Need architecture-review contract too
 	const allContracts = contractsFromKinds([...BUILTIN_CONTRACTS, ["architecture-review", "architecture-review"]]);
 
@@ -401,6 +434,12 @@ describe("equivalence — built-in workflows", () => {
 				// deriveOutcomes skips them on `stage.run != null` and they have no EXPECTED
 				// bucket. They publish under their own stage name.
 				if (stage.run != null) {
+					if (!SCRIPT_STAGES.has(key)) {
+						it(`${stageName}: script produces stage missing from SCRIPT_STAGES`, () => {
+							expect.fail(`Script produces stage ${key} missing from SCRIPT_STAGES — add it (bucket: script)`);
+						});
+						continue;
+					}
 					it(`${stageName}: script produces stage, no outcome derived`, () => {
 						expect(stage.outcome).toBeUndefined();
 					});
@@ -436,7 +475,7 @@ describe("equivalence — built-in workflows", () => {
 		});
 	}
 
-	it("total produces stages across all workflows = 52 (18 derivable + 14 explicit + 20 script)", () => {
+	it("total produces stages across all workflows = EXPECTED + EXPLICIT + SCRIPT_STAGES (the derived census)", () => {
 		let count = 0;
 		let scriptProduces = 0;
 		for (const w of builtInWorkflows) {
@@ -445,16 +484,17 @@ describe("equivalence — built-in workflows", () => {
 				if (stage.kind === "produces" && stage.run != null) scriptProduces++;
 			}
 		}
-		expect(count).toBe(52);
-		// build::slice-check + build::subplan-check + build::goal + build::plan-cite-check
-		// + build::code-cite-check + build::implement-scope-check + build::scope-quarantine
-		// + build::reconcile
-		// + build::plan-snapshot + build::code-snapshot
-		// + build::plan-demote + build::code-demote
-		// + vet::goal + vet::implement-scope-check + vet::scope-quarantine + vet::reconcile
-		// + ship::goal + ship::plan-cite-check + ship::implement-scope-check
-		// + ship::reconcile
-		expect(scriptProduces).toBe(20);
+		expect(count).toBe(Object.keys(EXPECTED).length + Object.keys(EXPLICIT_OUTCOMES).length + SCRIPT_STAGES.size);
+		expect(scriptProduces).toBe(SCRIPT_STAGES.size);
+	});
+
+	it("every declared census key has a live stage (no stale EXPECTED/EXPLICIT/SCRIPT_STAGES entries)", () => {
+		const live = new Set<string>();
+		for (const w of builtInWorkflows) {
+			for (const stageName of Object.keys(w.stages)) live.add(`${w.name}::${stageName}`);
+		}
+		for (const key of [...Object.keys(EXPECTED), ...Object.keys(EXPLICIT_OUTCOMES), ...SCRIPT_STAGES])
+			expect(live.has(key), `stale declared entry ${key}`).toBe(true);
 	});
 });
 

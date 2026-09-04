@@ -16,8 +16,12 @@ export {
 	planAuthoredRisks,
 	planGatePasses,
 	rulingEffectivePass,
+	type SeedOnlyVerdict,
 	SHIP_DIMENSIONS,
 	SLICE_DIMENSIONS,
+	seedLiftStuck,
+	seedOnlyCiteFail,
+	seedOnlyFindings,
 	shipGatePasses,
 	sliceGatePasses,
 	subplanGatePasses,
@@ -73,6 +77,6 @@ export {
 	VERDICT_PASS_SCORE,
 	writeStructureVerdict,
 } from "./shared.js";
-export { sliceStructureCheck, subplanCoverageCheck } from "./slice-checks.js";
+export { sliceSeedLift, sliceStructureCheck, subplanCoverageCheck } from "./slice-checks.js";
 export { SLICE_DESIGN_FANOUT, SYNTH_CLUSTER_FANOUT } from "./slices.js";
 export { verdictOutcome } from "./verdict-outcome.js";

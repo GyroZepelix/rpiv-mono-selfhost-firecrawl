@@ -57,6 +57,7 @@ import {
 	shipGatePasses,
 	shipVerdictOutcome,
 import { codeGatePasses, planGatePasses, sliceGatePasses, unitFailedDimensions } from "./built-ins/gates.js";
+import { seedOnlyFindings } from "./built-ins/index.js";
 } from "./built-in-workflows.js";
 import { deriveOutcomes } from "./outcome-derivation.js";
 import { BUNDLED_SKILLS_DIR } from "./paths.js";
@@ -2589,6 +2590,53 @@ describe("build slice-check (deterministic floor)", () => {
 	};
 	const TWO_SLICES =
 		"  - { n: 1, title: A, deps: [], covers: [c1] }\n  - { n: 2, title: B, deps: [1], covers: [c2] }\n";
+	const THREE_SLICES =
+		"  - { n: 1, title: A, deps: [], covers: [c1] }\n  - { n: 2, title: B, deps: [1], covers: [c2] }\n  - { n: 3, title: C, deps: [1], covers: [c1] }\n";
+	const SHAPE3 = {
+		slices: [
+			{ n: 1, title: "A", deps: [], covers: ["c1"] },
+			{ n: 2, title: "B", deps: [1], covers: ["c2"] },
+			{ n: 3, title: "C", deps: [1], covers: ["c1"] },
+		],
+		coverage: [
+			{ id: "c1", brief: "one" },
+			{ id: "c2", brief: "two" },
+		],
+	};
+	// A map whose every slice carries a `Draws on:` line — the lift's target.
+	const seededMap = (opts: { sliceLines: string; coverage?: string; count: number; drawsOn?: string[] }) =>
+		`---\nstatus: ready\nslice_count: ${opts.count}\n${opts.coverage ?? ""}slices:\n${opts.sliceLines}---\n${Array.from({ length: opts.count }, (_, i) => `## Slice ${i + 1}: S${i + 1}\n**Draws on:** ${opts.drawsOn?.[i] ?? "src/base.ts:1"}`).join("\n")}\n`;
+	// The seed-lift stage's run function — the deterministic arm the seed-only
+	// branch of the slice-grade route dispatches (the structureRun twin).
+	const liftRun = () => {
+		const stage = findWorkflow("build").stages["slice-seed-lift"];
+		if (!stage?.run) throw new Error("build slice-seed-lift stage has no run function");
+		return stage.run as (ctx: { cwd: string; input?: undefined; state: RunView }) => {
+			artifacts: readonly { handle: { kind: string; path: string } }[];
+			data: {
+				lifted: { requires: string; slice?: number; reason?: string }[];
+				skipped: { requires: string; slice?: number; reason?: string }[];
+			};
+		};
+	};
+	// A seed-only design-readiness fail carrying arbitrary findings.
+	const seedVerdict = (findings: Record<string, unknown>[], artifact: string, ts = T_VERDICT): Output =>
+		({
+			artifacts: [],
+			kind: "json",
+			meta: { ts },
+			data: {
+				dimension: "design-readiness",
+				pass: false,
+				severity: "medium",
+				remedy: "cite",
+				artifact,
+				findings: findings.map((f) => ({ detail: "under-cited", ...f })),
+			},
+		}) as unknown as Output;
+	// A slice-seed-lift channel row (only `meta.ts` is load-bearing).
+	const liftEntry = (ts: string, data: Record<string, unknown> = {}): Output =>
+		({ artifacts: [], kind: "json", meta: { ts }, data }) as unknown as Output;
 
 	it("stamps citeDischarged when a cite-only fail's demanded seeds landed on an unchanged shape", () => {
 		mkdirSync(join(tmpDir, "src"), { recursive: true });
@@ -2704,6 +2752,322 @@ describe("build slice-check (deterministic floor)", () => {
 		}).data;
 		expect(data.pass).toBe(true);
 		expect(data.citeDischarged).toBeUndefined();
+	});
+
+	it("the discharge witness fires on the lift-channel entry alone (no post-verdict slices round)", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/seed.ts"), Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/round1.md";
+		// The post-lift map: the demanded seed landed on the judged map, in place.
+		const lifted = {
+			...write(rel, `${map({ count: 2, coverage: COV, sliceLines: TWO_SLICES })}**Draws on:** src/seed.ts:20\n`),
+			data: SHAPE,
+			meta: { ts: T_JUDGED },
+		};
+		const data = structureRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [lifted],
+					"slice-verdicts": [citeFailVerdict({ requires: "src/seed.ts:18-25" })],
+					"slice-seed-lift": [liftEntry(T_FIXED)],
+				},
+			} as unknown as RunView,
+		}).data;
+		expect(data.pass).toBe(true);
+		expect(data.citeDischarged).toBe("round1.md");
+	});
+
+	it("stamps citeDischarged beside one ADVISORY finding (the stamp floor matches the routing floor)", () => {
+		// Red today: the literal-zero withholding gate let a single ADVISORY
+		// resolver limitation — here a bare out-of-range drift cite in prose —
+		// zero the stamp and buy the re-grade anyway. The advisory floor rides
+		// through, mirroring the severity floor `allDimensionsPass` already
+		// applies to the same channel (an advisory-only verdict rates `low`).
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/seed.ts"), Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/round1.md";
+		const judged = {
+			...write(
+				rel,
+				`${map({ count: 2, coverage: COV, sliceLines: TWO_SLICES })}**Draws on:** src/seed.ts:20\nNote: the earlier anchor src/seed.ts:60 has drifted.\n`,
+			),
+			data: SHAPE,
+			meta: { ts: T_JUDGED },
+		};
+		const data = structureRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [citeFailVerdict({ requires: "src/seed.ts:18-25" })],
+					"slice-seed-lift": [liftEntry(T_FIXED)],
+				},
+			} as unknown as RunView,
+		}).data;
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("low");
+		expect(Array.isArray(data.findings) && data.findings.length === 1).toBe(true);
+		expect(data.citeDischarged).toBe("round1.md");
+	});
+
+	it("withholds citeDischarged when a finding is blocking (a dropped coverage unit)", () => {
+		// Fail-closed arm: a BLOCKING structural finding — a coverage unit the
+		// map's own frozen first cut claims but no slice covers — still withholds
+		// the stamp; only the advisory tier rides through.
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/seed.ts"), Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/round1.md";
+		const judged = {
+			...write(rel, `${map({ count: 2, coverage: COV, sliceLines: TWO_SLICES })}**Draws on:** src/seed.ts:20\n`),
+			data: SHAPE,
+			meta: { ts: T_JUDGED },
+		};
+		// Drop c2 from every slice's covers — the frozen first cut still claims it.
+		writeFileSync(
+			join(tmpDir, rel),
+			map({
+				count: 2,
+				coverage: COV,
+				sliceLines:
+					"  - { n: 1, title: A, deps: [], covers: [c1] }\n  - { n: 2, title: B, deps: [1], covers: [c1] }\n",
+			}) + "**Draws on:** src/seed.ts:20\n",
+		);
+		const data = structureRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [citeFailVerdict({ requires: "src/seed.ts:18-25" })],
+					"slice-seed-lift": [liftEntry(T_FIXED)],
+				},
+			} as unknown as RunView,
+		}).data;
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("high");
+		expect(data.citeDischarged).toBeUndefined();
+	});
+
+	it("a revision note's arrow pair neither flags nor withholds: the stale old half is quoted (red today)", () => {
+		// Red today: `verifyCitations` honored fences but not arrow pairs, so the
+		// note's stale old half (line 60 of a 50-line file) read as a live
+		// citation, flagged out-of-range advisory, and zeroed the stamp. Both
+		// halves of a sanctioned `old→new` pair are quotes — skipped BEFORE
+		// seen-key bookkeeping — while the live `Draws on:` occurrence of the
+		// same cite still verifies below.
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/seed.ts"), Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/round1.md";
+		const judged = {
+			...write(
+				rel,
+				`${map({ count: 2, coverage: COV, sliceLines: TWO_SLICES })}> Re-slice note: refreshed \`src/seed.ts:60→src/seed.ts:20\`.\n**Draws on:** src/seed.ts:20\n`,
+			),
+			data: SHAPE,
+			meta: { ts: T_JUDGED },
+		};
+		const data = structureRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [citeFailVerdict({ requires: "src/seed.ts:18-25" })],
+					"slice-seed-lift": [liftEntry(T_FIXED)],
+				},
+			} as unknown as RunView,
+		}).data;
+		expect(data.pass).toBe(true);
+		expect(data.findings).toEqual([]);
+		expect(data.citeDischarged).toBe("round1.md");
+	});
+
+	it("sliceSeedLift appends both demanded seeds to the named Draws on lines and publishes the amended map in place", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/base.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		writeFileSync(join(tmpDir, "src/alpha.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		writeFileSync(join(tmpDir, "src/beta.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/twolift.md";
+		const body = seededMap({ count: 3, coverage: COV, sliceLines: THREE_SLICES });
+		const judged = { ...write(rel, body), data: SHAPE3, meta: { ts: T_JUDGED } };
+		const out = liftRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [
+						seedVerdict(
+							[
+								{ where: "## Slice 2", requires: "src/alpha.ts:18-25" },
+								{ where: "## Slice 3", requires: "src/beta.ts:30-40" },
+							],
+							rel,
+						),
+					],
+				},
+			} as unknown as RunView,
+		});
+		expect(out.data.lifted).toEqual([
+			{ requires: "src/alpha.ts:18-25", slice: 2 },
+			{ requires: "src/beta.ts:30-40", slice: 3 },
+		]);
+		expect(out.data.skipped).toEqual([]);
+		const amended = readFileSync(join(tmpDir, rel), "utf-8");
+		expect(amended).toContain("**Draws on:** src/base.ts:1, src/alpha.ts:18-25");
+		expect(amended).toContain("**Draws on:** src/base.ts:1, src/beta.ts:30-40");
+		// every other byte identical (frontmatter + untouched slices + headings)
+		expect(amended.replace(", src/alpha.ts:18-25", "").replace(", src/beta.ts:30-40", "")).toBe(body);
+		expect(out.artifacts[0]?.handle).toEqual({ kind: "fs", path: rel });
+	});
+
+	it("does not re-append an already-satisfied seed (dedup on the evolving body)", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/alpha.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/dedup.md";
+		const body = seededMap({
+			count: 2,
+			coverage: COV,
+			sliceLines: TWO_SLICES,
+			drawsOn: ["src/alpha.ts:1", "src/alpha.ts:7"],
+		});
+		const judged = { ...write(rel, body), data: SHAPE, meta: { ts: T_JUDGED } };
+		const out = liftRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [seedVerdict([{ where: "## Slice 2", requires: "src/alpha.ts:18-25" }], rel)],
+				},
+			} as unknown as RunView,
+		});
+		expect(out.data.lifted).toEqual([]);
+		expect(out.data.skipped).toEqual([]);
+		expect(readFileSync(join(tmpDir, rel), "utf-8")).toBe(body);
+	});
+
+	it("records a seed whose where names no slice heading as skipped and leaves the map unchanged", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/alpha.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/nosliceheading.md";
+		const body = seededMap({ count: 2, coverage: COV, sliceLines: TWO_SLICES });
+		const judged = { ...write(rel, body), data: SHAPE, meta: { ts: T_JUDGED } };
+		const out = liftRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [
+						seedVerdict([{ where: "prose: the footing is thin", requires: "src/alpha.ts:18-25" }], rel),
+					],
+				},
+			} as unknown as RunView,
+		});
+		expect(out.data.skipped).toEqual([{ requires: "src/alpha.ts:18-25", reason: "no-slice-heading" }]);
+		expect(out.data.lifted).toEqual([]);
+		expect(readFileSync(join(tmpDir, rel), "utf-8")).toBe(body);
+	});
+
+	it("records no-draws-on-line when the named section carries no Draws on line", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/base.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		writeFileSync(join(tmpDir, "src/alpha.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		const rel = ".rpiv/artifacts/slices/nodrawson.md";
+		const body =
+			"---\nstatus: ready\nslice_count: 2\n" +
+			COV +
+			"slices:\n" +
+			TWO_SLICES +
+			"---\n## Slice 1: S1\n**Draws on:** src/base.ts:1\n## Slice 2: S2\n**Scope:** only a scope line\n";
+		const judged = { ...write(rel, body), data: SHAPE, meta: { ts: T_JUDGED } };
+		const out = liftRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [seedVerdict([{ where: "## Slice 2", requires: "src/alpha.ts:18-25" }], rel)],
+				},
+			} as unknown as RunView,
+		});
+		expect(out.data.skipped).toEqual([{ requires: "src/alpha.ts:18-25", slice: 2, reason: "no-draws-on-line" }]);
+		expect(readFileSync(join(tmpDir, rel), "utf-8")).toBe(body);
+	});
+
+	it("halts loudly when the latest verdict is not seed-only (misroute guard)", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		const rel = ".rpiv/artifacts/slices/misroute.md";
+		const judged = {
+			...write(rel, map({ count: 2, coverage: COV, sliceLines: TWO_SLICES })),
+			data: SHAPE,
+			meta: { ts: T_JUDGED },
+		};
+		const structural = seedVerdict([{ where: "## Slice 1", detail: "bundles two decisions" }], rel);
+		(structural.data as { remedy?: string }).remedy = undefined;
+		expect(() =>
+			liftRun()({
+				cwd: tmpDir,
+				input: undefined,
+				state: { named: { slices: [judged], "slice-verdicts": [structural] } } as unknown as RunView,
+			}),
+		).toThrow(/is not a seed-only cite fail/);
+	});
+
+	it("the f9a6 end-to-end shape: lift → slice-check stamp → slice-design (no fix session, no re-grade)", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		for (const f of ["base", "alpha", "beta"]) {
+			writeFileSync(join(tmpDir, `src/${f}.ts`), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		}
+		const rel = ".rpiv/artifacts/slices/round1.md";
+		const body = seededMap({ count: 3, coverage: COV, sliceLines: THREE_SLICES });
+		const judged = { ...write(rel, body), data: SHAPE3, meta: { ts: T_JUDGED } };
+		const verdict = seedVerdict(
+			[
+				{ where: "## Slice 2", requires: "src/alpha.ts:18-25" },
+				{ where: "## Slice 3", requires: "src/beta.ts:30-40" },
+			],
+			rel,
+		);
+		const liftOut = liftRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: { named: { slices: [judged], "slice-verdicts": [verdict] } } as unknown as RunView,
+		});
+		expect(liftOut.data.lifted).toHaveLength(2);
+		const checkData = structureRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-verdicts": [verdict],
+					"slice-seed-lift": [liftEntry(T_FIXED)],
+				},
+			} as unknown as RunView,
+		}).data;
+		expect(checkData.pass).toBe(true);
+		expect(checkData.citeDischarged).toBe("round1.md");
+		// The gate folds green on the stamp: the slice-check edge routes straight
+		// to design — the fix arm and the grade panel are both skipped.
+		const edge = findWorkflow("build").edges["slice-check"];
+		if (typeof edge !== "function") throw new Error("build slice-check edge is not a function");
+		const next = (edge as EdgeFn)({
+			output: undefined,
+			state: {
+				named: {
+					slices: [judged],
+					"slice-check": [{ artifacts: [], kind: "json", meta: {}, data: checkData } as unknown as Output],
+					"slice-verdicts": [verdict],
+					"slice-seed-lift": [liftEntry(T_FIXED)],
+				},
+			} as unknown as RunView,
+		});
+		expect(next).toBe("slice-design");
 	});
 
 	// Fence-aware citation floor — a `path:line` shape inside a fenced code block is
@@ -3068,6 +3432,52 @@ describe("build slice-check (deterministic floor)", () => {
 		const sliceFix = findWorkflow("build").stages["slice-fix"];
 		expect(sliceFix?.reads).toContainEqual(fanin("slice-check"));
 	});
+
+	it("slice-seed-lift reads slices + the slice-verdicts fanin and re-enters slice-check via a plain edge", () => {
+		const lift = findWorkflow("build").stages["slice-seed-lift"];
+		expect(lift?.reads).toEqual(["slices", fanin("slice-verdicts")]);
+		expect(findWorkflow("build").edges["slice-seed-lift"]).toBe("slice-check");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Design-readiness corpus replay — the committed census of design-readiness
+// fail shapes, extracted once from the gitignored run trails (see the
+// fixture's _meta for the population/derivation rules). Pins the census
+// counts and the fail-closed direction of the seed-only classification.
+// ---------------------------------------------------------------------------
+describe("design-readiness corpus replay (trail-derived shapes)", () => {
+	type CorpusRow = {
+		class: string;
+		pass: boolean;
+		remedy?: string;
+		findings: { requires?: string }[];
+	};
+	const corpus = JSON.parse(
+		readFileSync(
+			fileURLToPath(new URL("./built-ins/__fixtures__/design-readiness-corpus.json", import.meta.url)),
+			"utf-8",
+		),
+	) as { _meta: Record<string, unknown>; rows: CorpusRow[] };
+
+	it("carries the ledger census: 19 fail shapes, 16 bookkeeping, 3 structural", () => {
+		expect(corpus.rows).toHaveLength(19);
+		expect(corpus.rows.filter((r) => r.class === "bookkeeping")).toHaveLength(16);
+		expect(corpus.rows.filter((r) => r.class === "structural")).toHaveLength(3);
+		expect(corpus.rows.every((r) => r.pass === false)).toBe(true);
+	});
+
+	it("classifies exactly the marker-emitted bookkeeping shapes seed-only; structural never", () => {
+		const seedOnly = corpus.rows.filter((r) => seedOnlyFindings(r));
+		expect(seedOnly).toHaveLength(8);
+		expect(seedOnly.every((r) => r.class === "bookkeeping" && r.remedy === "cite")).toBe(true);
+		// fail-closed: a structural demand (a re-cut) never routes to the lift
+		expect(corpus.rows.filter((r) => r.class === "structural").every((r) => !seedOnlyFindings(r))).toBe(true);
+		// the marker-omitted bookkeeping half carries no `requires` on the trail
+		// and classifies not seed-only today — the grade skill's requires
+		// emission contract owns that residual, not the engine
+		expect(corpus.rows.filter((r) => r.class === "bookkeeping" && !seedOnlyFindings(r))).toHaveLength(8);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -3327,8 +3737,8 @@ describe("build audit-drop fixes", () => {
 			).toBe("slice-grade");
 		});
 
-		it("slice-check declares slice-design and slice-grade as its only targets", () => {
-			expect([...(edge("slice-check").targets ?? [])].sort()).toEqual(["slice-design", "slice-grade"]);
+		it("slice-check declares slice-design, slice-fix (stuck lifts), and slice-grade as its only targets", () => {
+			expect([...(edge("slice-check").targets ?? [])].sort()).toEqual(["slice-design", "slice-fix", "slice-grade"]);
 		});
 
 		it("plan-cite-check skips straight to code when every dimension + risk flag already passes", () => {
@@ -6225,6 +6635,139 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 					],
 				}),
 			).toBe("slice-grade");
+		});
+	});
+
+	describe("seed-only cite-remedy routing (three-way grade edge / stuck check edge)", () => {
+		const T_JUDGED2 = "2026-09-03T11:21:26.000Z";
+		const T_VERDICT2 = "2026-09-03T11:28:03.000Z";
+		const T_LIFT = "2026-09-03T11:31:00.000Z";
+		const T_RESLICE = "2026-09-03T11:35:04.000Z";
+		const MAP = ".rpiv/artifacts/slices/s2.md";
+		const tsVerdict = (pass: boolean, extra: Record<string, unknown> = {}, ts = T_VERDICT2): Output =>
+			({
+				artifacts: [],
+				kind: "json",
+				meta: { ts },
+				data: { dimension: "design-readiness", pass, severity: pass ? "none" : "medium", ...extra },
+			}) as unknown as Output;
+		const tsChan = (rel: string, data: Record<string, unknown>, ts: string): Output =>
+			({ artifacts: [{ handle: fsHandle(rel) }], data, kind: "", meta: { ts } }) as unknown as Output;
+		const tsLift = (ts: string): Output =>
+			({ artifacts: [], kind: "json", meta: { ts }, data: { lifted: [], skipped: [] } }) as unknown as Output;
+		const SEEDS = [
+			{ detail: "under-cited", where: "## Slice 2", requires: "src/alpha.ts:18-25" },
+			{ detail: "under-cited", where: "## Slice 3", requires: "src/beta.ts:30-40" },
+		];
+		const STRUCTURE_PASS = { "slice-check": [verdict("structure", true)] };
+
+		it("a seed-only fail (remedy cite) routes slice-grade to slice-seed-lift, never slice-fix", () => {
+			expect(
+				route("slice-grade", {
+					slices: [chan(MAP, { slice_count: 2 })],
+					...STRUCTURE_PASS,
+					"slice-verdicts": [tsVerdict(false, { remedy: "cite", findings: SEEDS })],
+				}),
+			).toBe("slice-seed-lift");
+		});
+
+		it("a remedy-absent seed-only fail routes the same way (the omitted-marker leak, closed engine-side)", () => {
+			expect(
+				route("slice-grade", {
+					slices: [chan(MAP, { slice_count: 2 })],
+					...STRUCTURE_PASS,
+					"slice-verdicts": [tsVerdict(false, { findings: SEEDS })],
+				}),
+			).toBe("slice-seed-lift");
+		});
+
+		it("a verdict mixing one finding without requires routes to slice-fix (today's path preserved)", () => {
+			expect(
+				route("slice-grade", {
+					slices: [chan(MAP, { slice_count: 2 })],
+					...STRUCTURE_PASS,
+					"slice-verdicts": [
+						tsVerdict(false, {
+							remedy: "cite",
+							findings: [{ detail: "bundles two decisions", where: "## Slice 1" }, ...SEEDS],
+						}),
+					],
+				}),
+			).toBe("slice-fix");
+		});
+
+		it("a lone no-requires finding routes to slice-fix the same way", () => {
+			expect(
+				route("slice-grade", {
+					slices: [chan(MAP, { slice_count: 2 })],
+					...STRUCTURE_PASS,
+					"slice-verdicts": [
+						tsVerdict(false, { findings: [{ detail: "an epic spanning two verticals", where: "## Slice 1" }] }),
+					],
+				}),
+			).toBe("slice-fix");
+		});
+
+		it("after a lift publication + clean structure stamp, slice-check routes straight to slice-design (no re-grade)", () => {
+			expect(
+				route("slice-check", {
+					slices: [chan(MAP, { slice_count: 2 })],
+					"slice-check": [verdict("structure", true, { citeDischarged: "s2.md" })],
+					"slice-verdicts": [tsVerdict(false, { remedy: "cite", findings: SEEDS, artifact: MAP })],
+					"slice-seed-lift": [tsLift(T_LIFT)],
+				}),
+			).toBe("slice-design");
+		});
+
+		it("a lift that left the gate red is stuck: slice-check routes to slice-fix, not another grade", () => {
+			expect(
+				route("slice-check", {
+					slices: [tsChan(MAP, { slice_count: 2 }, T_JUDGED2)],
+					"slice-check": [verdict("structure", true)], // no stamp — a seed was skipped
+					"slice-verdicts": [tsVerdict(false, { remedy: "cite", findings: SEEDS, artifact: MAP })],
+					"slice-seed-lift": [tsLift(T_LIFT)],
+				}),
+			).toBe("slice-fix");
+		});
+
+		it("a slices publication postdating the lift un-sticks the loop: slice-check routes to slice-grade", () => {
+			expect(
+				route("slice-check", {
+					slices: [
+						tsChan(MAP, { slice_count: 2 }, T_JUDGED2),
+						tsChan(".rpiv/artifacts/slices/s3.md", { slice_count: 2 }, T_RESLICE),
+					],
+					"slice-check": [verdict("structure", true)],
+					"slice-verdicts": [tsVerdict(false, { remedy: "cite", findings: SEEDS, artifact: MAP })],
+					"slice-seed-lift": [tsLift(T_LIFT)],
+				}),
+			).toBe("slice-grade");
+		});
+
+		it("a dead design-readiness unit takes the fix arm with the unit-failed note, AHEAD of the seed-only arm", () => {
+			// Upstream composition: a dimension-bearing sentinel is never a
+			// classification candidate — there is no verdict to classify — so the
+			// unit-failed arm fires before the seed-only check even with a prior
+			// seed-only verdict on the channel; the note is the observable that
+			// distinguishes the arm order (the seed-only fallthrough reaches the
+			// same target WITHOUT a note).
+			const named = {
+				slices: [chan(MAP, { slice_count: 2 })],
+				...STRUCTURE_PASS,
+				"slice-verdicts": [
+					tsVerdict(false, { remedy: "cite", findings: SEEDS }),
+					{
+						artifacts: [],
+						kind: "failed",
+						meta: { ts: T_LIFT },
+						data: { reason: "grade produced no verdict", dimension: "design-readiness" },
+					} as unknown as Output,
+				],
+			};
+			expect(route("slice-grade", named)).toBe("slice-fix");
+			expect(takeRouteNote(edge("slice-grade"))).toBe(
+				"unit-failed: design-readiness produced no verdict after one re-dispatch",
+			);
 		});
 	});
 
