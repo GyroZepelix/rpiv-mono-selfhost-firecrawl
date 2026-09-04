@@ -22,7 +22,7 @@ import {
 	SLICE_DIMENSIONS,
 } from "./gates.js";
 import { isSurgicalFix, priorArtifact } from "./priors.js";
-import { latestFsArtifact } from "./shared.js";
+import { haltPreflight, latestFsArtifact } from "./shared.js";
 
 /**
  * The dimension-scoped artifact flags every panel body composes — ONE
@@ -54,13 +54,24 @@ const dimensionArtifactFlags = (state: RunView): { contextFlag: string; goalFlag
  * duplicates (the single most expensive part of the most expensive dimension)
  * and spend its spot-check budget on claim-vs-code semantics — the one thing
  * the floor cannot judge. A findings-bearing verdict additionally carries the
- * advisory leads the grader folds into its sample. Empty when the channel has
- * no fs verdict (a workflow without the floor simply emits no flag).
+ * advisory leads the grader folds into its sample. Required, never degraded:
+ * a panel configured over a cite channel whose channel carries no fs verdict
+ * throws the halt preflight — the built-in graphs run the floor before every
+ * panel dispatch, so an absent verdict is an integrity break. A panel with no
+ * `citeChannel` (the slice gate, a user workflow without a floor) composes no
+ * flag.
  */
 const citeCheckFlag = (state: RunView, citeChannel: string | undefined): string => {
 	if (citeChannel === undefined) return "";
 	const doc = latestFsArtifact(state, citeChannel);
-	return doc?.handle.kind === "fs" ? ` --cite-check ${handleToString(doc.handle)}` : "";
+	if (doc?.handle.kind !== "fs") {
+		throw haltPreflight(
+			"grade",
+			"grade: no citation-floor verdict to thread as --cite-check",
+			`grade: the '${citeChannel}' channel carries no fs verdict — the deterministic citation floor must run before the correctness unit dispatches (a panel configured over a cite channel requires it)`,
+		);
+	}
+	return ` --cite-check ${handleToString(doc.handle)}`;
 };
 
 /**
@@ -90,14 +101,11 @@ const citeCheckFlag = (state: RunView, citeChannel: string | undefined): string 
  * (and the slice gate's `design-readiness`, which never grades fit or
  * goal-completeness) gets the bare flags.
  *
- * A CONFIRM panel (`confirm: true`) additionally threads each still-blocking
- * dimension's latest verdict in as `--prior`: the confirming grader must
- * adjudicate the prior round's findings — uphold or refute each with cited
- * evidence — instead of silently out-voting them (a blind second opinion once
- * rationalized past a checkable fact and its pass overwrote a correct fail at
- * the latest-per-dimension fold). Only PENDING dimensions get the flag: in the
- * degenerate full-roster fallback a carried passing verdict has nothing to
- * adjudicate, and a first grade has no prior at all.
+ * `--prior` threads a dimension's latest fresh verdict when that dimension is
+ * still pending (a confirm or re-grade of a blocking prior — the grader must
+ * adjudicate the prior findings, not out-vote them) and always on correctness
+ * (its re-grades scope to the prior). A carried passing prior on any other
+ * dimension is not re-adjudicated. Round 1 emits no flag.
  *
  * Every panel wires `haltWhenAllFailed: true`: a generation in which EVERY
  * dispatched dimension unit failed is a dead panel — nothing was collected, so
@@ -150,7 +158,7 @@ const gradePanelFanout = (
 				isSurgicalFix(state, priorChannel, cwd, target, latest, pending, risks);
 			const priorPresent = priorChannel !== undefined && priorArtifact(state, priorChannel) !== undefined;
 			const priorFlag = (d: string): string => {
-				if (!confirm || !pending.includes(d)) return "";
+				if (d !== "correctness" && !pending.includes(d)) return "";
 				const handle = latest.get(d)?.artifacts.find((a) => a.handle.kind === "fs")?.handle;
 				return handle ? ` --prior ${handleToString(handle)}` : "";
 			};
@@ -232,7 +240,8 @@ export const SHIP_DIMENSION_FANOUT = fanout({
 		// The shared flag-composition site — the twins compose it rather than
 		// mirroring it (dimension keying below stays ship's own).
 		const { contextFlag, goalFlag, acceptanceFlag } = dimensionArtifactFlags(state);
-		// The floor's verdict threads whenever it exists — clean settles
+		// The floor's verdict is REQUIRED here — citeCheckFlag fails closed when
+		// the configured channel carries no fs verdict; a clean verdict settles
 		// resolution, findings carry the advisory leads (see citeCheckFlag).
 		const citeFlag = citeCheckFlag(state, "plan-cite-check");
 		// Tier-independent roster: SHIP_DIMENSIONS verbatim — never gateRoster(gateTier(...)).

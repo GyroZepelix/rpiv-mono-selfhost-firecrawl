@@ -30,6 +30,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createMockSessionChain, mockAssistantMessage } from "@juicesharp/rpiv-test-utils";
 import {
 	acts,
@@ -1529,6 +1530,7 @@ describe("build plan gate grade panel (--context threading)", () => {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
 					research: [out(".rpiv/artifacts/research/r.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 				},
 			} as unknown as RunView,
 		});
@@ -1568,12 +1570,12 @@ describe("build plan gate grade panel (--context threading)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// build confirm panels — the second judgment on a blocking dimension runs in
-// confirm mode: the unit carries the blocking verdict as --prior so the grade
-// skill must adjudicate the prior round's findings (uphold / refute with cited
-// evidence) instead of silently out-voting them at the latest-per-dimension
-// fold. Grade panels never thread --prior; neither does a confirm unit for a
-// dimension with nothing blocking (first grade, stale verdict, carried pass).
+// build panels' --prior threading — a pending dimension (confirm or re-grade
+// of a blocking prior) threads its latest fresh verdict as --prior so the
+// grader adjudicates the prior findings instead of out-voting them; the
+// correctness arm threads its prior whenever one is fresh (its re-grades scope
+// to it). Carried passing priors on other dimensions, round 1, and stale
+// verdicts stay flagless.
 // ---------------------------------------------------------------------------
 
 describe("build confirm panels (--prior adjudication threading)", () => {
@@ -1615,6 +1617,7 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					"plan-verdicts": [
 						...OTHER_DIMS.map(passing),
 						failingCorrectness(".rpiv/artifacts/verdicts/p__correctness__round-1.json"),
@@ -1634,6 +1637,7 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					"plan-verdicts": [
 						...OTHER_DIMS.map(passing),
 						failingCorrectness(".rpiv/artifacts/verdicts/p__correctness__round-1.json"),
@@ -1653,6 +1657,7 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					goal: [out(".rpiv/artifacts/goal/goal.md")],
 					"plan-verdicts": [
 						...OTHER_DIMS.map(passing),
@@ -1672,6 +1677,7 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"code-cite-check": [out(".rpiv/artifacts/verdicts/code-cite-check__p.json")],
 					"code-verdicts": [
 						...OTHER_DIMS.map(passing),
 						failingCorrectness(".rpiv/artifacts/verdicts/p__correctness__code-round-1.json"),
@@ -1683,13 +1689,14 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 		expect(units[0]?.prompt).toContain("--prior .rpiv/artifacts/verdicts/p__correctness__code-round-1.json");
 	});
 
-	it("grade panels never thread --prior, even over the same failing verdicts", async () => {
+	it("grade panels thread --prior on round ≥ 2 (the re-grade dispatch adjudicates too)", async () => {
 		const units = await loopOf("plan-grade").units({
 			cwd: "/repo",
 			artifact: undefined,
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					"plan-verdicts": [
 						...OTHER_DIMS.map(passing),
 						failingCorrectness(".rpiv/artifacts/verdicts/p__correctness__round-1.json"),
@@ -1697,7 +1704,10 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 				},
 			} as unknown as RunView,
 		});
-		expect(units.every((u) => !u.prompt.includes("--prior"))).toBe(true);
+		// Only correctness is pending, and its fresh failing verdict threads —
+		// the re-grade grader adjudicates the prior round like a confirm does.
+		expect(units.map((u) => u.label)).toEqual(["correctness"]);
+		expect(units[0]?.prompt).toContain("--prior .rpiv/artifacts/verdicts/p__correctness__round-1.json");
 	});
 
 	it("a stale verdict (regenerated artifact) yields no --prior — nothing fresh to adjudicate", async () => {
@@ -1714,6 +1724,7 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					"plan-verdicts": [stale],
 				},
 			} as unknown as RunView,
@@ -1722,19 +1733,23 @@ describe("build confirm panels (--prior adjudication threading)", () => {
 		expect(units.every((u) => !u.prompt.includes("--prior"))).toBe(true); // ...with no prior
 	});
 
-	it("the degenerate all-passing fallback re-grades the roster without --prior (a carried pass has nothing to adjudicate)", async () => {
+	it("the degenerate all-passing fallback threads --prior on correctness only (carried passes are not re-adjudicated)", async () => {
 		const units = await loopOf("plan-confirm").units({
 			cwd: "/repo",
 			artifact: undefined,
 			state: {
 				named: {
 					plans: [out(".rpiv/artifacts/plans/p.md")],
+					"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					"plan-verdicts": [...OTHER_DIMS.map(passing), passing("correctness")],
 				},
 			} as unknown as RunView,
 		});
-		expect(units.length).toBeGreaterThan(0);
-		expect(units.every((u) => !u.prompt.includes("--prior"))).toBe(true);
+		// Nothing pending ⇒ the full roster falls back in; only correctness carries
+		// its prior (its re-grade scopes to it) — a carried pass elsewhere is not
+		// re-adjudicated.
+		expect(units.length).toBe(OTHER_DIMS.length + 1);
+		expect(units.filter((u) => u.prompt.includes("--prior")).map((u) => u.label)).toEqual(["correctness"]);
 	});
 });
 
@@ -1781,6 +1796,7 @@ describe("ship grade panel (tier-independent roster bypass)", () => {
 						plans: [dataOut(PLAN, { phase_count: 1 })],
 						research: [out(".rpiv/artifacts/research/r.md")],
 						goal: [out(".rpiv/artifacts/goal/goal.md")],
+						"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					},
 				} as unknown as RunView,
 			});
@@ -1796,6 +1812,7 @@ describe("ship grade panel (tier-independent roster bypass)", () => {
 						plans: [dataOut(PLAN, { phase_count: 1 })],
 						research: [out(".rpiv/artifacts/research/r.md")],
 						goal: [out(".rpiv/artifacts/goal/goal.md")],
+						"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					},
 				} as unknown as RunView,
 			});
@@ -1853,7 +1870,7 @@ describe("ship grade panel (tier-independent roster bypass)", () => {
 			);
 		});
 
-		it("threads --cite-check on a CLEAN floor verdict too (resolution settled); omits it only when the channel is absent", async () => {
+		it("threads --cite-check on a CLEAN floor verdict too (resolution settled); halts when the channel is absent", async () => {
 			// A clean verdict is load-bearing evidence: it settles citation
 			// RESOLUTION, so the correctness grader skips the mechanical
 			// re-resolution and spot-checks semantics only (citeCheckFlag).
@@ -1879,12 +1896,16 @@ describe("ship grade panel (tier-independent roster bypass)", () => {
 			expect(clean.filter((u) => u.label !== "correctness").every((u) => !u.prompt.includes("--cite-check"))).toBe(
 				true,
 			);
-			const absent = await SHIP_DIMENSION_FANOUT.units({
-				cwd: "/repo",
-				artifact: undefined,
-				state: { named: base } as unknown as RunView,
-			});
-			expect(absent.every((u) => !u.prompt.includes("--cite-check"))).toBe(true);
+			// Fail-closed: ship's panel is configured over the cite channel and its
+			// graph guarantees the floor ran first (shipCiteGate) — an absent verdict
+			// is an integrity break, never a flag-less dispatch.
+			expect(() =>
+				SHIP_DIMENSION_FANOUT.units({
+					cwd: "/repo",
+					artifact: undefined,
+					state: { named: base } as unknown as RunView,
+				}),
+			).toThrow(/'plan-cite-check' channel carries no fs verdict/);
 		});
 
 		it("halts the run when every dimension unit of a generation fails (haltWhenAllFailed)", () => {
@@ -2183,6 +2204,7 @@ describe("build goal channel (verbatim brief threading)", () => {
 			plans: [out(".rpiv/artifacts/plans/p.md")],
 			research: [out(".rpiv/artifacts/research/r.md")],
 			goal: [out(".rpiv/artifacts/goal/goal.md")],
+			"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 		});
 		const byLabel = new Map(units.map((u) => [u.label, u.prompt]));
 		expect(byLabel.get("completeness")).toContain("--goal .rpiv/artifacts/goal/goal.md");
@@ -2197,6 +2219,7 @@ describe("build goal channel (verbatim brief threading)", () => {
 		const bare = await gateUnits("plan-grade", {
 			plans: [out(".rpiv/artifacts/plans/p.md")],
 			research: [out(".rpiv/artifacts/research/r.md")],
+			"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 		});
 		expect(bare.every((u) => !u.prompt.includes("--goal"))).toBe(true);
 		const slice = await gateUnits("slice-grade", {
@@ -2268,6 +2291,7 @@ describe("acceptance channel (executable standard threading)", () => {
 	it("threads --acceptance into the completeness unit only (build plan gate)", async () => {
 		const units = await gateUnits("build", "plan-grade", {
 			plans: [out(".rpiv/artifacts/plans/p.md")],
+			"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 			research: [out(".rpiv/artifacts/research/r.md")],
 			goal: [out(".rpiv/artifacts/goal/goal.md")],
 			acceptance: [out(".rpiv/artifacts/acceptance/a.md")],
@@ -2282,6 +2306,7 @@ describe("acceptance channel (executable standard threading)", () => {
 	it("threads --acceptance into the completeness unit only (ship grade)", async () => {
 		const units = await gateUnits("ship", "grade", {
 			plans: [out(".rpiv/artifacts/plans/p.md")],
+			"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 			research: [out(".rpiv/artifacts/research/r.md")],
 			goal: [out(".rpiv/artifacts/goal/goal.md")],
 			acceptance: [out(".rpiv/artifacts/acceptance/a.md")],
@@ -2296,6 +2321,7 @@ describe("acceptance channel (executable standard threading)", () => {
 	it("omits --acceptance when the channel is empty (vet/polish and user workflows carry no flag)", async () => {
 		const units = await gateUnits("build", "plan-grade", {
 			plans: [out(".rpiv/artifacts/plans/p.md")],
+			"plan-cite-check": [out(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 			research: [out(".rpiv/artifacts/research/r.md")],
 			goal: [out(".rpiv/artifacts/goal/goal.md")],
 		});
@@ -2361,10 +2387,9 @@ describe("build cite-check threading (settled-facts seam)", () => {
 		expect(units.find((u) => u.label === "correctness")?.prompt).not.toContain(CITE);
 	});
 
-	it("omits --cite-check when the floor channel is absent (user workflows without the floor)", async () => {
+	it("halts when the configured floor channel is absent (fail-closed, not a flag-less dispatch)", () => {
 		const { "plan-cite-check": _cite, ...bare } = named;
-		const units = await gateUnits("plan-grade", bare);
-		expect(units.every((u) => !u.prompt.includes("--cite-check"))).toBe(true);
+		expect(() => gateUnits("plan-grade", bare)).toThrow(/'plan-cite-check' channel carries no fs verdict/);
 	});
 });
 
@@ -3323,7 +3348,7 @@ describe("build audit-drop fixes", () => {
 			).toBe("plan-grade");
 		});
 
-		it("plan-cite-check routes into plan-grade when a fix left the cite floor red (degenerate)", () => {
+		it("plan-cite-check routes into plan-grade when a fix left ONLY the cite floor red", () => {
 			expect(
 				routeFrom("plan-cite-check", {
 					"plan-cite-check": [dimVerdict("structure", false)],
@@ -3344,6 +3369,15 @@ describe("build audit-drop fixes", () => {
 			).toBe("plan-grade");
 		});
 
+		it("an advisory-only floor verdict is green at this route", () => {
+			expect(
+				routeFrom("plan-cite-check", {
+					"plan-cite-check": [dimVerdict("structure", false, { severity: "low" })],
+					"plan-verdicts": [dimVerdict("completeness", true), dimVerdict("correctness", true)],
+				}),
+			).toBe("code");
+		});
+
 		it("plan-cite-check declares code and plan-grade as its only targets", () => {
 			expect([...(edge("plan-cite-check").targets ?? [])].sort()).toEqual(["code", "plan-grade"]);
 		});
@@ -3360,7 +3394,7 @@ describe("build audit-drop fixes", () => {
 			).toBe("implement");
 		});
 
-		it("code-cite-check routes into code-grade while the code cite floor is red", () => {
+		it("code-cite-check routes into code-grade while the code cite floor is the only red", () => {
 			expect(
 				routeFrom("code-cite-check", {
 					"code-cite-check": [dimVerdict("structure", false)],
@@ -3369,8 +3403,51 @@ describe("build audit-drop fixes", () => {
 			).toBe("code-grade");
 		});
 
-		it("code-cite-check declares implement and code-grade as its only targets", () => {
+		it("code-cite-check declares code-grade and implement as its only targets", () => {
 			expect([...(edge("code-cite-check").targets ?? [])].sort()).toEqual(["code-grade", "implement"]);
+		});
+	});
+
+	// P2e — the cite-check edges collapsed to two-way gates (skip arm + panel
+	// lap; the divert-to-snapshot arm died with its predicate). Run 3212 recorded
+	// four cite-check routing decisions under the OLD three-way edges; the
+	// committed excerpt re-derives from the on-disk trail by its `_meta` rules
+	// and must reproduce all four decisions under the collapsed edges — the
+	// routing semantics the collapse promised to preserve.
+	describe("3212 cite-check routing replay (collapsed two-way edges)", () => {
+		type StageRow = { type?: undefined; stageNumber: number; channel: string; output: Output };
+		type RoutingRow = { type: "routing"; fromStage: string; decision: string };
+		const rows = (
+			JSON.parse(
+				readFileSync(
+					fileURLToPath(new URL("./built-ins/__fixtures__/run-3212-cite-check-routing.json", import.meta.url)),
+					"utf-8",
+				),
+			) as { rows: Array<StageRow | RoutingRow> }
+		).rows;
+		const routeFrom = (stage: string, named: Record<string, unknown>) =>
+			edge(stage)({ output: undefined, state: { named } as unknown as RunView });
+
+		it("folds the excerpted trail rows in order and reproduces every recorded cite-check routing decision", () => {
+			const named: Record<string, Output[]> = {};
+			const decisions: string[] = [];
+			let last = 0;
+			for (const row of rows) {
+				if (row.type === "routing") {
+					decisions.push(row.decision);
+					expect(routeFrom(row.fromStage, named)).toBe(row.decision);
+					continue;
+				}
+				// The excerpt keeps the trail's stage order — a fold that reordered
+				// rows would be deriving a different run.
+				expect(row.stageNumber, "excerpt keeps stageNumbers ascending").toBeGreaterThan(last);
+				last = row.stageNumber;
+				named[row.channel] = (named[row.channel] ?? []).concat(row.output);
+			}
+			// All four recorded decisions under the collapsed edges (plan-grade ×2,
+			// code-grade ×2) — the replay's discharge of the routing-equivalence risk.
+			expect(decisions.filter((d) => d === "plan-grade")).toHaveLength(2);
+			expect(decisions.filter((d) => d === "code-grade")).toHaveLength(2);
 		});
 	});
 });
@@ -3558,6 +3635,7 @@ describe("plan/code gate risk-ruling evidence + verify-at-implement duty (phase 
 			expect(
 				await gradeLabels("plan-grade", {
 					plans: [chan(PLAN, { risks: [{ id: "r1", claim_type: "mechanics" }] })],
+					"plan-cite-check": [chan(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
 					"plan-verdicts": verdicts,
 				}),
 			).toEqual(["correctness"]);
@@ -5525,6 +5603,28 @@ describe("build grade panel re-grades only the pending dimensions (P2)", () => {
 	const PLAN_DIMS = ["completeness", "correctness", "actionability", "pattern-following", "architecture-fit"];
 	const REL = ".rpiv/artifacts/plans/p.md";
 
+	// The fail-closed cite contract: every cite-configured panel requires its
+	// floor's verdict on the state (citeCheckFlag throws otherwise) — spread at
+	// every units() call below. Both channels: the helper is stage-generic.
+	const citeChannels = {
+		"plan-cite-check": [
+			{
+				artifacts: [{ handle: fsHandle(".rpiv/artifacts/verdicts/plan-cite-check__p.json") }],
+				data: undefined,
+				kind: "",
+				meta: {},
+			},
+		],
+		"code-cite-check": [
+			{
+				artifacts: [{ handle: fsHandle(".rpiv/artifacts/verdicts/code-cite-check__p.json") }],
+				data: undefined,
+				kind: "",
+				meta: {},
+			},
+		],
+	};
+
 	const gradeUnits = (stage: string) => {
 		const loop = findWorkflow("build").stages[stage]?.loop;
 		if (loop?.kind !== "fanout") throw new Error(`build ${stage} stage has no fanout loop`);
@@ -5548,6 +5648,7 @@ describe("build grade panel re-grades only the pending dimensions (P2)", () => {
 			state: {
 				named: {
 					plans: [{ artifacts: [{ handle: fsHandle(REL) }], data: undefined, kind: "", meta: {} }],
+					...citeChannels,
 					[verdictChannel]: verdicts,
 				},
 			} as unknown as RunView,
@@ -5586,6 +5687,7 @@ describe("build grade panel re-grades only the pending dimensions (P2)", () => {
 			state: {
 				named: {
 					plans: [{ artifacts: [{ handle: fsHandle(REL) }], data: undefined, kind: "", meta: {} }],
+					...citeChannels,
 					"plan-verdicts": verdicts,
 					"plan-snapshot": [
 						{
@@ -5714,6 +5816,7 @@ describe("build grade panel re-grades only the pending dimensions (P2)", () => {
 			state: {
 				named: {
 					plans: [{ artifacts: [{ handle: fsHandle(REL) }], data: undefined, kind: "", meta: {} }],
+					...citeChannels,
 					"plan-verdicts": PLAN_DIMS.map((d) => dimV(d, false)),
 					"code-verdicts": codeVerdicts,
 				},
@@ -5886,6 +5989,7 @@ describe("build grade panel re-grades only the pending dimensions (P2)", () => {
 			state: {
 				named: {
 					plans: [{ artifacts: [{ handle: fsHandle(REL) }], data: undefined, kind: "", meta: {} }],
+					...citeChannels,
 					"plan-verdicts": verdicts,
 					"plan-snapshot": [
 						{
@@ -5998,17 +6102,26 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 		slices: [chan(".rpiv/artifacts/slices/s.md", { slice_count: 1 })],
 		plans: [chan(PLAN, { phase_count: 1 })],
 	};
+	// The fail-closed cite contract: every cite-configured panel requires its
+	// floor's verdict on the state (citeCheckFlag throws otherwise) — spread at
+	// every gradeLabels site below (route sites construct their own channels).
+	const citeChannels = {
+		"plan-cite-check": [chan(".rpiv/artifacts/verdicts/plan-cite-check__p.json")],
+		"code-cite-check": [chan(".rpiv/artifacts/verdicts/code-cite-check__p.json")],
+	};
 
 	describe("tier → roster", () => {
 		it("light tier (1 slice, 1 phase, clean channel) grades correctness+completeness only", async () => {
-			expect(await gradeLabels("plan-grade", { ...lightSignals, "plan-verdicts": [] })).toEqual([
+			expect(await gradeLabels("plan-grade", { ...lightSignals, ...citeChannels, "plan-verdicts": [] })).toEqual([
 				"completeness",
 				"correctness",
 			]);
 		});
 
 		it("missing signals never yield light — full roster", async () => {
-			expect(await gradeLabels("plan-grade", { plans: [chan(PLAN)], "plan-verdicts": [] })).toEqual(PLAN_DIMS);
+			expect(await gradeLabels("plan-grade", { plans: [chan(PLAN)], ...citeChannels, "plan-verdicts": [] })).toEqual(
+				PLAN_DIMS,
+			);
 		});
 
 		it("strict signals (slice_count >= 5) keep the full roster", async () => {
@@ -6016,6 +6129,7 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 				await gradeLabels("plan-grade", {
 					slices: [chan(".rpiv/artifacts/slices/s.md", { slice_count: 7 })],
 					plans: [chan(PLAN, { phase_count: 1 })],
+					...citeChannels,
 					"plan-verdicts": [],
 				}),
 			).toEqual(PLAN_DIMS);
@@ -6024,6 +6138,7 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 		it("a medium verdict on the channel lifts a light run out of the light tier (roster widens)", async () => {
 			const labels = await gradeLabels("plan-grade", {
 				...lightSignals,
+				...citeChannels,
 				"plan-verdicts": [verdict("correctness", false)],
 			});
 			expect(labels).toEqual(PLAN_DIMS);
@@ -6041,6 +6156,7 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 			expect(
 				await gradeLabels("code-grade", {
 					...lightSignals,
+					...citeChannels,
 					"plan-verdicts": [verdict("correctness", false)],
 					"code-verdicts": [],
 				}),
@@ -6051,14 +6167,16 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 	describe("verdict freshness (artifact-identity invalidation)", () => {
 		it("verdicts judged against a REPLACED artifact do not carry — full re-grade", async () => {
 			const stale = PLAN_DIMS.map((d) => verdict(d, true, { artifact: ".rpiv/artifacts/plans/old.md" }));
-			expect(await gradeLabels("plan-grade", { plans: [chan(PLAN)], "plan-verdicts": stale })).toEqual(PLAN_DIMS);
+			expect(
+				await gradeLabels("plan-grade", { plans: [chan(PLAN)], ...citeChannels, "plan-verdicts": stale }),
+			).toEqual(PLAN_DIMS);
 		});
 
 		it("verdicts judged against the CURRENT artifact carry — only the failing dimension re-grades", async () => {
 			const verdicts = PLAN_DIMS.map((d) => verdict(d, d !== "correctness", { artifact: PLAN }));
-			expect(await gradeLabels("plan-grade", { plans: [chan(PLAN)], "plan-verdicts": verdicts })).toEqual([
-				"correctness",
-			]);
+			expect(
+				await gradeLabels("plan-grade", { plans: [chan(PLAN)], ...citeChannels, "plan-verdicts": verdicts }),
+			).toEqual(["correctness"]);
 		});
 
 		it("slice-check does NOT skip the re-grade after a re-slice (stale design-readiness verdict)", () => {

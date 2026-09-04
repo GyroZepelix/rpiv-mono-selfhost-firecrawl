@@ -38,7 +38,8 @@
 		"!docs/*.svg",
 		"README.md",
 		"LICENSE",
-		"!**/*.test.ts"
+		"!**/*.test.ts",
+		"!extensions/rpiv-core/built-ins/__fixtures__/"
 	],
 	"pi": {
 		"image": "https://raw.githubusercontent.com/juicesharp/rpiv-mono/main/packages/rpiv-pi/docs/cover.png",
