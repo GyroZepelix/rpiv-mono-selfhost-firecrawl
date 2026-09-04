@@ -8,6 +8,9 @@ const asst = (text: string): BranchEntry => ({
 	message: { role: "assistant", content: [{ type: "text", text }] },
 });
 
+const asstTool = (parts: unknown[]): BranchEntry =>
+	({ type: "message", message: { role: "assistant", content: parts } }) as BranchEntry;
+
 const ctxOf = (branch: BranchEntry[], skill = "build") => ({
 	cwd: "/tmp",
 	runId: "test",
@@ -42,5 +45,36 @@ describe("textScanCollector", () => {
 			kind: "ok",
 			artifacts: [{ handle: { kind: "url", href: "https://example.com" }, role: "primary" }],
 		});
+	});
+
+	it("an assistant-text hit still wins when tool arguments also match (text-present path unchanged)", async () => {
+		const branch = [
+			asstTool([
+				{ type: "tool_use", name: "write", input: { path: "outputs/from-tool.md" } },
+				{ type: "text", text: "wrote outputs/from-text.md" },
+			]),
+		];
+		const c = textScanCollector({ pattern: /outputs\/[\w.-]+\.md/g, toHandle: fs, noun: "path" });
+		expect(await c.collect(ctxOf(branch) as never)).toEqual({
+			kind: "ok",
+			artifacts: [{ handle: { kind: "fs", path: "outputs/from-text.md" }, role: "primary" }],
+		});
+	});
+
+	it("a tool-argument-only hit (a write-shaped use whose input value matches) collects through the same handle constructor", async () => {
+		const branch = [asstTool([{ type: "tool_use", name: "write", input: { path: "outputs/only-in-tool.md" } }])];
+		const c = textScanCollector({ pattern: /outputs\/[\w.-]+\.md/g, toHandle: fs, noun: "path" });
+		expect(await c.collect(ctxOf(branch) as never)).toEqual({
+			kind: "ok",
+			artifacts: [{ handle: { kind: "fs", path: "outputs/only-in-tool.md" }, role: "primary" }],
+		});
+	});
+
+	it("the fatal names BOTH scanned surfaces when neither hits", async () => {
+		const branch = [asstTool([{ type: "tool_use", name: "write", input: { path: "elsewhere/x.txt" } }])];
+		const c = textScanCollector({ pattern: /outputs\/[\w.-]+\.md/g, toHandle: fs, noun: "path" });
+		const result = await c.collect(ctxOf(branch) as never);
+		expect(result.kind).toBe("fatal");
+		expect((result as { message: string }).message).toMatch(/scanned assistant text and tool-call arguments/);
 	});
 });

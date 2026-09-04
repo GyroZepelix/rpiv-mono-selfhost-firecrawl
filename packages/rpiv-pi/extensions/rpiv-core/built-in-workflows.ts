@@ -20,7 +20,6 @@ import {
 	acts,
 	defineRoute,
 	defineWorkflow,
-	directoryPathCollector,
 	type EdgeFn,
 	eq,
 	fanin,
@@ -28,7 +27,6 @@ import {
 	gitCommitOutcome,
 	gt,
 	handleToString,
-	jsonBodyParser,
 	match,
 	type PromptFn,
 	produces,
@@ -76,6 +74,7 @@ import {
 	SHIP_DIMENSIONS,
 	SLICE_DESIGN_FANOUT,
 	SLICE_DIMENSION_FANOUT,
+	SLICE_DIMENSIONS,
 	SYNTH_CLUSTER_FANOUT,
 	scopeQuarantine,
 	shipGatePasses,
@@ -84,7 +83,9 @@ import {
 	sliceStructureCheck,
 	subplanCoverageCheck,
 	subplanGatePasses,
+	unitFailedDimensions,
 	VALIDATE_GOAL_PROMPT,
+	verdictOutcome,
 	verdictRiskRulings,
 } from "./built-ins/index.js";
 
@@ -223,24 +224,20 @@ const SHIP_RESEARCH_PROMPT: PromptFn = ({ state }) =>
 	].join("\n");
 
 /**
- * Verdict channels — grade writes JSON to `.rpiv/artifacts/verdicts/`, so these
- * use the JSON directory collector + `jsonBodyParser` (NOT the md
- * `rpivBucketOutcome`). The slice gate and plan gate publish to DISTINCT named
- * channels (same dir, different artifact basenames) so their verdicts never
- * collide and `plan-fix`/`code-fix` can pick each via the `-verdicts` suffix convention.
+ * Verdict channels — grade writes JSON to `.rpiv/artifacts/verdicts/`, so
+ * these use the disk-first verdict factory in `built-ins/verdict-outcome.ts`
+ * (NOT the md `rpivBucketOutcome`). The slice gate and plan gate publish to
+ * DISTINCT named channels (same dir, different artifact basenames) so their
+ * verdicts never collide and `plan-fix`/`code-fix` can pick each via the
+ * `-verdicts` suffix convention.
  */
-const verdictOutcome = (name: string) => ({
-	name,
-	collector: directoryPathCollector({ dir: ".rpiv/artifacts/verdicts", ext: "json" }),
-	parser: jsonBodyParser,
-});
-const sliceVerdictOutcome = verdictOutcome("slice-verdicts");
-const planVerdictOutcome = verdictOutcome("plan-verdicts");
+const sliceVerdictOutcome = verdictOutcome("slice-verdicts", "slices");
+const planVerdictOutcome = verdictOutcome("plan-verdicts", "plans");
 // The post-splice code gate re-grades the now code-bearing plan on its own
 // channel, so its verdicts never mix with the pre-elaborate plan gate's. Named
 // for the object under judgment — the code the gate grades — completing the
 // slice-verdicts / plan-verdicts / code-verdicts parallel.
-const codeVerdictOutcome = verdictOutcome("code-verdicts");
+const codeVerdictOutcome = verdictOutcome("code-verdicts", "plans");
 
 /**
  * Absolute path to rpiv-pi's bundled deterministic stitch script. Resolved off
@@ -598,6 +595,67 @@ const validateFixGate = (): EdgeFn => {
 const buildWorkflow = defineWorkflow({
 	name: "build",
 	description:
+/**
+ * The fix-arm note for a dead grade unit — the dimension soft-halted (after
+ * its re-dispatch, when the panel wires one) and left no verdict to fold.
+ * Naming it keeps the failure legible and the repair targeted: the fix arm
+ * re-enters the panel, `dimensionsToRegrade` still lists the dimension as
+ * pending, and a healthy re-dispatch grades it for real.
+ */
+const unitFailedNote = (dims: readonly string[]): string =>
+	`unit-failed: ${dims.join(", ")} produced no verdict after one re-dispatch`;
+
+/** The slice gate's grade edge — design-readiness pass ⇒ design; a dead
+ *  dimension unit ⇒ slice-fix with the note (a verdict-less dead dimension is
+ *  never a classification candidate). Belt-and-suspenders for the live graph:
+ *  the slice roster is one dimension, so a double miss makes the generation
+ *  all-failed and `haltWhenAllFailed` halts at the panel close before any
+ *  route runs — the arm pins the route contract for any future multi-dimension
+ *  slice roster and for constructed-state trails. */
+const sliceGradeRoute: EdgeFn = defineRoute(
+	["slice-design", "slice-fix"],
+	({ state }) => {
+		if (sliceGatePasses(state)) return "slice-design";
+		const unitFailed = unitFailedDimensions(state, "slices", "slice-verdicts", SLICE_DIMENSIONS);
+		if (unitFailed.length > 0) setRouteNote(sliceGradeRoute, unitFailedNote(unitFailed));
+		return "slice-fix";
+	},
+	{ readsData: false },
+);
+
+/** The plan gate's demote edge — the unit-failed preemption fires BEFORE the
+ *  confirm divert (a previously-passing dimension whose re-grade died is not
+ *  a flap to adjudicate; there is no verdict to adjudicate). */
+const planDemoteRoute: EdgeFn = defineRoute(
+	["code", "plan-confirm", "plan-snapshot"],
+	({ state }) => {
+		if (planGatePasses(state)) return "code";
+		const unitFailed = unitFailedDimensions(state, "plans", "plan-verdicts", PLAN_DIMENSIONS);
+		if (unitFailed.length > 0) {
+			setRouteNote(planDemoteRoute, unitFailedNote(unitFailed));
+			return "plan-snapshot";
+		}
+		return confirmDue(state, "plans", "plan-verdicts", PLAN_DIMENSIONS) ? "plan-confirm" : "plan-snapshot";
+	},
+	{ readsData: false },
+);
+
+/** The code gate's demote edge — the plan gate's twin on `code-verdicts`. */
+const codeDemoteRoute: EdgeFn = defineRoute(
+	["implement", "code-confirm", "code-snapshot"],
+	({ state }) => {
+		if (codeGatePasses(state)) return "implement";
+		const unitFailed = unitFailedDimensions(state, "plans", "code-verdicts", PLAN_DIMENSIONS);
+		if (unitFailed.length > 0) {
+			setRouteNote(codeDemoteRoute, unitFailedNote(unitFailed));
+			return "code-snapshot";
+		}
+		return confirmDue(state, "plans", "code-verdicts", PLAN_DIMENSIONS) ? "code-confirm" : "code-snapshot";
+	},
+	{ readsData: false },
+);
+
+
 		"Ship, sliced: capture the verbatim brief as a goal artifact (the north star the quality gates' completeness/correctness dimensions and validate anchor against) → research the brief → derive a goal-anchored acceptance inventory (the executable standard of completion, frozen before any plan so it cannot inherit the plan's scope; the completeness gates anchor on it and validate executes its evidence commands) → decompose it into vertical slices → two-phase slice gate (a deterministic floor — dependency-cycle freedom + brief-coverage conservation so a slice-fix can't pass by dropping scope — then one LLM design-readiness judgment that each slice is chewable by a single design pass) with a slice-fix loop → design each slice in parallel → one consolidated developer checkpoint (accept or adjust the proposed interfaces/data types, adjustments applied surgically and cascaded to dependents) → synthesize hierarchically (per-cluster sub-plans → one merged plan) → tier-scaled quality-panel gate (a one-slice, <=2-phase run grades correctness+completeness only; larger or previously-failing runs grade the full completeness/correctness/actionability/pattern-following/architecture-fit roster) where a dimension's fresh HIGH-severity, risk-ruling, or regressed-pass blocking verdict gets one confirming second judgment before it buys a plan-fix round (a first-time medium finding routes straight to the surgical fix) → elaborate code per phase in parallel → splice it into the plan → re-grade the code-bearing plan (same tier + confirm contract) → implement → implement-scope-check → reconcile → validate → commit. Research-led; three automated gates plus one human design checkpoint, before design, before code, and after the splice.",
 	start: "goal",
 	stages: {
@@ -861,11 +919,7 @@ const buildWorkflow = defineWorkflow({
 		),
 		// Design-readiness gate BEFORE any design. Structure + design-readiness pass⇒ design; any fails ⇒
 		// slice-fix and loop back. Bounded by the runner's maxBackwardJumps (default 3).
-		"slice-grade": defineRoute(
-			["slice-design", "slice-fix"],
-			({ state }) => (sliceGatePasses(state) ? "slice-design" : "slice-fix"),
-			{ readsData: false },
-		),
+		"slice-grade": sliceGradeRoute,
 		"slice-fix": "slice-check",
 		// Design fanout → consolidated human checkpoint → hierarchical synthesis.
 		"slice-design": "design-review",
@@ -913,16 +967,7 @@ const buildWorkflow = defineWorkflow({
 		// plan-fix, looping back THROUGH the citation floor so the amended plan
 		// re-verifies. Route logic unchanged — merely shifted one hop later so the
 		// demote write-back precedes it.
-		"plan-demote": defineRoute(
-			["code", "plan-confirm", "plan-snapshot"],
-			({ state }) =>
-				planGatePasses(state)
-					? "code"
-					: confirmDue(state, "plans", "plan-verdicts", PLAN_DIMENSIONS)
-						? "plan-confirm"
-						: "plan-snapshot",
-			{ readsData: false },
-		),
+		"plan-demote": planDemoteRoute,
 		// After the second judgment the gate re-folds on the latest verdicts: a
 		// confirming pass overwrote the flap and clears the gate; a confirming
 		// fail routes to the fix with two agreeing judgments behind it.
@@ -957,16 +1002,7 @@ const buildWorkflow = defineWorkflow({
 		// citations, naming) that a per-phase code rewrite cannot reach, so the
 		// surgical arm is the one with authority over them. Route logic unchanged —
 		// merely shifted one hop later. Bounded by the runner's maxBackwardJumps.
-		"code-demote": defineRoute(
-			["implement", "code-confirm", "code-snapshot"],
-			({ state }) =>
-				codeGatePasses(state)
-					? "implement"
-					: confirmDue(state, "plans", "code-verdicts", PLAN_DIMENSIONS)
-						? "code-confirm"
-						: "code-snapshot",
-			{ readsData: false },
-		),
+		"code-demote": codeDemoteRoute,
 		"code-confirm": defineRoute(
 			["implement", "code-snapshot"],
 			({ state }) => (codeGatePasses(state) ? "implement" : "code-snapshot"),
@@ -1043,6 +1079,11 @@ const shipCiteStopNote = (state: RunView): string => {
 	return n > 0 ? `plan citation check failed (${n} finding${n === 1 ? "" : "s"})` : "plan citation check failed";
 };
 const shipGradeStopNote = (state: RunView): string => {
+	// A dead grade unit (post-re-dispatch) is the loudest blocker — name it
+	// ahead of the severity blockers (ship's arm is stop + hand-repair +
+	// resume, so the note IS the repair instruction).
+	const unitFailed = unitFailedDimensions(state, "plans", "ship-verdicts", SHIP_DIMENSIONS);
+	if (unitFailed.length > 0) return unitFailedNote(unitFailed);
 	const fresh = freshVerdicts(state.named["ship-verdicts"], latestArtifactPath(state, "plans"));
 	if (fresh.length === 0) return "no fresh verdicts for the current plan";
 	const risks = planAuthoredRisks(state, "plans");

@@ -17,9 +17,11 @@ export {
 	planGatePasses,
 	rulingEffectivePass,
 	SHIP_DIMENSIONS,
+	SLICE_DIMENSIONS,
 	shipGatePasses,
 	sliceGatePasses,
 	subplanGatePasses,
+	unitFailedDimensions,
 	verdictRiskRulings,
 } from "./gates.js";
 export {
@@ -73,3 +75,4 @@ export {
 } from "./shared.js";
 export { sliceStructureCheck, subplanCoverageCheck } from "./slice-checks.js";
 export { SLICE_DESIGN_FANOUT, SYNTH_CLUSTER_FANOUT } from "./slices.js";
+export { verdictOutcome } from "./verdict-outcome.js";

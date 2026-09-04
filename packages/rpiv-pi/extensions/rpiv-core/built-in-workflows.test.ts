@@ -56,6 +56,7 @@ import {
 	SHIP_DIMENSIONS,
 	shipGatePasses,
 	shipVerdictOutcome,
+import { codeGatePasses, planGatePasses, sliceGatePasses, unitFailedDimensions } from "./built-ins/gates.js";
 } from "./built-in-workflows.js";
 import { deriveOutcomes } from "./outcome-derivation.js";
 import { BUNDLED_SKILLS_DIR } from "./paths.js";
@@ -7743,5 +7744,170 @@ describe("reconcile lane stage", () => {
 				`${wf.name} has unreachable stages`,
 			).toEqual([]);
 		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Unit-failed routing — a dimension-bearing failed sentinel (a dead grade
+// unit, post-re-dispatch) blocks every gate fold and routes the fix arm with
+// a unit-failed note; the f9a6 incident shape (the sentinel's index overwrite
+// erasing the stale round-1 fail) is the red-today regression.
+// ---------------------------------------------------------------------------
+
+describe("grade panel unit-failed routing (dimension-bearing sentinels)", () => {
+	const build = () => findWorkflow("build");
+	const edge = (stage: string): EdgeFn => {
+		const e = build().edges[stage];
+		if (typeof e !== "function") throw new Error(`build ${stage} edge is not a function`);
+		return e as EdgeFn;
+	};
+	const chan = (rel: string, data?: Record<string, unknown>): Output =>
+		({ artifacts: [{ handle: fsHandle(rel) }], data, kind: "", meta: {} }) as unknown as Output;
+	const verdict = (dimension: string, pass: boolean, extra: Record<string, unknown> = {}): Output =>
+		({
+			artifacts: [],
+			kind: "json",
+			meta: {},
+			data: { dimension, pass, severity: pass ? "none" : "medium", ...extra },
+		}) as unknown as Output;
+	const sentinel = (dimension: string, reason = "grade produced no verdict"): Output =>
+		({ artifacts: [], kind: "failed", meta: {}, data: { reason, dimension } }) as unknown as Output;
+	const state = (named: Record<string, unknown>) => ({ named }) as unknown as RunView;
+	const route = (stage: string, named: Record<string, unknown>) =>
+		edge(stage)({ output: undefined, state: state(named) });
+
+	const PLAN = ".rpiv/artifacts/plans/p.md";
+	const PLAN_DIMS = ["actionability", "architecture-fit", "completeness", "correctness", "pattern-following"];
+	const passRest = PLAN_DIMS.filter((d) => d !== "actionability").map((d) => verdict(d, true));
+	const codeGate = (verdicts: Output[]) => ({
+		plans: [chan(PLAN)],
+		"code-cite-check": [verdict("structure", true)],
+		"code-verdicts": verdicts,
+	});
+	const planGate = (verdicts: Output[]) => ({
+		plans: [chan(PLAN)],
+		"plan-cite-check": [verdict("structure", true)],
+		"plan-verdicts": verdicts,
+	});
+
+	it("wiring: exactly the six grade-panel loops opt into retryHaltedUnits: 1; every other fanout stays without it", () => {
+		const expected = [
+			"build:code-confirm",
+			"build:code-grade",
+			"build:plan-confirm",
+			"build:plan-grade",
+			"build:slice-grade",
+			"ship:grade",
+		];
+		const optedIn: string[] = [];
+		for (const wf of builtInWorkflows) {
+			for (const [stage, def] of Object.entries(wf.stages)) {
+				const loop = def?.loop;
+				if (loop?.kind !== "fanout") continue;
+				if (loop.retryHaltedUnits !== undefined) optedIn.push(`${wf.name}:${stage}`);
+			}
+		}
+		expect(optedIn.sort()).toEqual(expected);
+		for (const stage of ["slice-grade", "plan-grade", "plan-confirm", "code-grade", "code-confirm"]) {
+			const loop = build().stages[stage]?.loop;
+			expect(loop?.kind).toBe("fanout");
+			if (loop?.kind !== "fanout") throw new Error(`build ${stage} stage has no fanout loop`);
+			expect(loop.retryHaltedUnits).toBe(1);
+		}
+		const shipLoop = findWorkflow("ship").stages.grade?.loop;
+		expect(shipLoop?.kind).toBe("fanout");
+		if (shipLoop?.kind !== "fanout") throw new Error("ship grade stage has no fanout loop");
+		expect(shipLoop.retryHaltedUnits).toBe(1);
+	});
+
+	it("gate fold: four passing dimensions + one dimension-bearing sentinel ⇒ every gate fails; the dead dimension is named", () => {
+		const slice = state({
+			slices: [chan(".rpiv/artifacts/slices/s.md")],
+			"slice-check": [verdict("structure", true)],
+			"slice-verdicts": [sentinel("design-readiness")],
+		});
+		expect(sliceGatePasses(slice)).toBe(false);
+		expect(unitFailedDimensions(slice, "slices", "slice-verdicts", ["design-readiness"])).toEqual([
+			"design-readiness",
+		]);
+		const plan = state(planGate([...passRest, sentinel("actionability")]));
+		expect(planGatePasses(plan)).toBe(false);
+		const code = state(codeGate([...passRest, sentinel("actionability")]));
+		expect(codeGatePasses(code)).toBe(false);
+		expect(unitFailedDimensions(code, "plans", "code-verdicts", PLAN_DIMS)).toEqual(["actionability"]);
+		const ship = state({
+			plans: [chan(PLAN)],
+			"ship-verdicts": [verdict("completeness", true), verdict("correctness", true), sentinel("architecture-fit")],
+		});
+		expect(shipGatePasses(ship)).toBe(false);
+	});
+
+	it("f9a6 regression (red-today): the sentinel's index overwrite erased the stale round-1 medium fail — the gate passed on four survivors; with the dimension it blocks", () => {
+		// The exact f9a6 channel: the dead unit's sentinel sits at actionability's
+		// index, having overwritten the stale 13:49:57 medium fail.
+		const s = state(codeGate([...passRest, sentinel("actionability")]));
+		expect(unitFailedDimensions(s, "plans", "code-verdicts", PLAN_DIMS)).toEqual(["actionability"]);
+		// The route folds it: fix arm + note (on the pre-change tree the
+		// dimensionless sentinel is skipped and the gate routes onward).
+		expect(route("code-demote", codeGate([...passRest, sentinel("actionability")]))).toBe("code-snapshot");
+		expect(takeRouteNote(edge("code-demote"))).toBe(
+			"unit-failed: actionability produced no verdict after one re-dispatch",
+		);
+	});
+
+	it("red-first mirror: stale-fail-then-sentinel latest-wins at the fold; the UNFILLED-slot variant blocks WITHOUT being unit-failed", () => {
+		// Latest-wins: the sentinel follows the stale fail as the dimension's
+		// latest entry — blocking, with the dimension named for routing.
+		const staleThenSentinel = state(
+			codeGate([verdict("actionability", false), ...passRest, sentinel("actionability")]),
+		);
+		expect(codeGatePasses(staleThenSentinel)).toBe(false);
+		expect(unitFailedDimensions(staleThenSentinel, "plans", "code-verdicts", PLAN_DIMS)).toEqual(["actionability"]);
+		// The unfilled-slot mirror (infra death, no sentinel at all): the stale
+		// fail stays the dimension's latest entry and blocks — the dimension
+		// stays pending in dimensionsToRegrade — but is NOT unit-failed.
+		const staleOnly = state(codeGate([verdict("actionability", false), ...passRest]));
+		expect(codeGatePasses(staleOnly)).toBe(false);
+		expect(unitFailedDimensions(staleOnly, "plans", "code-verdicts", PLAN_DIMS)).toEqual([]);
+	});
+
+	it("plan-demote does NOT divert to confirm on a unit-failed block, even when the dimension previously passed", () => {
+		// The dead unit was actionability's re-grade; its round-1 pass makes
+		// prevBlocking === false — exactly the flap shape confirmDue diverts on.
+		// The unit-failed preemption fires FIRST: fix arm + note, no confirm
+		// session for a dimension with no verdict to adjudicate.
+		const named = planGate([verdict("actionability", true), ...passRest, sentinel("actionability")]);
+		expect(route("plan-demote", named)).toBe("plan-snapshot");
+		expect(takeRouteNote(edge("plan-demote"))).toContain("unit-failed");
+	});
+
+	it("an ordinary (non-sentinel) fail still routes through confirmDue unchanged — no note", () => {
+		expect(route("plan-demote", planGate([...passRest, verdict("actionability", false, { severity: "high" })]))).toBe(
+			"plan-confirm",
+		);
+		expect(takeRouteNote(edge("plan-demote"))).toBeUndefined();
+	});
+
+	it("slice-grade routes a dead design-readiness unit to slice-fix with the note", () => {
+		const named = {
+			slices: [chan(".rpiv/artifacts/slices/s.md")],
+			"slice-check": [verdict("structure", true)],
+			"slice-verdicts": [sentinel("design-readiness")],
+		};
+		expect(route("slice-grade", named)).toBe("slice-fix");
+		expect(takeRouteNote(edge("slice-grade"))).toBe(
+			"unit-failed: design-readiness produced no verdict after one re-dispatch",
+		);
+	});
+
+	it("ship's grade stop names unit-failed dimensions ahead of severity blockers", () => {
+		const shipEdge = findWorkflow("ship").edges.grade;
+		if (typeof shipEdge !== "function") throw new Error("ship grade edge is not an EdgeFn");
+		const s = state({
+			plans: [chan(PLAN)],
+			"ship-verdicts": [verdict("completeness", true), verdict("correctness", true), sentinel("architecture-fit")],
+		});
+		expect(shipEdge({ state: s, output: undefined })).toBe("stop");
+		expect(takeRouteNote(shipEdge)).toBe("unit-failed: architecture-fit produced no verdict after one re-dispatch");
 	});
 });

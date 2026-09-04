@@ -359,6 +359,46 @@ describe("loop-resume — fanout", () => {
 		expect(rebuilt.meta).toStrictEqual(rowFields);
 	});
 
+	it("collected soft-halt row with unitLabel: resume rebuilds a DIMENSION-BEARING sentinel, byte-identical to the live softHaltUnit twin", async () => {
+		// Live: `softHaltUnit` passes `s.unit?.label` as `failedOutput`'s third arg;
+		// resume: `rebuildCollectedSentinel` threads `row.unitLabel` (which
+		// `recordUnitHalt` persisted off the same unit). A capture stage observes the
+		// folded channel directly: the sentinel sits at phase 2's index carrying the
+		// dimension — the blocking field every gate fold keys off — and the collected
+		// row is NOT re-dispatched (every slot filled).
+		let captured: Output[] = [];
+		const capWf: Workflow = {
+			name: "fanout-wf",
+			start: "impl",
+			stages: {
+				impl: produces({ outcome: transcriptOutcome("plans"), loop: fanout({ units: threeUnits }) }),
+				capture: acts.script({
+					run: ({ state }) => {
+						captured = [...(state.named.plans ?? [])];
+					},
+				}),
+			},
+			edges: { impl: "capture", capture: "stop" },
+		} as Workflow;
+		writeRun([
+			unitRow(1, 1, "completed"),
+			{ ...unitRow(2, 2, "failed"), collected: true, errMsg: "unit 2 boom", unitLabel: "phase 2" },
+			unitRow(3, 3, "completed"),
+		]);
+		const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+
+		const result = await resumeWorkflow(chain.ctx, { workflow: capWf, header, ref: "@x" });
+
+		expect(result.success).toBe(true);
+		expect(chain.sentMessages).toEqual([]); // every slot filled — no re-dispatch
+		expect(captured).toHaveLength(3);
+		expect(captured[1]).toMatchObject({
+			kind: "failed",
+			data: { reason: "unit 2 boom", dimension: "phase 2" },
+			meta: { stage: "impl (phase-2)", skill: "impl", stageNumber: 2, ts: "t2", runId: header.runId },
+		});
+	});
+
 	it("haltWhenAllFailed trail: all-sentinel cursor + parent halt row → ZERO re-dispatch, one fresh halt row, ends failed", async () => {
 		// The halt row is parent-attributed (no collected/parent/unitIndex fields), so
 		// the fold's halt-marker predicate (isOpenFanoutHaltMarker) keeps the generation

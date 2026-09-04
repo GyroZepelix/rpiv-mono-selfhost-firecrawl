@@ -85,6 +85,9 @@ function checkLoopInvariants(stage: StageDef, name: string, report: ReportFn): v
 	if (isInvalidDepArtifactFlag(loop)) {
 		report("loop-dep-flag-invalid", { depArtifactFlag: loop.depArtifactFlag });
 	}
+	if (isInvalidRetryHaltedUnits(loop)) {
+		report("loop-retry-halted-units-invalid", { retryHaltedUnits: loop.retryHaltedUnits });
+	}
 	// Pull loops + assess run the stage's outcome collector per unit.
 	if ((loop.kind === "iterate" || loop.kind === "assess") && stage.kind !== "produces") {
 		report("loop-requires-produces", { kind: loop.kind });
@@ -145,6 +148,17 @@ const isInvalidDepArtifactFlag = (loop: LoopDef): loop is FanoutLoop & { depArti
 	loop.kind === "fanout" &&
 	loop.depArtifactFlag !== undefined &&
 	(typeof loop.depArtifactFlag !== "string" || loop.depArtifactFlag.trim().length === 0);
+
+/**
+ * A fanout's `retryHaltedUnits` budget is present and out of range — not an
+ * integer or below 1. The type guard narrows to `FanoutLoop &
+ * { retryHaltedUnits: number }` so the report call reads the field without a
+ * cast or non-null assertion.
+ */
+const isInvalidRetryHaltedUnits = (loop: LoopDef): loop is FanoutLoop & { retryHaltedUnits: number } =>
+	loop.kind === "fanout" &&
+	loop.retryHaltedUnits !== undefined &&
+	(!Number.isInteger(loop.retryHaltedUnits) || loop.retryHaltedUnits < 1);
 
 /**
  * A stable named slot: iterate and assess always (every unit/round runs the

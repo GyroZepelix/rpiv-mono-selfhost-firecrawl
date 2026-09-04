@@ -2,13 +2,7 @@
  * The grade panels: the shared tiered panel factory, its build-lane instances,
  * and ship's bespoke tier-independent panel and verdict channel.
  */
-import {
-	directoryPathCollector,
-	fanout,
-	handleToString,
-	jsonBodyParser,
-	type RunView,
-} from "@juicesharp/rpiv-workflow/registration";
+import { fanout, handleToString, type RunView } from "@juicesharp/rpiv-workflow/registration";
 import {
 	dimensionsToRegrade,
 	freshVerdicts,
@@ -23,6 +17,7 @@ import {
 } from "./gates.js";
 import { isSurgicalFix, priorArtifact } from "./priors.js";
 import { haltPreflight, latestFsArtifact } from "./shared.js";
+import { verdictOutcome } from "./verdict-outcome.js";
 
 /**
  * The dimension-scoped artifact flags every panel body composes — ONE
@@ -127,6 +122,7 @@ const gradePanelFanout = (
 		unit: { by: "dimension-list", pattern: "dimensions" },
 		max: dimensions.length,
 		haltWhenAllFailed: true,
+		retryHaltedUnits: 1,
 		units: ({ state, cwd }) => {
 			const doc = latestFsArtifact(state, channel);
 			if (doc?.handle.kind !== "fs") return [];
@@ -233,6 +229,7 @@ export const SHIP_DIMENSION_FANOUT = fanout({
 	unit: { by: "dimension-list", pattern: "dimensions" },
 	max: SHIP_DIMENSIONS.length,
 	haltWhenAllFailed: true,
+	retryHaltedUnits: 1,
 	units: ({ state }) => {
 		const doc = latestFsArtifact(state, "plans");
 		if (doc?.handle.kind !== "fs") return [];
@@ -262,11 +259,7 @@ export const SHIP_DIMENSION_FANOUT = fanout({
 // directory, different artifact basenames) so they never mix with build's
 // plan/code verdicts — named for the workflow, completing the slice-verdicts
 // / plan-verdicts / code-verdicts / ship-verdicts parallel.
-export const shipVerdictOutcome = {
-	name: "ship-verdicts",
-	collector: directoryPathCollector({ dir: ".rpiv/artifacts/verdicts", ext: "json" }),
-	parser: jsonBodyParser,
-};
+export const shipVerdictOutcome = verdictOutcome("ship-verdicts", "plans");
 
 export {
 	CODE_CONFIRM_FANOUT,

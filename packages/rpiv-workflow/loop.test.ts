@@ -415,6 +415,93 @@ describe("loop driver — parallel fanout dispatch", () => {
 });
 
 // ===========================================================================
+// Retry-once dispatch — retryHaltedUnits re-runs a soft-halted collect-all
+// unit's WHOLE dispatch; the fold sees only the final attempt's output.
+// ===========================================================================
+
+describe("loop driver — retry-once dispatch (retryHaltedUnits)", () => {
+	let captured: Output[] = [];
+	const retryWf = (retries: number | undefined) => ({
+		name: "par-retry",
+		start: "audit",
+		stages: {
+			audit: produces({
+				outcome: mdOutcome("audits"),
+				loop: fanout({
+					units: () => [{ prompt: "u0", label: "u0", id: "u0" }],
+					...(retries !== undefined ? { retryHaltedUnits: retries } : {}),
+				}),
+			}),
+			capture: acts.script({
+				run: ({ state }) => {
+					captured = [...(state.named.audits ?? [])];
+				},
+			}),
+		},
+		edges: { audit: "capture", capture: "stop" } as Record<string, string>,
+	});
+	const fatalBranch = () => [mockAssistantMessage("no artifact path here")]; // md collector fatals → soft halt
+	const okBranch = (i: number) => [mockAssistantMessage(`wrote .rpiv/artifacts/audits/unit-${i}.md`)];
+
+	it("retries a soft-halted unit exactly once under retryHaltedUnits: 1 — two dispatches, onUnitStart per attempt, one final dimension-bearing sentinel folded", async () => {
+		const starts: string[] = [];
+		const dispose = registerLifecycle({
+			onUnitStart: (ref) => {
+				starts.push(ref.name);
+			},
+		});
+		try {
+			const host = createFakeConcurrentHost({
+				cwd: tmpDir,
+				maxConcurrency: 1,
+				childBranch: () => fatalBranch(), // EVERY attempt halts (the double-miss placement)
+			});
+			const result = await runWorkflow(host.ctx, { workflow: retryWf(1), input: "x" });
+
+			expect(result.success).toBe(true); // collect-all: the run survives both halts
+			expect(host.spawns).toHaveLength(2); // attempt 1 + the one retry (dispatch count)
+			expect(starts).toHaveLength(2); // onUnitStart fired per attempt
+			// One collected halt row per failed attempt, both labeled for the resume twin.
+			const rows = readRows().filter((r) => r.collected === true);
+			expect(rows).toHaveLength(2);
+			expect(rows.every((r) => r.unitLabel === "u0")).toBe(true);
+			// The fold saw ONLY the final attempt's output: one sentinel, dimension-bearing.
+			expect(captured).toHaveLength(1);
+			expect(captured[0]).toMatchObject({
+				kind: "failed",
+				data: { reason: expect.any(String), dimension: "u0" },
+			});
+		} finally {
+			dispose();
+		}
+	});
+
+	it("without the option a soft-halted unit dispatches exactly once (the no-retry pin)", async () => {
+		const host = createFakeConcurrentHost({ cwd: tmpDir, maxConcurrency: 1, childBranch: () => fatalBranch() });
+		await runWorkflow(host.ctx, { workflow: retryWf(undefined), input: "x" });
+		expect(host.spawns).toHaveLength(1);
+		expect(readRows().filter((r) => r.collected === true)).toHaveLength(1);
+	});
+
+	it("a retried unit whose second attempt succeeds folds the verdict — no sentinel reaches the channel", async () => {
+		const host = createFakeConcurrentHost({
+			cwd: tmpDir,
+			maxConcurrency: 1,
+			childBranch: (_rec, index) => (index === 0 ? fatalBranch() : okBranch(index)),
+		});
+		const result = await runWorkflow(host.ctx, { workflow: retryWf(1), input: "x" });
+
+		expect(result.success).toBe(true);
+		expect(host.spawns).toHaveLength(2);
+		// Attempt 1's collected row stays on the trail; attempt 2's completed row follows it.
+		expect(readRows().filter((r) => r.collected === true)).toHaveLength(1);
+		// The channel carries the REAL output — the later row's fold won the slot.
+		expect(captured).toHaveLength(1);
+		expect(captured[0]?.kind).not.toBe("failed");
+	});
+});
+
+// ===========================================================================
 // Parallel fanout abort + fault tolerance — the no-throw envelope guard,
 // abort classification, and failFast sibling cancellation.
 // ===========================================================================

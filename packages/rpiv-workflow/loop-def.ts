@@ -249,6 +249,19 @@ export interface FanoutLoop extends LoopCommon {
 	 */
 	haltWhenAllFailed?: boolean;
 	/**
+	 * Re-dispatch a soft-halted collect-all unit (a failed sentinel in its
+	 * slot) up to `retryHaltedUnits` MORE times. One attempt = the unit's
+	 * whole dispatch: unit start, pre-attempt snapshot, session build,
+	 * execution — so a retry's disk-first collection sees only what the
+	 * retry's own session wrote, and the attempt-1 failure memo rides the
+	 * re-dispatch prompt as the additive suffix (same unit prompt otherwise).
+	 * The fold sees only the FINAL attempt's output. Integer >= 1 when
+	 * present; absent ⇒ exactly one dispatch (the prior contract).
+	 * Collect-all units only — inert under `failFast` (a fail-fast halt
+	 * terminates the run; there is nothing left to re-dispatch into).
+	 */
+	retryHaltedUnits?: number;
+	/**
 	 * When set, the dispatcher injects each completed dependency's published
 	 * artifact path into the dependent unit's prompt as `${depArtifactFlag} <path>`
 	 * (one per direct `Unit.deps` entry whose slot is filled with a non-failed

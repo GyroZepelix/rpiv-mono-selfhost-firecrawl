@@ -122,6 +122,11 @@ export const ISSUE_DEFS = {
 		(p) =>
 			`fanout depArtifactFlag: ${JSON.stringify(p.depArtifactFlag)} — must be a non-empty string (the flag the dispatcher prefixes each dep artifact path with)`,
 	),
+	"loop-retry-halted-units-invalid": def<{ retryHaltedUnits: number }>(
+		"error",
+		(p) =>
+			`fanout retryHaltedUnits: ${p.retryHaltedUnits} — must be an integer >= 1 (each value buys one re-dispatch of a soft-halted collect-all unit; only its final attempt's output folds)`,
+	),
 	"loop-requires-produces": def<{ kind: string }>(
 		"error",
 		(p) => `${p.kind} requires kind "produces" — each unit runs an outcome collector`,

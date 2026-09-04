@@ -277,6 +277,7 @@ function rebuildCollectedSentinel(row: WorkflowStage, runId: string): Output {
 			runId,
 		}),
 		row.errMsg!, // defined: the single caller gates on isCollectedSoftHalt(row)
+		row.unitLabel, // the live sentinel's dimension — recordUnitHalt persisted it
 	);
 }
 
@@ -378,6 +379,15 @@ async function openGeneration(
  * an aborted in-flight unit, which wrote NO row at all — leaves the slot
  * unfilled so resume re-dispatches that unit. Resets `gen.expected` (consumed)
  * on every fanout row.
+ *
+ * RETRY TRAILS: a unit dispatched under `retryHaltedUnits` writes ONE
+ * collected row per FAILED attempt (plus its completed row when the final
+ * attempt succeeds) — all at the same `unitIndex`. The fold replays them in
+ * trail order and places each by index, so the LATER row wins the slot: the
+ * final attempt's output (a second sentinel, or the real verdict) overwrites
+ * attempt-1's sentinel. That converges with the live path, which folds only
+ * the unit's FINAL captured output — attempt-1's sentinel never reaches the
+ * channel live, and on replay the row that follows it erases it.
  */
 function foldFanoutRow(acc: FoldAcc, gen: OpenGeneration, row: WorkflowStage): void {
 	const units = gen.units!; // dispatcher gates this arm on gen.loop.kind === "fanout" && gen.units

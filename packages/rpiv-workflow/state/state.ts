@@ -142,6 +142,16 @@ export interface WorkflowStage {
 	 * other row (`undefined` is dropped by `JSON.stringify`).
 	 */
 	collected?: true;
+	/**
+	 * The failed unit's label — present ONLY on a `collected: true` row, where
+	 * `recordUnitHalt` writes it so the resume fold can thread it into the
+	 * rebuilt `failedOutput` sentinel's `dimension` (live sentinel and resume
+	 * twin stay byte-identical). An ADDITIVE optional field in the
+	 * `bashTimeoutStrikes` style: absent ⇒ `JSON.stringify` drops it ⇒
+	 * byte-identical row; the fold's shape-filtered readers ignore it, so no
+	 * `STATE_SCHEMA_VERSION` bump.
+	 */
+	unitLabel?: string;
 }
 
 /**

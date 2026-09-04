@@ -267,6 +267,22 @@ const dimensionsToRegrade = (
  * fail for `medium`+ findings (the deterministic `slice-check` check emits
  * `high` on a real structural break, so it still blocks). A verdict with no
  * `severity` (an older or replayed grade) falls back to the raw `pass` boolean.
+ *
+ * SENTINELS: a failed-unit sentinel the fanout fold placed carries
+ * `data.dimension` when the dead unit was labeled (grade panels label each
+ * dimension unit with the dimension it grades). Such an entry registers here
+ * with no `pass`/`severity` — it reads BLOCKING. That is the fix for the
+ * three intentional behaviors that composed into the dead-unit gate pass:
+ * (1) a collected soft-halt is a PERMANENT skip — the dead unit contributes
+ * no verdict, only its sentinel; (2) the fold places the sentinel BY INDEX,
+ * overwriting whatever the slot held from prior rounds — the stale round-1
+ * fail the gate should have blocked on was erased from the channel;
+ * (3) a sentinel with NO dimension is skipped by this fold — absence is not
+ * failure — so the gate folded only the four surviving passes and routed
+ * onward. The dimension field closes all three: the unresolved dimension now
+ * reads as its own latest, blocking entry. (Mirror: an UNFILLED slot — infra
+ * death, no row — leaves the stale entry in place and also blocks;
+ * `unitFailedDimensions` distinguishes the dead-unit shape for routing.)
  */
 const allDimensionsPass = (entries: readonly Output[] = [], roster?: readonly string[]): boolean => {
 	// Roster-filtered when given: a verdict for a dimension outside the tier's
@@ -608,6 +624,28 @@ const confirmDue = (
 	return [...byDim.values()].some(
 		(e) => e.blocking && e.prevBlocking !== true && (e.confirmWorthy || e.prevBlocking === false),
 	);
+};
+
+/**
+ * Roster dimensions whose latest FRESH verdict entry is a failed sentinel —
+ * the dead-unit routing signal. A dimension-bearing sentinel means the unit
+ * grading that dimension soft-halted (after its re-dispatch, when the panel
+ * wires one) and left "unresolved" as the dimension's channel state; route
+ * bodies convert it into the fix arm with a unit-failed note instead of
+ * letting the fold's absence-is-not-failure default — or a confirm divert —
+ * decide. Pure state reads — resume-safe for `readsData: false` routes. A
+ * sentinel survives `freshVerdicts` (no `artifact` field — the compat
+ * default), so regenerating the artifact cannot launder a dead unit.
+ */
+export const unitFailedDimensions = (
+	state: RunView,
+	channel: string,
+	verdictChannel: string,
+	dimensions: readonly string[],
+): string[] => {
+	const fresh = freshVerdicts(state.named[verdictChannel], latestArtifactPath(state, channel));
+	const latest = latestVerdictPerDimension(fresh);
+	return dimensions.filter((d) => latest.get(d)?.kind === "failed");
 };
 
 export {

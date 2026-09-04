@@ -194,6 +194,10 @@ export function recordUnitHalt(ctx: WorkflowHostContext, audit: AuditContext, er
 		errMsg,
 		session: audit.session,
 		...unitRowFields(audit.unit),
+		// The failed unit's label — additive, collected rows only. The resume
+		// fold threads it into the rebuilt sentinel's dimension so the live and
+		// replayed sentinels stay byte-identical (rebuildCollectedSentinel).
+		...(audit.unit ? { unitLabel: audit.unit.label } : {}),
 	});
 	recordFailureForensics(ctx, audit, errMsg);
 }

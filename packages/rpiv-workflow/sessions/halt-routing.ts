@@ -184,7 +184,7 @@ async function softHaltUnit(
 		reason,
 		lifecycleCtxFromSession(s),
 	);
-	await s.onSuccess(ctx, failedOutput(outputMetaFor(s), reason));
+	await s.onSuccess(ctx, failedOutput(outputMetaFor(s), reason, s.unit?.label));
 }
 
 /** OutputMeta for a sentinel — same stage number the failed row carries, so the
