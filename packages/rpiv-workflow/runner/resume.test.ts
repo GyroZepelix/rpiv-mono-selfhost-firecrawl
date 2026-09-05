@@ -581,7 +581,7 @@ describe("reconstructState", () => {
 		expect(result.detail).toContain("schema v99");
 	});
 
-	it("REFUSES a v1 (sequential) trail — absent or explicit `v: 1` — with version-mismatch (schema v3)", async () => {
+	it("REFUSES v1 (absent or explicit) and v2 trails with version-mismatch (schema v3)", async () => {
 		// Under schema v3 the fold places completion rows by `unitIndex` and
 		// skips under-budget collected rows budget-aware; a v1
 		// (sequential) trail cannot replay under the new rules, so it is rejected
@@ -611,6 +611,12 @@ describe("reconstructState", () => {
 		expect(explicit.ok).toBe(false);
 		if (explicit.ok) return;
 		expect(explicit.reason).toBe("version-mismatch");
+
+		// A v2 (pre-ordinal parallel-fanout) trail — the live upgrade path — is rejected too.
+		const v2 = await reconstructState(tmpDir, linearWorkflow, { ...baseHeader, v: 2 });
+		expect(v2.ok).toBe(false);
+		if (v2.ok) return;
+		expect(v2.reason).toBe("version-mismatch");
 	});
 
 	it("row whose stage is not in workflow.stages: returns stage-gone refusal", async () => {

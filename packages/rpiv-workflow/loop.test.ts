@@ -506,6 +506,18 @@ describe("loop driver — retry-once dispatch (retryHaltedUnits)", () => {
 		expect(captured[0]?.kind).not.toBe("failed");
 	});
 
+	it("retryHaltedUnits: 2 — three dispatches, collected rows carry ordinals [1, 2, 3], one final sentinel", async () => {
+		const host = createFakeConcurrentHost({ cwd: tmpDir, maxConcurrency: 1, childBranch: () => fatalBranch() });
+		const result = await runWorkflow(host.ctx, { workflow: retryWf(2), input: "x" });
+
+		expect(result.success).toBe(true);
+		expect(host.spawns).toHaveLength(3);
+		const rows = readRows().filter((r) => r.collected === true);
+		expect(rows.map((r) => r.attemptOrdinal)).toEqual([1, 2, 3]);
+		expect(captured).toHaveLength(1);
+		expect(captured[0]?.kind).toBe("failed");
+	});
+
 	// e2e row 1 — the failFast interplay pin
 	it("retryHaltedUnits is inert under failFast — one dispatch for the fatal unit, one terminal failed row, zero collected rows", async () => {
 		const host = createFakeConcurrentHost({ cwd: tmpDir, maxConcurrency: 1, childBranch: () => fatalBranch() });
@@ -924,7 +936,7 @@ describe("loop driver — haltWhenAllFailed generation-close halt", () => {
 	/** Fanout + downstream fan-in consumer. The all-failed halt rides the loop
 	 *  unless `flagless`; `max` caps the generation with `onCap: "advance"` for
 	 *  the over-cap pins. */
-	const hafWf = (n: number, opts: { flagless?: boolean; max?: number } = {}) => ({
+	const hafWf = (n: number, opts: { flagless?: boolean; max?: number; retry?: number } = {}) => ({
 		name: "par-haf",
 		start: "audit",
 		stages: {
@@ -935,6 +947,7 @@ describe("loop driver — haltWhenAllFailed generation-close halt", () => {
 					max: opts.max,
 					onCap: opts.max !== undefined ? ("advance" as const) : undefined,
 					...(opts.flagless ? {} : { haltWhenAllFailed: true }),
+					...(opts.retry !== undefined ? { retryHaltedUnits: opts.retry } : {}),
 				}),
 			}),
 			synthesize: acts({ reads: [fanin("audits")] }),
@@ -986,6 +999,29 @@ describe("loop driver — haltWhenAllFailed generation-close halt", () => {
 		expect(synth.prompt).toContain("audits/unit-0.md"); // both survivors reached the fan-in
 		expect(synth.prompt).toContain("audits/unit-2.md");
 		expect(synth.prompt).not.toContain("audits/unit-1.md"); // the failed sentinel skipped
+		expect(readRows().some((r) => r.status === "failed" && r.collected === undefined)).toBe(false); // no halt row
+	});
+
+	it("with retryHaltedUnits, a unit that recovers on retry keeps the generation alive — no halt, the fan-in reads it", async () => {
+		let u1Attempts = 0;
+		const host = createFakeConcurrentHost({
+			cwd: tmpDir,
+			maxConcurrency: 2,
+			childBranch: (rec) => {
+				const head = rec.prompt.split("\n")[0]!; // the unit prompt line (memo suffix follows a blank line)
+				if (head.endsWith("u0")) return failUnit(); // u0 fails every attempt
+				if (head.endsWith("u1") && ++u1Attempts === 1) return failUnit(); // u1 fails once, recovers
+				return [mockAssistantMessage("wrote .rpiv/artifacts/audits/unit-1.md")];
+			},
+		});
+
+		const result = await runWorkflow(host.ctx, { workflow: hafWf(2, { retry: 1 }), input: "x" });
+
+		expect(result.success).toBe(true);
+		expect(host.spawns).toHaveLength(5); // u0 ×2, u1 ×2, synthesize
+		const synth = host.spawns[4]!;
+		expect(synth.prompt).toContain("synthesize");
+		expect(synth.prompt).toContain("audits/unit-1.md");
 		expect(readRows().some((r) => r.status === "failed" && r.collected === undefined)).toBe(false); // no halt row
 	});
 

@@ -442,8 +442,11 @@ describe("loop-resume — fanout", () => {
 		const result = await resumeWorkflow(chain.ctx, { workflow: retryWf, header, ref: "@x" });
 
 		expect(result.success).toBe(true);
-		// Exactly one re-dispatch — phase 2 (under budget), never the completed 1 & 3.
-		expect(chain.sentMessages).toEqual(["/skill:impl phase 2"]);
+		// Exactly one re-dispatch — phase 2 (under budget), never the completed 1 & 3 —
+		// and the skipped attempt's failure rides its prompt as the memo suffix.
+		expect(chain.sentMessages).toHaveLength(1);
+		expect(chain.sentMessages[0]).toMatch(/^\/skill:impl phase 2\n\nPrior failures in this run/);
+		expect(chain.sentMessages[0]).toContain("impl (unit phase-2): unit 2 boom");
 		// One new completed phase-2 row follows the three trail rows (the capture
 		// stage's own completed row lands after it).
 		const rows = readAllStages(tmpDir, header.runId);
@@ -454,6 +457,45 @@ describe("loop-resume — fanout", () => {
 		expect(captured).toHaveLength(3);
 		expect(captured[1]?.kind).not.toBe("failed");
 		expect(captured[1]?.artifacts[0]?.handle).toMatchObject({ kind: "fs", path: ".rpiv/artifacts/plans/p2.md" });
+	});
+
+	it("v3 budget-aware fold: TWO under-budget collected rows for one unit (retryHaltedUnits: 2) both skip — one re-dispatch carrying both memos", async () => {
+		let captured: Output[] = [];
+		const retryWf: Workflow = {
+			name: "fanout-wf",
+			start: "impl",
+			stages: {
+				impl: produces({
+					outcome: transcriptOutcome("plans"),
+					loop: fanout({ units: threeUnits, retryHaltedUnits: 2 }),
+				}),
+				capture: acts.script({
+					run: ({ state }) => {
+						captured = [...(state.named.plans ?? [])];
+					},
+				}),
+			},
+			edges: { impl: "capture", capture: "stop" },
+		} as Workflow;
+		writeRun([
+			unitRow(1, 1, "completed"),
+			{ ...unitRow(2, 2, "failed"), collected: true, errMsg: "boom one", unitLabel: "phase 2", attemptOrdinal: 1 },
+			{ ...unitRow(2, 3, "failed"), collected: true, errMsg: "boom two", unitLabel: "phase 2", attemptOrdinal: 2 },
+			unitRow(3, 4, "completed"),
+		]);
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p2.md")] }],
+		});
+
+		const result = await resumeWorkflow(chain.ctx, { workflow: retryWf, header, ref: "@x" });
+
+		expect(result.success).toBe(true);
+		expect(chain.sentMessages).toHaveLength(1);
+		expect(chain.sentMessages[0]).toContain("impl (unit phase-2): boom one");
+		expect(chain.sentMessages[0]).toContain("impl (unit phase-2): boom two");
+		expect(captured).toHaveLength(3);
+		expect(captured[1]?.kind).not.toBe("failed");
 	});
 
 	it("v3 budget-aware fold: an AT-BUDGET-EXHAUSTED collected row folds its sentinel — zero re-dispatch (today's behavior)", async () => {

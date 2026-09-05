@@ -16,9 +16,9 @@
  *   2. TEXT — `transcriptPathCollector`, pattern tightened to the determined
  *      name when known, else today's loose directory pattern. Inherits the
  *      text+tool-arguments widening (collectors/text-scan.ts), tool-args
- *      narrowed to write calls (a read of the prior round's verdict is not
+ *      narrowed to write/edit calls (a read of the prior round's verdict is not
  *      a collection).
- *   3. WRITE ARGS — a `toolCallCollector` arm matching `write` calls whose
+ *   3. WRITE ARGS — a `toolCallCollector` arm matching `write`/`edit` calls whose
  *      `input.path` sits under the verdict dir (tightened to the determined
  *      name when known); the last write wins.
  *
@@ -62,13 +62,13 @@ export interface VerdictCollectorOpts {
 
 const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Pi's `write` tool by name — the single spelling shared by the text arm's
- *  `match` filter and the write-args arm below. The Pi tool-name literal
+/** Pi's file-writing tools (`write`, `edit`) by name — the single spelling
+ *  shared by the text arm's `match` filter and the write-args arm below. The Pi tool-name literal
  *  stays in this convention layer (never in rpiv-workflow's host-agnostic
  *  collectors); the structural `{ name }` param is assignable to
  *  `(tc: ToolCall) => boolean` under contravariance, so no `ToolCall`
  *  import is needed. */
-const isWriteTool = (tc: { name: string }): boolean => tc.name === "write";
+const isWriteTool = (tc: { name: string }): boolean => tc.name === "write" || tc.name === "edit";
 
 /** The graded artifact's basename without extension, off the source channel
  *  (undefined when no channel / no fs artifact). */
@@ -172,7 +172,7 @@ export function verdictCollector(opts: VerdictCollectorOpts): ArtifactCollector<
 			const rel = collectFromDisk(ctx, dir, determined);
 			if (rel !== undefined) return { kind: "ok", artifacts: [{ handle: fsHandle(rel), role: "primary" }] };
 			// Arm 2: transcript text (pattern tightened when determined; tool-args
-			// narrowed to write calls — a prior-round read-back is not a collection).
+			// narrowed to write/edit calls — a prior-round read-back is not a collection).
 			const scanned = await transcriptPathCollector({
 				pattern: transcriptPattern(dir, determined),
 				match: isWriteTool,

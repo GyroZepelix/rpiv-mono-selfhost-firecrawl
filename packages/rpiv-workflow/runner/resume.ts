@@ -27,6 +27,7 @@
 import type { LoopDef, StageDef, Unit, Workflow } from "../api.js";
 import { applyStageSuccess, rollLastSession } from "../audit-rows.js";
 import { stageEntryArgs } from "../chain-state.js";
+import { pushFailureMemo } from "../failure-memos.js";
 import type { Artifact } from "../handle.js";
 import { formatError } from "../internal-utils.js";
 import { panelMembers } from "../judge.js";
@@ -404,7 +405,11 @@ function foldFanoutRow(acc: FoldAcc, gen: OpenGeneration, row: WorkflowStage): v
 		// fanout-non-failFast only — `shouldCollectAll`), so this arm cannot see
 		// a fail-fast trail.
 		const budget = gen.loop.kind === "fanout" ? (gen.loop.retryHaltedUnits ?? 0) : 0;
-		if (!(row.attemptOrdinal !== undefined && row.attemptOrdinal <= budget)) {
+		if (row.attemptOrdinal !== undefined && row.attemptOrdinal <= budget) {
+			// The skipped attempt's failure re-enters the memo ledger (live: recordUnitHalt)
+			// so the re-dispatch prompt carries it.
+			pushFailureMemo(acc.state, { stage: gen.parent, unitId: row.unitId }, row.errMsg ?? "");
+		} else {
 			const sentinel = rebuildCollectedSentinel(row, acc.runId);
 			foldFanoutCompletion(acc.state, gen.cursor, gen.def, gen.parent, row.unitIndex!, units.length, sentinel);
 		}
