@@ -76,6 +76,32 @@ describe("parseArgs", () => {
 		default: "mid",
 	};
 
+	it("parses a leading --max-jumps <n> on a run and threads it as maxBackwardJumps", () => {
+		expect(parseArgs("--max-jumps 6 mid Add dark mode", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "Add dark mode",
+			maxBackwardJumps: 6,
+		});
+	});
+
+	it("parses a trailing --max-jumps <n> on a resume", () => {
+		expect(parseArgs("@2026-09-05_10-01-29-cc02 --max-jumps 6", built)).toEqual({
+			kind: "resume",
+			ref: "2026-09-05_10-01-29-cc02",
+			droppedName: undefined,
+			maxBackwardJumps: 6,
+		});
+	});
+
+	it("leaves a mid-position --max-jumps in the input text", () => {
+		expect(parseArgs("mid fix the --max-jumps 6 handling", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "fix the --max-jumps 6 handling",
+		});
+	});
+
 	it("parses workflow name + input", () => {
 		expect(parseArgs("mid Add dark mode", built)).toEqual({
 			kind: "run",

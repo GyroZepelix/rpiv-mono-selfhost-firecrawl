@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`/wf … --max-jumps <n>` sets the backward-jump cap per run, on a fresh run and on a resume.** The cap (`MAX_BACKWARD_JUMPS = 3` per re-entered stage) was an embedder-only option; a fix loop that converges slowly — a code panel climbing 55 → 70 → 90 → 92 across four rounds with one finding left — hit it one lap short and could not be resumed, since the replay recounts the same re-entries. The flag is honored in the leading or trailing position like `--name`; a mid-position token stays as input text.
+
 ### Changed
+
+- **The resume fold trusts the trail for fanout generations that already closed with every unit done.** A closed, fully-done generation dispatches nothing on resume, yet the fold re-ran its unit source and refused (`ERR_RESUME_LOOP_MISMATCH`) whenever that source read state the run had since moved past — a grade panel's roster consults the basename-keyed prior snapshot, overwritten every fix round, so replaying round 1 read round 4's bytes. The recorded unit tags now stand in for the recompute on such generations; a generation at the trail's tail, one with a pending or hard-failed slot, or one followed by its parent's own halt/abort marker still recomputes, so a mid-flight abort re-dispatches exactly its pending units as before.
 
 - **Run trails move to schema v3 — the resume fold becomes budget-aware over `retryHaltedUnits`.** Collected soft-halt rows now carry the failed attempt's 1-based `attemptOrdinal` (stamped by the parallel dispatcher, written by `recordUnitHalt`), and the resume fold re-dispatches an under-budget halted unit — its slot stays unfilled, exactly like a pending one — instead of folding its sentinel, so a run interrupted inside a unit's retry window picks the retries up on resume instead of permanently collecting the halt. A final-attempt row (ordinal beyond budget, or absent) still folds the sentinel, byte-identical to v2. The retry budget is fresh per resume invocation (ordinals restart at 1, bounded only by human-initiated resumes — the accepted semantics). v1 and v2 trails refuse resume with a version mismatch ("start a fresh run"): there is no in-place migration.
 

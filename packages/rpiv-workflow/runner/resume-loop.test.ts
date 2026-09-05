@@ -335,9 +335,11 @@ describe("loop-resume — fanout", () => {
 		// No fanout unit re-dispatched — index 1's slot is filled by the rebuilt sentinel,
 		// not left pending. The only dispatch is the synthesize stage, whose fanin read
 		// skips the failed sentinel (p1 + p3, NOT p2).
-		expect(chain.sentMessages).toEqual([
-			"/skill:synthesize --plans .rpiv/artifacts/plans/p1.md --plans .rpiv/artifacts/plans/p3.md",
-		]);
+		expect(chain.sentMessages).toHaveLength(1);
+		expect(chain.sentMessages[0]).toMatch(
+			/^\/skill:synthesize --plans \.rpiv\/artifacts\/plans\/p1\.md --plans \.rpiv\/artifacts\/plans\/p3\.md\n\nPrior failures/,
+		);
+		expect(chain.sentMessages[0]).toContain("impl (unit phase-2): unit 2 boom"); // the collected halt's memo
 		// The collected row is NOT re-dispatched, so no new unit rows for impl land.
 		const rows = readAllStages(tmpDir, header.runId);
 		expect(rows.filter((r) => r.parent === "impl")).toHaveLength(3);
@@ -498,6 +500,43 @@ describe("loop-resume — fanout", () => {
 		expect(captured[1]?.kind).not.toBe("failed");
 	});
 
+	it("v3 budget-aware fold: an exhausted-budget collected row's failure still enters the memo ledger — the next stage's prompt carries it", async () => {
+		const retryWf: Workflow = {
+			name: "fanout-wf",
+			start: "impl",
+			stages: {
+				impl: produces({
+					outcome: transcriptOutcome("plans"),
+					loop: fanout({ units: threeUnits, retryHaltedUnits: 1 }),
+				}),
+				note: acts({ reads: [fanin("plans")] }),
+			},
+			edges: { impl: "note", note: "stop" },
+		} as Workflow;
+		writeRun([
+			unitRow(1, 1, "completed"),
+			{
+				...unitRow(2, 2, "failed"),
+				collected: true,
+				errMsg: "unit 2 boom",
+				unitLabel: "phase 2",
+				attemptOrdinal: 2,
+			},
+			unitRow(3, 3, "completed"),
+		]);
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [{ branch: [mockAssistantMessage("noted")] }], // the note stage
+		});
+
+		const result = await resumeWorkflow(chain.ctx, { workflow: retryWf, header, ref: "@x" });
+
+		expect(result.success).toBe(true);
+		expect(chain.sentMessages).toHaveLength(1); // zero unit re-dispatch — only the note stage
+		expect(chain.sentMessages[0]).toContain("/skill:note");
+		expect(chain.sentMessages[0]).toContain("impl (unit phase-2): unit 2 boom");
+	});
+
 	it("v3 budget-aware fold: an AT-BUDGET-EXHAUSTED collected row folds its sentinel — zero re-dispatch (today's behavior)", async () => {
 		// The same trail with attemptOrdinal: 2 — the FINAL attempt under
 		// retryHaltedUnits: 1 (1 initial + 1 retry). No budget remains, so the
@@ -616,7 +655,10 @@ describe("loop-resume — fanout", () => {
 		const result = await resumeWorkflow(chain.ctx, { workflow: haltWf, header, ref: "@x" });
 
 		expect(result.success).toBe(false);
-		expect(chain.sentMessages).toEqual(["/skill:impl phase 3"]); // ONLY the pending unit re-dispatched
+		expect(chain.sentMessages).toHaveLength(1); // ONLY the pending unit re-dispatched, carrying both memos
+		expect(chain.sentMessages[0]).toMatch(/^\/skill:impl phase 3\n\nPrior failures/);
+		expect(chain.sentMessages[0]).toContain("unit 1 boom");
+		expect(chain.sentMessages[0]).toContain("unit 2 boom");
 		const rows = readAllStages(tmpDir, header.runId);
 		expect(rows.filter((r) => r.parent === "impl" && r.collected === true)).toHaveLength(3);
 		const halts = rows.filter((r) => r.stage === "impl" && r.parent === undefined && r.status === "failed");

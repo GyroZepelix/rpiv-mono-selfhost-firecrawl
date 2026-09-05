@@ -35,6 +35,11 @@ const asst = (parts: unknown[]): unknown => ({
 const textPart = (text: string) => ({ type: "text", text });
 const writeUse = (path: string) => ({ type: "tool_use", name: "write", input: { path } });
 const readUse = (path: string) => ({ type: "tool_use", name: "read", input: { path } });
+const editUse = (path: string) => ({
+	type: "tool_use",
+	name: "edit",
+	input: { path, edits: [{ oldText: "a", newText: "b" }] },
+});
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "f9a6-actionability-session.jsonl");
 
@@ -169,6 +174,26 @@ describe("verdictCollector", () => {
 				{ handle: { kind: "fs", path: `${DIR}/${PLAN_BASE}__actionability__from-tool.json` }, role: "primary" },
 			],
 		});
+	});
+
+	it("tool-args arm: an edit tool-call on a NEW determined-name path collects like a write", async () => {
+		const abs = `${cwd}/${DIR}/${PLAN_BASE}__actionability__from-edit.json`;
+		const result = await run(snapOf(), { branch: [asst([editUse(abs)])], unitLabel: "actionability" });
+		expect(okPathOf(result)).toBe(`${DIR}/${PLAN_BASE}__actionability__from-edit.json`);
+	});
+
+	it("tool-args arms exclude a prior-round path the unit merely named (edit/write that left the file untouched)", async () => {
+		seedVerdict(`${PLAN_BASE}__actionability__old.json`, new Date(Date.now() - 60_000));
+		const snapshot = snapOf(); // the prior file is listed with its mtime
+		const prior = `${cwd}/${DIR}/${PLAN_BASE}__actionability__old.json`;
+		for (const use of [editUse(prior), writeUse(prior)]) {
+			const result = await run(snapshot, { branch: [asst([use])], unitLabel: "actionability" });
+			expect(result.kind).toBe("fatal");
+		}
+		// Once the file actually changes, the same path collects (disk arm).
+		seedVerdict(`${PLAN_BASE}__actionability__old.json`);
+		const result = await run(snapshot, { branch: [asst([editUse(prior)])], unitLabel: "actionability" });
+		expect(okPathOf(result)).toBe(`${DIR}/${PLAN_BASE}__actionability__old.json`);
 	});
 
 	it("composite fatal: names all three attempted surfaces", async () => {

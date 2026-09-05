@@ -134,9 +134,12 @@ export async function reconstructState(
 		prevNode: undefined,
 		gen: undefined,
 		drift: undefined,
+		rowIndex: -1,
+		recordedGens: scanClosedFanoutGenerations(rows),
 	};
 
 	for (const [i, row] of rows.entries()) {
+		acc.rowIndex = i;
 		// A routed-stop separator closes (and projects) the open generation
 		// BEFORE this row folds — the live driver had already projected the loop
 		// when its route fired, so the replayed state at a post-stop re-dispatch
@@ -229,6 +232,17 @@ interface FoldAcc {
 	prevNode: { stage: string; reentrant: boolean } | undefined;
 	gen: OpenGeneration | undefined;
 	drift: { parent: string; errMsg: string } | undefined;
+	/** Index of the row being folded — `openGeneration` keys `recordedGens` by it. */
+	rowIndex: number;
+	/**
+	 * Fanout generations the trail already CLOSED with every unit done, keyed by
+	 * the index of their first unit row: the recorded unit tags in `unitIndex`
+	 * order. A closed, fully-done generation dispatches nothing on resume, so its
+	 * recorded rows are the authority over a unit source that reads state the
+	 * run has since moved past (a basename-keyed snapshot overwritten by a later
+	 * round). Only the trailing open generation still needs the live recompute.
+	 */
+	recordedGens: Map<number, readonly string[]>;
 }
 
 // --- Fold predicates — single canonical spellings of the row-kind tests ---
@@ -325,6 +339,52 @@ function closeGeneration(acc: FoldAcc): void {
  * re-derived post-fold, where the generation's own appends have moved the
  * `.at(-1)` cursors.
  */
+/**
+ * Pre-scan: every maximal run of consecutive unit rows sharing a `parent` that
+ * is followed by a non-unit row (closed) and whose rows are all completed or
+ * collected soft-halts (done). Keyed by the first row's index; value = unit
+ * tags in `unitIndex` order. A generation still at the trail's tail, or one
+ * with a pending / hard-failed slot, or one followed by its parent's own
+ * halt/abort marker, is NOT listed — resume must re-dispatch into it, so the
+ * live unit source stays authoritative there.
+ */
+function scanClosedFanoutGenerations(rows: readonly WorkflowStage[]): Map<number, readonly string[]> {
+	const out = new Map<number, readonly string[]>();
+	let start = -1;
+	let parent: string | undefined;
+	let tags: (string | undefined)[] = [];
+	let allDone = true;
+	const flush = (closed: boolean): void => {
+		if (start >= 0 && closed && allDone && tags.length > 0 && tags.every((t) => t !== undefined)) {
+			out.set(start, tags as string[]);
+		}
+		start = -1;
+		parent = undefined;
+		tags = [];
+		allDone = true;
+	};
+	for (const [i, row] of rows.entries()) {
+		const unit = isUnitRow(row);
+		if (unit && row.parent === parent) {
+			if (row.unitIndex !== undefined) tags[row.unitIndex] = row.unitId;
+			allDone &&= isCompletedRow(row) || isCollectedSoftHalt(row);
+			continue;
+		}
+		// A non-unit row closes the generation UNLESS it is the parent's own
+		// halt/abort marker (same stage, not completed): that row means the
+		// generation stopped mid-flight and its unfilled slots must re-dispatch.
+		flush(!(row.stage === parent && !isCompletedRow(row)));
+		if (unit) {
+			start = i;
+			parent = row.parent;
+			if (row.unitIndex !== undefined) tags[row.unitIndex] = row.unitId;
+			allDone = isCompletedRow(row) || isCollectedSoftHalt(row);
+		}
+	}
+	flush(false); // a generation at the trail's tail is never closed
+	return out;
+}
+
 async function openGeneration(
 	acc: FoldAcc,
 	workflow: Workflow,
@@ -352,13 +412,21 @@ async function openGeneration(
 		units: undefined,
 	};
 	if (loop.kind === "fanout") {
-		acc.gen.units = await guarded(acc, acc.gen.parent, () =>
-			(loop as Extract<LoopDef, { kind: "fanout" }>).units({
-				cwd: acc.cwd,
-				artifact: acc.state.primaryArtifact,
-				state: acc.state,
-			}),
-		);
+		const recorded = acc.recordedGens.get(acc.rowIndex);
+		if (recorded) {
+			// Closed and fully done on the trail: nothing to dispatch, so the
+			// recorded tags ARE the generation. Skips the live recompute, whose
+			// inputs may no longer match this round's.
+			acc.gen.units = recorded.map((tag) => ({ prompt: "", label: tag, id: tag }));
+		} else {
+			acc.gen.units = await guarded(acc, acc.gen.parent, () =>
+				(loop as Extract<LoopDef, { kind: "fanout" }>).units({
+					cwd: acc.cwd,
+					artifact: acc.state.primaryArtifact,
+					state: acc.state,
+				}),
+			);
+		}
 	}
 	return undefined;
 }
@@ -404,12 +472,11 @@ function foldFanoutRow(acc: FoldAcc, gen: OpenGeneration, row: WorkflowStage): v
 		// failFast the live driver never writes a collected row (collect-all is
 		// fanout-non-failFast only — `shouldCollectAll`), so this arm cannot see
 		// a fail-fast trail.
+		// Every collected halt re-enters the memo ledger (live: recordUnitHalt), so
+		// later prompts — the re-dispatch's included — carry it as the live run's do.
+		pushFailureMemo(acc.state, { stage: gen.parent, unitId: row.unitId }, row.errMsg ?? "");
 		const budget = gen.loop.kind === "fanout" ? (gen.loop.retryHaltedUnits ?? 0) : 0;
-		if (row.attemptOrdinal !== undefined && row.attemptOrdinal <= budget) {
-			// The skipped attempt's failure re-enters the memo ledger (live: recordUnitHalt)
-			// so the re-dispatch prompt carries it.
-			pushFailureMemo(acc.state, { stage: gen.parent, unitId: row.unitId }, row.errMsg ?? "");
-		} else {
+		if (!(row.attemptOrdinal !== undefined && row.attemptOrdinal <= budget)) {
 			const sentinel = rebuildCollectedSentinel(row, acc.runId);
 			foldFanoutCompletion(acc.state, gen.cursor, gen.def, gen.parent, row.unitIndex!, units.length, sentinel);
 		}

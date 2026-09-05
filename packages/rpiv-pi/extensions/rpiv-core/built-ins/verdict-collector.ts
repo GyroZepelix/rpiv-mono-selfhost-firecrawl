@@ -113,6 +113,21 @@ const collectFromDisk = (
 	}
 };
 
+/** Arm 1's discriminator applied to a tool-arg path: `false` when the file was
+ *  listed at snapshot and its mtime has not moved (a prior round the unit
+ *  merely named — a failed edit, a read-back — is not a collection). */
+const writtenSinceSnapshot = (ctx: CollectContext<VerdictSnapshot>, raw: unknown): boolean => {
+	if (typeof raw !== "string") return false;
+	const p = normalized(ctx.cwd, raw);
+	const known = ctx.snapshot?.get(basename(p));
+	if (known === undefined) return true;
+	try {
+		return statSync(join(ctx.cwd, p)).mtimeMs > known;
+	} catch {
+		return true; // gone since snapshot — not a stale prior round
+	}
+};
+
 /** Arm 2's pattern: tightened to the determined name when both segments are
  *  known, else today's loose directory pattern (the `directoryPathCollector`
  *  idiom over the verdict dir). */
@@ -130,7 +145,7 @@ const lastWriteUnderDir = async (
 ): Promise<Artifact | undefined> => {
 	const writes = toolCallCollector({
 		match: (tc) => {
-			if (!isWriteTool(tc)) return false;
+			if (!isWriteTool(tc) || !writtenSinceSnapshot(ctx, tc.input.path)) return false;
 			const raw = tc.input.path;
 			if (typeof raw !== "string") return false;
 			const p = normalized(ctx.cwd, raw);
@@ -172,10 +187,10 @@ export function verdictCollector(opts: VerdictCollectorOpts): ArtifactCollector<
 			const rel = collectFromDisk(ctx, dir, determined);
 			if (rel !== undefined) return { kind: "ok", artifacts: [{ handle: fsHandle(rel), role: "primary" }] };
 			// Arm 2: transcript text (pattern tightened when determined; tool-args
-			// narrowed to write/edit calls — a prior-round read-back is not a collection).
+			// narrowed to write/edit calls on paths written since the snapshot).
 			const scanned = await transcriptPathCollector({
 				pattern: transcriptPattern(dir, determined),
-				match: isWriteTool,
+				match: (tc) => isWriteTool(tc) && writtenSinceSnapshot(ctx, tc.input.path),
 			}).collect(ctx);
 			if (scanned.kind === "ok" && scanned.artifacts.length > 0) return scanned;
 			// Arm 3: write tool-call arguments.

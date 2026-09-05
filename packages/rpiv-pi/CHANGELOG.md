@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Prior snapshots are written once per fix round.** `plan-snapshot` / `code-snapshot` publish `<plan-basename>.r<N>.md` under `.rpiv/artifacts/priors/` (round N = the snapshot's ordinal on its own channel) and keep writing the basename-keyed copy beside it. The surgical-fix guard reads the round's own bytes through the channel handle, so a resume replaying an earlier round no longer sees a later round's snapshot.
+
 ### Breaking / Upgrade Notes
 - Run state trails move to schema v3 — runs recorded by an earlier version refuse to resume, so finish or restart in-flight runs before upgrading.
 

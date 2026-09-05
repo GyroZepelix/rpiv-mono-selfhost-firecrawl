@@ -713,6 +713,44 @@ describe("reconstructState", () => {
 		expect(result.drift).toBeUndefined();
 	});
 
+	it("fanout generation closed with every unit done: recorded unit tags are authoritative, no drift on a recompute mismatch", async () => {
+		// The live unit source now yields a DIFFERENT roster than the trail recorded
+		// (the shape a basename-keyed snapshot overwritten by a later round produces).
+		const units: FanoutFn = () => [{ prompt: "x", label: "task", id: "task-1" }];
+		const wf: Workflow = {
+			name: "test-wf",
+			start: "build",
+			stages: {
+				build: produces({ outcome: makeOutcome("builds"), loop: fanout({ units }) }),
+				deploy: produces({ outcome: makeOutcome("deploys") }),
+			},
+			edges: { build: "deploy", deploy: "stop" },
+		} as Workflow;
+		const tail = fakeArtifact("deploys/d.md");
+		writeRunStages([
+			fanoutUnitRow("build", "phase-1", 0, 1, fakeOutput([fakeArtifact("builds/b1.md")])),
+			{
+				session: null,
+				stageNumber: 2,
+				stage: "deploy",
+				skill: "deploy",
+				status: "completed",
+				ts: "t2",
+				output: fakeOutput([tail]),
+			},
+		]);
+
+		const result = await reconstructState(tmpDir, wf, baseHeader);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+
+		// The generation was closed by the deploy row with its one unit completed:
+		// the recorded tag stands in for the recompute and the fold does not drift.
+		expect(result.drift).toBeUndefined();
+		expect(result.state.stagesCompleted).toBe(2);
+		expect(result.trailing).toBeUndefined();
+	});
+
 	it("fanout drift: a recomputed unit id differs from a recorded row → ok with drift set, state still applied", async () => {
 		const units: FanoutFn = () => [{ prompt: "x", label: "task", id: "task-1" }];
 		const wf: Workflow = {

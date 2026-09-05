@@ -68,7 +68,7 @@ export async function handleWorkflowCommand(host: WorkflowHost, args: string, ct
 		if (parsed.droppedName !== undefined) {
 			ctx.ui.notify(MSG_NAME_IGNORED_ON_RESUME, "warning");
 		}
-		await handleResume(host, ctx, parsed.ref);
+		await handleResume(host, ctx, parsed.ref, parsed.maxBackwardJumps);
 		return;
 	}
 
@@ -125,6 +125,7 @@ export async function handleWorkflowCommand(host: WorkflowHost, args: string, ct
 		host,
 		trigger: { kind: "command", name: "wf" },
 		name,
+		maxBackwardJumps: parsed.maxBackwardJumps,
 	})
 		.then((result) => {
 			// Surface pre-flight rejections (collision, etc.) — no runId means no JSONL on disk.
@@ -141,14 +142,19 @@ export async function handleWorkflowCommand(host: WorkflowHost, args: string, ct
 // Resume handler
 // ---------------------------------------------------------------------------
 
-async function handleResume(host: WorkflowHost, ctx: WorkflowHostContext, ref: string): Promise<void> {
+async function handleResume(
+	host: WorkflowHost,
+	ctx: WorkflowHostContext,
+	ref: string,
+	maxBackwardJumps?: number,
+): Promise<void> {
 	if (!ref) {
 		ctx.ui.notify(MSG_RESUME_USAGE, "error");
 		return;
 	}
 	// Float the resume off the prompt — identical shape to the run path,
 	// including the stale-safe settle tails.
-	void resumeWorkflowByRunId(ctx, ref, { host })
+	void resumeWorkflowByRunId(ctx, ref, { host, maxBackwardJumps })
 		.then((result) => {
 			// A failure with no runId is a no-JSONL refusal (run-id didn't resolve,
 			// load error, workflow gone, or an unreconstructable trail) — nothing else

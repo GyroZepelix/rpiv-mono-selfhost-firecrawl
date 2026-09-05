@@ -6457,7 +6457,9 @@ describe("build snapshot stages publish a prior sidecar off the plans channel (d
 			expect(out.artifacts).toHaveLength(1);
 			expect(out.artifacts[0].role).toBe("prior");
 			expect(out.artifacts[0].handle.kind).toBe("fs");
-			expect(out.artifacts[0].handle.path).toBe(".rpiv/artifacts/priors/p.md");
+			// Per-round file published (round 1 here); the basename-keyed copy is written beside it.
+			expect(out.artifacts[0].handle.path).toBe(".rpiv/artifacts/priors/p.r1.md");
+			expect(readFileSync(join(tmpDir, ".rpiv/artifacts/priors/p.r1.md"), "utf-8")).toBe(planBody);
 			expect(out.data.snapshot_of).toBe(REL);
 			// The prior file is a byte copy of the plan — the pre-fix content the
 			// re-grade diffs against.

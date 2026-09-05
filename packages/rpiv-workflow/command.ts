@@ -114,13 +114,23 @@ export function registerWorkflowCommand(host: WorkflowHost): void {
 // ---------------------------------------------------------------------------
 
 const LEADING_NAME_FLAG = /^--name\s+(\S+)\s*/;
+/** `--max-jumps <n>` — per-run override of the backward-jump cap; leading or trailing only, like `--name`. */
+const LEADING_JUMPS_FLAG = /^--max-jumps\s+(\d+)\s*/;
+const TRAILING_JUMPS_FLAG = /\s+--max-jumps\s+(\d+)$/;
 const TRAILING_NAME_FLAG = /\s+--name\s+(\S+)$/;
 /** Any surviving `--name` token after the leading/trailing extraction — input text, flagged. */
 const MID_NAME_FLAG = /(?:^|\s)--name(?:\s|$)/;
 
 export type ParsedCommand =
-	| { kind: "run"; workflow: string; input: string; name?: string; nameFlagIgnored?: boolean }
-	| { kind: "resume"; ref: string; droppedName?: string; nameFlagIgnored?: boolean };
+	| {
+			kind: "run";
+			workflow: string;
+			input: string;
+			name?: string;
+			nameFlagIgnored?: boolean;
+			maxBackwardJumps?: number;
+	  }
+	| { kind: "resume"; ref: string; droppedName?: string; nameFlagIgnored?: boolean; maxBackwardJumps?: number };
 
 /**
  * First token is a workflow name iff recognised; otherwise the whole arg is
@@ -143,6 +153,23 @@ export function parseArgs(
 ): ParsedCommand {
 	let trimmed = args.trim();
 	let name: string | undefined;
+	let maxBackwardJumps: number | undefined;
+
+	// Extract --max-jumps <n> from the leading or trailing position (checked
+	// before --name so `--max-jumps 6 --name x` and `--name x --max-jumps 6`
+	// both parse). A mid-position token stays as input text.
+	const leadJ = LEADING_JUMPS_FLAG.exec(trimmed);
+	if (leadJ) {
+		maxBackwardJumps = Number(leadJ[1]);
+		trimmed = trimmed.slice(leadJ[0].length);
+	} else {
+		const trailJ = TRAILING_JUMPS_FLAG.exec(trimmed);
+		if (trailJ) {
+			maxBackwardJumps = Number(trailJ[1]);
+			trimmed = trimmed.slice(0, trailJ.index);
+		}
+	}
+	const jumps = maxBackwardJumps !== undefined ? { maxBackwardJumps } : {};
 
 	// Extract --name <slug> from the leading or trailing token position only.
 	const leading = LEADING_NAME_FLAG.exec(trimmed);
@@ -162,11 +189,17 @@ export function parseArgs(
 	if (trimmed.startsWith("@")) {
 		// @resume — name has no meaning here; carry it as `droppedName` so the
 		// command layer can warn instead of silently dropping it.
-		return { kind: "resume", ref: trimmed.slice(1).trim().split(/\s+/)[0] ?? "", droppedName: name, ...ignored };
+		return {
+			kind: "resume",
+			ref: trimmed.slice(1).trim().split(/\s+/)[0] ?? "",
+			droppedName: name,
+			...ignored,
+			...jumps,
+		};
 	}
 
 	if (!trimmed) {
-		return { kind: "run", workflow: loaded.default ?? "", input: "", name, ...ignored };
+		return { kind: "run", workflow: loaded.default ?? "", input: "", name, ...ignored, ...jumps };
 	}
 
 	const firstSpace = trimmed.indexOf(" ");
@@ -174,8 +207,8 @@ export function parseArgs(
 
 	if (loaded.workflowNames.has(firstToken)) {
 		const remaining = firstSpace === -1 ? "" : trimmed.slice(firstSpace + 1).trim();
-		return { kind: "run", workflow: firstToken, input: remaining, name, ...ignored };
+		return { kind: "run", workflow: firstToken, input: remaining, name, ...ignored, ...jumps };
 	}
 
-	return { kind: "run", workflow: loaded.default ?? "", input: trimmed, name, ...ignored };
+	return { kind: "run", workflow: loaded.default ?? "", input: trimmed, name, ...ignored, ...jumps };
 }
