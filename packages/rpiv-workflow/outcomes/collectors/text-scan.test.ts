@@ -77,4 +77,48 @@ describe("textScanCollector", () => {
 		expect(result.kind).toBe("fatal");
 		expect((result as { message: string }).message).toMatch(/scanned assistant text and tool-call arguments/);
 	});
+
+	it("match narrows the tool-arg fallback: a filtered-out read contributes nothing, the matching write still hits", async () => {
+		const branch = [
+			asstTool([
+				{ type: "tool_use", name: "write", input: { path: "outputs/fresh.md" } },
+				{ type: "tool_use", name: "read", input: { path: "outputs/prior.md" } },
+			]),
+		];
+		const c = textScanCollector({
+			pattern: /outputs\/[\w.-]+\.md/g,
+			toHandle: fs,
+			noun: "path",
+			match: (tc) => tc.name === "write",
+		});
+		expect(await c.collect(ctxOf(branch) as never)).toEqual({
+			kind: "ok",
+			artifacts: [{ handle: { kind: "fs", path: "outputs/fresh.md" }, role: "primary" }],
+		});
+	});
+
+	it("the assistant-text scan is independent of match (text hit collects even when every tool call is filtered out)", async () => {
+		const branch = [
+			asstTool([
+				{ type: "tool_use", name: "read", input: { path: "outputs/from-tool.md" } },
+				{ type: "text", text: "wrote outputs/from-text.md" },
+			]),
+		];
+		const c = textScanCollector({
+			pattern: /outputs\/[\w.-]+\.md/g,
+			toHandle: fs,
+			noun: "path",
+			match: (tc) => tc.name === "write",
+		});
+		expect(await c.collect(ctxOf(branch) as never)).toEqual({
+			kind: "ok",
+			artifacts: [{ handle: { kind: "fs", path: "outputs/from-text.md" }, role: "primary" }],
+		});
+	});
+
+	it("throws at construction (not collect time) when match is provided but not a function", () => {
+		expect(() =>
+			textScanCollector({ pattern: /outputs\/[\w.-]+\.md/g, toHandle: fs, noun: "path", match: "nope" as never }),
+		).toThrow(/textScanCollector: `match` must be a function when provided/);
+	});
 });

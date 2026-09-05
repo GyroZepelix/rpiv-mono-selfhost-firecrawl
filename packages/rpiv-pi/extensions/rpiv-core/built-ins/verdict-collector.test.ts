@@ -34,6 +34,7 @@ const asst = (parts: unknown[]): unknown => ({
 });
 const textPart = (text: string) => ({ type: "text", text });
 const writeUse = (path: string) => ({ type: "tool_use", name: "write", input: { path } });
+const readUse = (path: string) => ({ type: "tool_use", name: "read", input: { path } });
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "f9a6-actionability-session.jsonl");
 
@@ -207,5 +208,26 @@ describe("verdictCollector", () => {
 		});
 		expect(result.kind).toBe("fatal");
 		expect((result as { message: string }).message).toMatch(/all missed/);
+	});
+
+	it("I2 regression — a read-only branch (the prior round's verdict read back) collects nothing: composite fatal", async () => {
+		seedVerdict(`${PLAN_BASE}__actionability__old.json`);
+		const snapshot = snapOf(); // the prior file is listed — the disk arm excludes it
+		const branch = [asst([readUse(`${cwd}/${DIR}/${PLAN_BASE}__actionability__old.json`)])];
+		const result = await run(snapshot, { branch, unitLabel: "actionability" });
+		expect(result.kind).toBe("fatal");
+		expect((result as { message: string }).message).toMatch(/all missed/);
+	});
+
+	it("surviving filtered surface — [write(new), read(prior)] with disk holding only the prior collects the write's new path", async () => {
+		seedVerdict(`${PLAN_BASE}__actionability__old.json`);
+		const snapshot = snapOf(); // prior round listed; new.json absent from disk
+		const branch = [
+			asst([writeUse(`${cwd}/${DIR}/${PLAN_BASE}__actionability__new.json`)]),
+			asst([readUse(`${cwd}/${DIR}/${PLAN_BASE}__actionability__old.json`)]), // later in branch order — filtered, cannot win
+		];
+		const result = await run(snapshot, { branch, unitLabel: "actionability" });
+		expect(result.kind).toBe("ok");
+		expect(okPathOf(result)).toBe(`${DIR}/${PLAN_BASE}__actionability__new.json`);
 	});
 });
