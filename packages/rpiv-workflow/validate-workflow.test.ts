@@ -995,6 +995,32 @@ describe("validateWorkflow — assess loop invariants", () => {
 		expect(e.some((i) => i.code === "loop-dep-flag-invalid")).toBe(false);
 	});
 
+	it.each([0, -1, 1.5])("rejects fanout retryHaltedUnits: %s (must be an integer >= 1)", (retryHaltedUnits) => {
+		const e = errors(
+			wf({
+				kind: "produces",
+				sessionPolicy: "fresh",
+				outcome: { name: "x", collector: noopCollector },
+				loop: { ...fanout({ units: () => [] }), retryHaltedUnits },
+			} as StageDef),
+		);
+		expect(
+			e.some((i) => i.code === "loop-retry-halted-units-invalid" && i.params.retryHaltedUnits === retryHaltedUnits),
+		).toBe(true);
+	});
+
+	it("accepts fanout retryHaltedUnits: 1", () => {
+		const e = errors(
+			wf({
+				kind: "produces",
+				sessionPolicy: "fresh",
+				outcome: { name: "x", collector: noopCollector },
+				loop: { ...fanout({ units: () => [] }), retryHaltedUnits: 1 },
+			} as StageDef),
+		);
+		expect(e.some((i) => i.code === "loop-retry-halted-units-invalid")).toBe(false);
+	});
+
 	it("accepts loop.max: 1 and an omitted max", () => {
 		const withMax = base({
 			loop: assess({ judge: skillJudge(), done: () => true, feedForward: () => "x", max: 1 }),

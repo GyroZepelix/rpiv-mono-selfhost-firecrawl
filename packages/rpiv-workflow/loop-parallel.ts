@@ -242,12 +242,14 @@ async function dispatchUnitDetached(
 	promptSuffix = "",
 ): Promise<Output> {
 	// One attempt = the unit's whole dispatch: lifecycle start, pre-attempt
-	// snapshot, session build, execution. Returns the attempt's settled output
+	// snapshot, session build, execution. `attemptOrdinal` is the attempt's
+	// 1-based count — stamped onto the session so the collected halt row
+	// carries it (the resume fold's budget input). Returns the attempt's settled output
 	// when its continuation ran (a real output, or the soft-halt sentinel
 	// `softHaltUnit` handed `onSuccess`), `undefined` when the halt never
 	// reached `onSuccess` (a fail-fast / infra-death terminal halt — the run is
 	// over, there is nothing to retry).
-	const attempt = async (): Promise<Output | undefined> => {
+	const attempt = async (attemptOrdinal: number): Promise<Output | undefined> => {
 		if (signal?.aborted) throw new WorkflowAbortError(); // never open a child after abort; isAbortError → unfilled slot
 		const u = fanoutUnitAt(e, index, promptSuffix);
 		await run.lifecycle.fire(
@@ -265,10 +267,19 @@ async function dispatchUnitDetached(
 		let captured: Output | undefined;
 		await deps.executeStageSession(
 			hostCtx,
-			buildUnitSession(e, u, index, run, snapshot, signal, (_child, output) => {
-				captured = output;
-				return Promise.resolve();
-			}),
+			buildUnitSession(
+				e,
+				u,
+				index,
+				run,
+				snapshot,
+				signal,
+				(_child, output) => {
+					captured = output;
+					return Promise.resolve();
+				},
+				attemptOrdinal,
+			),
 		);
 		return captured;
 	};
@@ -280,9 +291,9 @@ async function dispatchUnitDetached(
 	// the option, and under failFast by construction (a fail-fast halt leaves
 	// `captured` unset — the terminal path below, never a retry).
 	const retries = e.loop.kind === "fanout" && !isFailFast(e.loop) ? (e.loop.retryHaltedUnits ?? 0) : 0;
-	let settled = await attempt();
+	let settled = await attempt(1);
 	for (let used = 0; used < retries && settled !== undefined && isFailedOutput(settled); used++) {
-		settled = await attempt();
+		settled = await attempt(used + 2);
 	}
 	if (settled !== undefined) return settled;
 	// Fail-fast placement sentinel (the run is terminating when this is used, so

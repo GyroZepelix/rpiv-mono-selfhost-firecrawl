@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking / Upgrade Notes
+- Run state trails move to schema v3 — runs recorded by an earlier version refuse to resume, so finish or restart in-flight runs before upgrading.
+
 ## [2.9.0] - 2026-09-01
 
 ### Fixed

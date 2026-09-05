@@ -581,8 +581,9 @@ describe("reconstructState", () => {
 		expect(result.detail).toContain("schema v99");
 	});
 
-	it("REFUSES a v1 (sequential) trail — absent or explicit `v: 1` — with version-mismatch (schema v2)", async () => {
-		// Under schema v2 the fold places completion rows by `unitIndex`; a v1
+	it("REFUSES a v1 (sequential) trail — absent or explicit `v: 1` — with version-mismatch (schema v3)", async () => {
+		// Under schema v3 the fold places completion rows by `unitIndex` and
+		// skips under-budget collected rows budget-aware; a v1
 		// (sequential) trail cannot replay under the new rules, so it is rejected
 		// cleanly ("start a fresh run") rather than mis-folded. An absent `v`
 		// resolves to 1 and is rejected identically.

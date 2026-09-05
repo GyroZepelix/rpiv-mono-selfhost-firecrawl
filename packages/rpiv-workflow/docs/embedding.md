@@ -215,7 +215,7 @@ Like `runWorkflowByName`, neither throws: an unresolvable run-id, error-severity
 load issues, a workflow that is no longer registered, or an unreconstructable trail
 each come back as a failure envelope.
 
-Run trails carry a schema version (`STATE_SCHEMA_VERSION = 2`). Resuming a run
+Run trails carry a schema version (`STATE_SCHEMA_VERSION = 3`). Resuming a run
 recorded under a different version is **refused** with a version mismatch — there
 is no in-place migration.
 

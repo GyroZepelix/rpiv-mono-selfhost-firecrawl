@@ -382,12 +382,13 @@ async function openGeneration(
  *
  * RETRY TRAILS: a unit dispatched under `retryHaltedUnits` writes ONE
  * collected row per FAILED attempt (plus its completed row when the final
- * attempt succeeds) — all at the same `unitIndex`. The fold replays them in
- * trail order and places each by index, so the LATER row wins the slot: the
- * final attempt's output (a second sentinel, or the real verdict) overwrites
- * attempt-1's sentinel. That converges with the live path, which folds only
- * the unit's FINAL captured output — attempt-1's sentinel never reaches the
- * channel live, and on replay the row that follows it erases it.
+ * attempt succeeds) — all at the same `unitIndex`, each stamped with its
+ * 1-based `attemptOrdinal` (the v3 trail contract). Under-budget rows are
+ * SKIPPED, not overwritten: the budget predicate below leaves their slot
+ * unfilled, so the unit re-dispatches while budget remains. Only the FINAL
+ * attempt's collected row (ordinal beyond budget, or absent — pre-ordinal
+ * trails / non-retrying loops) folds its sentinel, converging with the live
+ * path, which folds only the unit's final captured output.
  */
 function foldFanoutRow(acc: FoldAcc, gen: OpenGeneration, row: WorkflowStage): void {
 	const units = gen.units!; // dispatcher gates this arm on gen.loop.kind === "fanout" && gen.units
@@ -395,8 +396,18 @@ function foldFanoutRow(acc: FoldAcc, gen: OpenGeneration, row: WorkflowStage): v
 		applyStageSuccess(acc.state, gen.def, row.stage, row.output);
 		foldFanoutCompletion(acc.state, gen.cursor, gen.def, gen.parent, row.unitIndex!, units.length, row.output);
 	} else if (isCollectedSoftHalt(row)) {
-		const sentinel = rebuildCollectedSentinel(row, acc.runId);
-		foldFanoutCompletion(acc.state, gen.cursor, gen.def, gen.parent, row.unitIndex!, units.length, sentinel);
+		// Budget-aware fold (the v3 trail contract): a collected row written by
+		// an attempt whose ordinal still has `retryHaltedUnits` budget remaining
+		// leaves its slot UNFILLED — `pendingFanoutIndices` re-dispatches it
+		// exactly like a pending unit. No isFailFast mirror needed: under
+		// failFast the live driver never writes a collected row (collect-all is
+		// fanout-non-failFast only — `shouldCollectAll`), so this arm cannot see
+		// a fail-fast trail.
+		const budget = gen.loop.kind === "fanout" ? (gen.loop.retryHaltedUnits ?? 0) : 0;
+		if (!(row.attemptOrdinal !== undefined && row.attemptOrdinal <= budget)) {
+			const sentinel = rebuildCollectedSentinel(row, acc.runId);
+			foldFanoutCompletion(acc.state, gen.cursor, gen.def, gen.parent, row.unitIndex!, units.length, sentinel);
+		}
 	}
 	gen.expected = undefined; // consumed
 }

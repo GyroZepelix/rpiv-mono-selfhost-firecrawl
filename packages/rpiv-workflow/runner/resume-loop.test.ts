@@ -399,6 +399,110 @@ describe("loop-resume — fanout", () => {
 		});
 	});
 
+	it("v3 budget-aware fold: an UNDER-BUDGET collected row (attemptOrdinal within retryHaltedUnits) re-dispatches its unit", async () => {
+		// The v3 trail contract: the collected row carries the failed attempt's
+		// 1-based ordinal, and the fold re-dispatches while budget remains. Here
+		// retryHaltedUnits is 1 and the row is attempt 1 — budget remains, so the
+		// slot stays UNFILLED (exactly like a pending unit) and resume dispatches
+		// phase 2 once; the capture stage then sees the re-dispatch's real output
+		// at slot 2, not a sentinel.
+		let captured: Output[] = [];
+		const retryWf: Workflow = {
+			name: "fanout-wf",
+			start: "impl",
+			stages: {
+				impl: produces({
+					outcome: transcriptOutcome("plans"),
+					loop: fanout({ units: threeUnits, retryHaltedUnits: 1 }),
+				}),
+				capture: acts.script({
+					run: ({ state }) => {
+						captured = [...(state.named.plans ?? [])];
+					},
+				}),
+			},
+			edges: { impl: "capture", capture: "stop" },
+		} as Workflow;
+		writeRun([
+			unitRow(1, 1, "completed"),
+			{
+				...unitRow(2, 2, "failed"),
+				collected: true,
+				errMsg: "unit 2 boom",
+				unitLabel: "phase 2",
+				attemptOrdinal: 1,
+			},
+			unitRow(3, 3, "completed"),
+		]);
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p2.md")] }], // the phase-2 re-dispatch
+		});
+
+		const result = await resumeWorkflow(chain.ctx, { workflow: retryWf, header, ref: "@x" });
+
+		expect(result.success).toBe(true);
+		// Exactly one re-dispatch — phase 2 (under budget), never the completed 1 & 3.
+		expect(chain.sentMessages).toEqual(["/skill:impl phase 2"]);
+		// One new completed phase-2 row follows the three trail rows (the capture
+		// stage's own completed row lands after it).
+		const rows = readAllStages(tmpDir, header.runId);
+		const implRows = rows.filter((r) => r.parent === "impl");
+		expect(implRows).toHaveLength(4);
+		expect(implRows[3]).toMatchObject({ stage: "impl (phase-2)", status: "completed", unitIndex: 1 });
+		// Capture slot 2 holds the re-dispatch's REAL output — no sentinel.
+		expect(captured).toHaveLength(3);
+		expect(captured[1]?.kind).not.toBe("failed");
+		expect(captured[1]?.artifacts[0]?.handle).toMatchObject({ kind: "fs", path: ".rpiv/artifacts/plans/p2.md" });
+	});
+
+	it("v3 budget-aware fold: an AT-BUDGET-EXHAUSTED collected row folds its sentinel — zero re-dispatch (today's behavior)", async () => {
+		// The same trail with attemptOrdinal: 2 — the FINAL attempt under
+		// retryHaltedUnits: 1 (1 initial + 1 retry). No budget remains, so the
+		// fold rebuilds the dimension-bearing sentinel at slot 2 exactly as a
+		// pre-v3 collected row folded: zero dispatch, every slot filled.
+		let captured: Output[] = [];
+		const retryWf: Workflow = {
+			name: "fanout-wf",
+			start: "impl",
+			stages: {
+				impl: produces({
+					outcome: transcriptOutcome("plans"),
+					loop: fanout({ units: threeUnits, retryHaltedUnits: 1 }),
+				}),
+				capture: acts.script({
+					run: ({ state }) => {
+						captured = [...(state.named.plans ?? [])];
+					},
+				}),
+			},
+			edges: { impl: "capture", capture: "stop" },
+		} as Workflow;
+		writeRun([
+			unitRow(1, 1, "completed"),
+			{
+				...unitRow(2, 2, "failed"),
+				collected: true,
+				errMsg: "unit 2 boom",
+				unitLabel: "phase 2",
+				attemptOrdinal: 2,
+			},
+			unitRow(3, 3, "completed"),
+		]);
+		const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+
+		const result = await resumeWorkflow(chain.ctx, { workflow: retryWf, header, ref: "@x" });
+
+		expect(result.success).toBe(true);
+		expect(chain.sentMessages).toEqual([]); // every slot filled — zero re-dispatch
+		expect(captured).toHaveLength(3);
+		expect(captured[1]).toMatchObject({
+			kind: "failed",
+			data: { reason: "unit 2 boom", dimension: "phase 2" },
+			meta: { stage: "impl (phase-2)", skill: "impl", stageNumber: 2, ts: "t2", runId: header.runId },
+		});
+	});
+
 	it("haltWhenAllFailed trail: all-sentinel cursor + parent halt row → ZERO re-dispatch, one fresh halt row, ends failed", async () => {
 		// The halt row is parent-attributed (no collected/parent/unitIndex fields), so
 		// the fold's halt-marker predicate (isOpenFanoutHaltMarker) keeps the generation

@@ -6767,9 +6767,7 @@ describe("build adaptive gate scaling (tier / roster / freshness / confirm)", ()
 				],
 			};
 			expect(route("slice-grade", named)).toBe("slice-fix");
-			expect(takeRouteNote(edge("slice-grade"))).toBe(
-				"unit-failed: design-readiness produced no verdict after one re-dispatch",
-			);
+			expect(takeRouteNote(edge("slice-grade"))).toBe("unit-failed: design-readiness produced no verdict");
 		});
 	});
 
@@ -8678,9 +8676,7 @@ describe("grade panel unit-failed routing (dimension-bearing sentinels)", () => 
 		// The route folds it: fix arm + note (on the pre-change tree the
 		// dimensionless sentinel is skipped and the gate routes onward).
 		expect(route("code-demote", codeGate([...passRest, sentinel("actionability")]))).toBe("code-snapshot");
-		expect(takeRouteNote(edge("code-demote"))).toBe(
-			"unit-failed: actionability produced no verdict after one re-dispatch",
-		);
+		expect(takeRouteNote(edge("code-demote"))).toBe("unit-failed: actionability produced no verdict");
 	});
 
 	it("red-first mirror: stale-fail-then-sentinel latest-wins at the fold; the UNFILLED-slot variant blocks WITHOUT being unit-failed", () => {
@@ -8723,9 +8719,7 @@ describe("grade panel unit-failed routing (dimension-bearing sentinels)", () => 
 			"slice-verdicts": [sentinel("design-readiness")],
 		};
 		expect(route("slice-grade", named)).toBe("slice-fix");
-		expect(takeRouteNote(edge("slice-grade"))).toBe(
-			"unit-failed: design-readiness produced no verdict after one re-dispatch",
-		);
+		expect(takeRouteNote(edge("slice-grade"))).toBe("unit-failed: design-readiness produced no verdict");
 	});
 
 	it("ship's grade stop names unit-failed dimensions ahead of severity blockers", () => {
@@ -8736,6 +8730,6 @@ describe("grade panel unit-failed routing (dimension-bearing sentinels)", () => 
 			"ship-verdicts": [verdict("completeness", true), verdict("correctness", true), sentinel("architecture-fit")],
 		});
 		expect(shipEdge({ state: s, output: undefined })).toBe("stop");
-		expect(takeRouteNote(shipEdge)).toBe("unit-failed: architecture-fit produced no verdict after one re-dispatch");
+		expect(takeRouteNote(shipEdge)).toBe("unit-failed: architecture-fit produced no verdict");
 	});
 });

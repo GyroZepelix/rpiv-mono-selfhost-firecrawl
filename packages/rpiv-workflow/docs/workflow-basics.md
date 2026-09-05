@@ -59,7 +59,7 @@ Resume folds the JSONL trail back into run state and re-enters at the pending st
 | Non-interactive session | `/wf requires interactive mode` |
 | No workflows registered | A message telling you to install a sibling that bundles workflows or author one in `.rpiv/workflows/config.ts`. This is the standalone-install default state — the package ships zero workflows |
 | Any load issue with `severity: "error"` | `/wf: N config errors — see warnings above (fix and re-run)`; execution is blocked until the config loads clean |
-| A run recorded under an older state schema | Resume is refused with a version mismatch. `STATE_SCHEMA_VERSION` is `2`; there is no in-place migration |
+| A run recorded under an older state schema | Resume is refused with a version mismatch. `STATE_SCHEMA_VERSION` is `3`; there is no in-place migration |
 | First `/wf` before the runtime pre-warms | One toast: `rpiv: loading workflow runtime (first /wf after load)…`. The runtime pre-warms 2000 ms after extension load |
 
 ## File structure
@@ -184,7 +184,7 @@ Alongside the trail:
 - `runs/names.json` — the `--name` slug → run-id index.
 - `runs/<run-id>/sessions/` — the child session files backing that run's stages.
 
-Trails carry `STATE_SCHEMA_VERSION`, currently `2`. A run recorded under a different version cannot be resumed.
+Trails carry `STATE_SCHEMA_VERSION`, currently `3`. A run recorded under a different version cannot be resumed.
 
 The package sets no explicit file modes; writes use the process umask. If a write fails, the error tells you to check filesystem permissions for `.rpiv/workflows/runs/`.
 

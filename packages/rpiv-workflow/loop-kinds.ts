@@ -537,6 +537,7 @@ export function buildUnitSession(
 	snapshot: unknown,
 	signal: AbortSignal | undefined,
 	onSuccess: StageSessionContext["onSuccess"],
+	attemptOrdinal?: number,
 ): StageSessionContext {
 	return {
 		cwd: run.cwd,
@@ -559,6 +560,10 @@ export function buildUnitSession(
 		worktreeDigest: run.worktreeDigest,
 		collectAll: shouldCollectAll(e.loop),
 		laneUnitIndex: laneIndexFor(e.loop, index),
+		// The v3 trail contract's attempt ordinal (present on every fanout unit
+		// attempt; `auditFor` projects it onto the collected halt row). Omitted
+		// when undefined so the sequential callers keep byte-identical sessions.
+		...(attemptOrdinal !== undefined ? { attemptOrdinal } : {}),
 		onFailure: undefined,
 		onSuccess,
 	};

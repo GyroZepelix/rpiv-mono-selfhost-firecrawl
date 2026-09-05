@@ -198,6 +198,10 @@ export function recordUnitHalt(ctx: WorkflowHostContext, audit: AuditContext, er
 		// fold threads it into the rebuilt sentinel's dimension so the live and
 		// replayed sentinels stay byte-identical (rebuildCollectedSentinel).
 		...(audit.unit ? { unitLabel: audit.unit.label } : {}),
+		// The failed attempt's 1-based ordinal — the resume fold's budget input:
+		// an under-budget collected row leaves its slot unfilled so resume
+		// re-dispatches the unit while `retryHaltedUnits` budget remains.
+		...(audit.attemptOrdinal !== undefined ? { attemptOrdinal: audit.attemptOrdinal } : {}),
 	});
 	recordFailureForensics(ctx, audit, errMsg);
 }

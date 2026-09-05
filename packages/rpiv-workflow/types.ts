@@ -560,6 +560,15 @@ export interface StageSessionContext extends SessionContext {
 	 */
 	bashTimeoutStrikes?: number;
 	/**
+	 * 1-based dispatch ordinal of THIS attempt within a fanout unit's
+	 * `retryHaltedUnits` window — stamped by the parallel dispatcher
+	 * (`dispatchUnitDetached` threads the per-attempt count through
+	 * `buildUnitSession`) and projected onto the collected halt row by
+	 * `auditFor` → `recordUnitHalt`. Undefined for sequential units
+	 * (iterate/assess) and single stages.
+	 */
+	attemptOrdinal?: number;
+	/**
 	 * Present iff this session IS one loop unit. Pre-decorated at session
 	 * construction by the driver (`stageName` carries the DISPLAY decoration;
 	 * this field carries the machine identity). Drives: structured row fields,

@@ -259,6 +259,10 @@ export interface FanoutLoop extends LoopCommon {
 	 * present; absent ⇒ exactly one dispatch (the prior contract).
 	 * Collect-all units only — inert under `failFast` (a fail-fast halt
 	 * terminates the run; there is nothing left to re-dispatch into).
+	 * Retries complete inside the per-unit worker before the generation
+	 * folds, so a set `haltWhenAllFailed` close sees only final attempts —
+	 * the halt fires only when every unit's FINAL attempt is a failed
+	 * sentinel; a unit that recovers on retry keeps the generation alive.
 	 */
 	retryHaltedUnits?: number;
 	/**

@@ -421,15 +421,19 @@ describe("loop driver — parallel fanout dispatch", () => {
 
 describe("loop driver — retry-once dispatch (retryHaltedUnits)", () => {
 	let captured: Output[] = [];
-	const retryWf = (retries: number | undefined) => ({
+	const retryWf = (
+		retries: number | undefined,
+		opts: { failFast?: boolean; outcome?: Outcome<unknown, "artifact-md", Record<string, unknown>> } = {},
+	) => ({
 		name: "par-retry",
 		start: "audit",
 		stages: {
 			audit: produces({
-				outcome: mdOutcome("audits"),
+				outcome: opts.outcome ?? mdOutcome("audits"),
 				loop: fanout({
 					units: () => [{ prompt: "u0", label: "u0", id: "u0" }],
 					...(retries !== undefined ? { retryHaltedUnits: retries } : {}),
+					...(opts.failFast ? { failFast: true } : {}),
 				}),
 			}),
 			capture: acts.script({
@@ -465,6 +469,8 @@ describe("loop driver — retry-once dispatch (retryHaltedUnits)", () => {
 			const rows = readRows().filter((r) => r.collected === true);
 			expect(rows).toHaveLength(2);
 			expect(rows.every((r) => r.unitLabel === "u0")).toBe(true);
+			// v3 trail contract: each collected row carries its attempt's 1-based ordinal.
+			expect(rows.map((r) => r.attemptOrdinal)).toEqual([1, 2]);
 			// The fold saw ONLY the final attempt's output: one sentinel, dimension-bearing.
 			expect(captured).toHaveLength(1);
 			expect(captured[0]).toMatchObject({
@@ -498,6 +504,40 @@ describe("loop driver — retry-once dispatch (retryHaltedUnits)", () => {
 		// The channel carries the REAL output — the later row's fold won the slot.
 		expect(captured).toHaveLength(1);
 		expect(captured[0]?.kind).not.toBe("failed");
+	});
+
+	// e2e row 1 — the failFast interplay pin
+	it("retryHaltedUnits is inert under failFast — one dispatch for the fatal unit, one terminal failed row, zero collected rows", async () => {
+		const host = createFakeConcurrentHost({ cwd: tmpDir, maxConcurrency: 1, childBranch: () => fatalBranch() });
+		const result = await runWorkflow(host.ctx, { workflow: retryWf(1, { failFast: true }), input: "x" });
+		expect(result.success).toBe(false);
+		expect(result.error).toBeTruthy();
+		expect(host.spawns).toHaveLength(1); // the !isFailFast exclusion — budget 1 buys nothing
+		const rows = readRows();
+		expect(rows.filter((r) => r.status === "failed")).toHaveLength(1); // terminal extraction-fatal row
+		expect(rows.filter((r) => r.collected === true)).toHaveLength(0); // never soft-halted
+	});
+
+	// e2e row 2 — the extraction-fill pin (unitLabel reaches the collector on every attempt)
+	it("ctx.unitLabel reaches the collector on every attempt (the extraction-fill e2e)", async () => {
+		const seen: Array<string | undefined> = [];
+		const recording: Outcome<unknown, "artifact-md", Record<string, unknown>> = {
+			name: "audits",
+			collector: {
+				collect: (ctx) => {
+					seen.push(ctx.unitLabel);
+					const path = lastMatch(ctx, MD_PATTERN);
+					if (!path) return { kind: "fatal", message: `${ctx.skill} produced no artifact path` };
+					return { kind: "ok", artifacts: [{ handle: fsHandle(path), role: "primary" }] };
+				},
+			},
+			parser: { parse: () => ({ kind: "ok", payload: { kind: "artifact-md", data: {} } }) },
+		};
+		const host = createFakeConcurrentHost({ cwd: tmpDir, maxConcurrency: 1, childBranch: () => fatalBranch() });
+		const result = await runWorkflow(host.ctx, { workflow: retryWf(1, { outcome: recording }), input: "x" });
+		expect(result.success).toBe(true); // collect-all survives both halts
+		expect(host.spawns).toHaveLength(2); // both attempts ran
+		expect(seen).toEqual(["u0", "u0"]); // the fill fired on EACH attempt
 	});
 });
 

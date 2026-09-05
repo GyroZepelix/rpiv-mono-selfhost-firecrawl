@@ -236,4 +236,8 @@ const auditFor = (s: StageSessionContext, session: SessionRef | null): AuditCont
 	// Loop units thread their identity onto failure/cancellation rows so failed
 	// trailers carry the structured fields the resume drift guard consumes.
 	...(s.unit ? { unit: s.unit } : {}),
+	// The failed attempt's 1-based ordinal (fanout units only) — projected onto
+	// the collected halt row for the resume fold's budget predicate. Omitted
+	// when absent (sequential units, single stages).
+	...(s.attemptOrdinal !== undefined ? { attemptOrdinal: s.attemptOrdinal } : {}),
 });

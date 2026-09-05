@@ -610,13 +610,12 @@ const validateFixGate = (): EdgeFn => {
 
 /**
  * The fix-arm note for a dead grade unit — the dimension soft-halted (after
- * its re-dispatch, when the panel wires one) and left no verdict to fold.
- * Naming it keeps the failure legible and the repair targeted: the fix arm
- * re-enters the panel, `dimensionsToRegrade` still lists the dimension as
+ * its retry budget ran out, when the panel wires one) and left no verdict to
+ * fold. Naming it keeps the failure legible and the repair targeted: the fix
+ * arm re-enters the panel, `dimensionsToRegrade` still lists the dimension as
  * pending, and a healthy re-dispatch grades it for real.
  */
-const unitFailedNote = (dims: readonly string[]): string =>
-	`unit-failed: ${dims.join(", ")} produced no verdict after one re-dispatch`;
+const unitFailedNote = (dims: readonly string[]): string => `unit-failed: ${dims.join(", ")} produced no verdict`;
 
 /** The slice gate's grade edge — design-readiness pass ⇒ design; a dead
  *  dimension unit ⇒ slice-fix with the note (a verdict-less dead dimension is

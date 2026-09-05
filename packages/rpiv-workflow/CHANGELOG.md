@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Run trails move to schema v3 — the resume fold becomes budget-aware over `retryHaltedUnits`.** Collected soft-halt rows now carry the failed attempt's 1-based `attemptOrdinal` (stamped by the parallel dispatcher, written by `recordUnitHalt`), and the resume fold re-dispatches an under-budget halted unit — its slot stays unfilled, exactly like a pending one — instead of folding its sentinel, so a run interrupted inside a unit's retry window picks the retries up on resume instead of permanently collecting the halt. A final-attempt row (ordinal beyond budget, or absent) still folds the sentinel, byte-identical to v2. The retry budget is fresh per resume invocation (ordinals restart at 1, bounded only by human-initiated resumes — the accepted semantics). v1 and v2 trails refuse resume with a version mismatch ("start a fresh run"): there is no in-place migration.
+
 ## [2.9.0] - 2026-09-01
 
 ### Fixed
