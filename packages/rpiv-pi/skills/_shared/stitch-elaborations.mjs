@@ -66,6 +66,41 @@ const elaborationsDir = resolve(dirname(planPath), "..", "elaborations");
 const FRONTMATTER_RE = /^---\n[\s\S]*?\n---\n/;
 const PHASE_HEADING_RE = /^## Phase (\d+):/;
 
+// A fence-shaped line: optional leading whitespace then 3+ backticks or 3+
+// tildes (the CommonMark fence delimiters). Deliberate mirror of the same-char
+// twins packages/rpiv-pi/extensions/rpiv-core/built-ins/markdown-fence.ts and
+// packages/rpiv-pi/extensions/rpiv-core/built-ins/reconcile-directives.mjs —
+// importing them is impossible here: this script runs as a bare `node` CLI
+// spawned by the workflow host
+// (packages/rpiv-pi/extensions/rpiv-core/built-in-workflows.ts), with no
+// loader that resolves package-root TypeScript. The close predicate below is
+// deliberately LOOSER than those twins (length-only, NOT same-char): a
+// backtick-opened fence closed by a bare `~~~` line is accepted. Closing that
+// gap is a behavior change, not a cleanup — it would strand the walk inside
+// the fence and swallow the next real `## Phase N:` heading, recreating the
+// 8534cb3c failure class (boundaries missed by a mis-tracked fence walk).
+const FENCE_LINE_RE = /^\s*(`{3,}|~{3,})/;
+
+/** Advance the fence-walk state `{ inFence, fenceLen }` (mutated in place)
+ *  across one line. Returns true for any fence-shaped line — an opener, a
+ *  closer, or a fence line that does not close the open fence — so the caller
+ *  can skip heading work and apply its own offset policy. The close test is
+ *  length-only on purpose (see FENCE_LINE_RE above): the delimiter run must
+ *  be at least as long as the opener's and alone on the line. */
+const fenceStep = (state, line) => {
+	const fence = line.match(FENCE_LINE_RE);
+	if (!fence) return false;
+	const len = fence[1].length;
+	if (!state.inFence) {
+		state.inFence = true;
+		state.fenceLen = len;
+	} else if (len >= state.fenceLen && line.trim().length === len) {
+		state.inFence = false;
+		state.fenceLen = 0;
+	}
+	return true;
+};
+
 /** Split a document into [frontmatter, body]; frontmatter ("" when absent) is kept verbatim. */
 const splitFrontmatter = (content) => {
 	const m = content.match(FRONTMATTER_RE);
@@ -128,52 +163,31 @@ const WPV_INTRO =
 	"Collected from each phase's `Automated Verification:` blocks in plan order; run on the merged tree once every phase has landed.";
 
 /** Call `fn(line)` for each line of `text` OUTSIDE fenced code blocks — the
- *  same fence rules as the phase-boundary walk (an elaboration's fenced
+ *  same fence rules as the phase-boundary walk, both consuming the shared
+ *  `fenceStep` over the module-level `FENCE_LINE_RE` (an elaboration's fenced
  *  Find/Replace blocks may legitimately contain heading- and bullet-shaped
  *  lines). Shared on purpose: the scope-note lift's re-land will consume this
  *  same walk. */
 const eachOutsideFence = (text, fn) => {
-	let inFence = false;
-	let fenceLen = 0;
+	const fenceState = { inFence: false, fenceLen: 0 };
 	for (const line of text.split("\n")) {
-		const fence = line.match(/^\s*(`{3,}|~{3,})/);
-		if (fence) {
-			const len = fence[1].length;
-			if (!inFence) {
-				inFence = true;
-				fenceLen = len;
-			} else if (len >= fenceLen && line.trim().length === len) {
-				inFence = false;
-				fenceLen = 0;
-			}
-			continue;
-		}
-		if (!inFence) fn(line);
+		if (fenceStep(fenceState, line)) continue;
+		if (!fenceState.inFence) fn(line);
 	}
 };
 
 /** Char offsets of column-0 `re`-matching lines OUTSIDE fenced code blocks —
- *  the main flow's own boundary-walk accumulation pattern (fence toggling,
- *  `+line.length+1`), factored out for reuse. */
+ *  the main flow's own boundary-walk accumulation pattern (fence toggling via
+ *  `fenceStep` over the module-level `FENCE_LINE_RE`, `+line.length+1`),
+ *  factored out for reuse. The unconditional offset advance is load-bearing:
+ *  the offsets feed `slice()` spans, so fence lines must advance the cursor
+ *  like any other line. */
 const headingOffsets = (text, re) => {
 	const offsets = [];
-	let inFence = false;
-	let fenceLen = 0;
+	const fenceState = { inFence: false, fenceLen: 0 };
 	let offset = 0;
 	for (const line of text.split("\n")) {
-		const fence = line.match(/^\s*(`{3,}|~{3,})/);
-		if (fence) {
-			const len = fence[1].length;
-			if (!inFence) {
-				inFence = true;
-				fenceLen = len;
-			} else if (len >= fenceLen && line.trim().length === len) {
-				inFence = false;
-				fenceLen = 0;
-			}
-		} else if (!inFence && re.test(line)) {
-			offsets.push(offset);
-		}
+		if (!fenceStep(fenceState, line) && !fenceState.inFence && re.test(line)) offsets.push(offset);
 		offset += line.length + 1;
 	}
 	return offsets;
@@ -315,21 +329,12 @@ const [frontmatter, body] = splitFrontmatter(readFileSync(planPath, "utf-8"));
 // above).
 const lines = body.split("\n");
 const starts = []; // { offset, n }
-let inFence = false;
-let fenceLen = 0;
+// Fence state for the shared fenceStep walk — FENCE_LINE_RE is matched
+// inside fenceStep, never inlined in any walker.
+const fenceState = { inFence: false, fenceLen: 0 };
 let offset = 0;
 for (const line of lines) {
-	const fence = line.match(/^\s*(`{3,}|~{3,})/);
-	if (fence) {
-		const len = fence[1].length;
-		if (!inFence) {
-			inFence = true;
-			fenceLen = len;
-		} else if (len >= fenceLen && line.trim().length === len) {
-			inFence = false;
-			fenceLen = 0;
-		}
-	} else if (!inFence) {
+	if (!fenceStep(fenceState, line) && !fenceState.inFence) {
 		const m = line.match(PHASE_HEADING_RE);
 		if (m) starts.push({ offset, n: Number.parseInt(m[1], 10) });
 	}

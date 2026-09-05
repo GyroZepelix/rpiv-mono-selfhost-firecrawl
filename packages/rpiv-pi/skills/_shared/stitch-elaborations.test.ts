@@ -274,6 +274,75 @@ describe("stitch-elaborations.mjs", () => {
 		expect([...second.matchAll(/^## Phase (\d+):/gm)].length).toBe(2);
 	});
 
+	// The mixed-delimiter close pin: a bare `~~~` line CLOSES a backtick-opened
+	// fence under the stitch's length-only predicate (the same-char twins in
+	// extensions/rpiv-core would not). Phase 2 stays kept-original with such a
+	// fence; the boundary walk must exit at the `~~~` so the following real
+	// `## Phase 3: Third` heading still reads as a section boundary — the
+	// 8534cb3c failure class a same-char tightening would recreate.
+	it("closes a backtick-opened fence at a bare ~~~ line so the next phase heading still counts", () => {
+		writeFileSync(
+			planPath,
+			[
+				"---",
+				"status: ready",
+				"phase_count: 3",
+				"phases:",
+				'  - { n: 1, title: "First" }',
+				'  - { n: 2, title: "Second" }',
+				'  - { n: 3, title: "Third" }',
+				"tags: [plan, synthesized]",
+				"---",
+				"",
+				"# Plan: demo",
+				"",
+				"## Synthesis Notes",
+				"- seam",
+				"",
+				"## Phase 1: First",
+				"### Changes",
+				"- `a.ts` — add foo",
+				"",
+				"## Phase 2: Second",
+				"### Changes",
+				"#### `doc.md`",
+				"Find:",
+				"```markdown",
+				"fenced example line",
+				"~~~",
+				"",
+				"## Phase 3: Third",
+				"### Changes",
+				"- `c.ts` — add baz",
+				"",
+			].join("\n"),
+		);
+		writeFileSync(
+			join(elaborationsDir, "2026-06-24_demo__phase-1.md"),
+			elaboration(1, "First", "export const foo = 1;"),
+		);
+		writeFileSync(
+			join(elaborationsDir, "2026-06-24_demo__phase-3.md"),
+			elaboration(3, "Third", "export const baz = 3;"),
+		);
+
+		const out = run(planPath);
+		const stitched = readFileSync(planPath, "utf-8");
+
+		// The `~~~` closed the backtick fence: all three headings were seen,
+		// phases 1 and 3 paired, phase 2 reported as kept-original.
+		expect(out).toContain("stitched 2/3 phases");
+		expect(out).toContain("no elaboration for phase(s) 2");
+		expect([...stitched.matchAll(/^## Phase (\d+):/gm)]).toHaveLength(3);
+		// Phase 3's elaboration spliced — and its original contract bullet
+		// replaced, proving the splice landed at the real phase-3 boundary.
+		expect(stitched).toContain("export const baz = 3;");
+		expect(stitched).not.toContain("- `c.ts` — add baz");
+		// Phase 2's kept-original span carries the mixed-delimiter fence
+		// through verbatim — the example line survives exactly once.
+		expect((stitched.match(/^fenced example line$/gm) ?? []).length).toBe(1);
+	});
+
 	it("exits 1 when no matching elaboration docs exist (wiring error)", () => {
 		const { status, stderr } = runFail(planPath);
 		expect(status).toBe(1);
