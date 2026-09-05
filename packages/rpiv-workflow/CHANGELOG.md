@@ -4,7 +4,7 @@
 
 ### Added
 
-- **`/wf … --max-jumps <n>` sets the backward-jump cap per run, on a fresh run and on a resume.** The cap (`MAX_BACKWARD_JUMPS = 3` per re-entered stage) was an embedder-only option; a fix loop that converges slowly — a code panel climbing 55 → 70 → 90 → 92 across four rounds with one finding left — hit it one lap short and could not be resumed, since the replay recounts the same re-entries. The flag is honored in the leading or trailing position like `--name`; a mid-position token stays as input text.
+- **`/wf … --max-jumps <n>` sets the backward-jump cap per run, on a fresh run and on a resume.** The cap (`MAX_BACKWARD_JUMPS = 3` per re-entered stage) was an embedder-only option; a fix loop that converges slowly — a code panel climbing 55 → 70 → 90 → 92 across four rounds with one finding left — hit it one lap short. The budget is per invocation (a resume starts a fresh count), so the flag is for giving a single invocation more room. It is honored in the leading or trailing position like `--name`; a mid-position token stays as input text.
 
 ### Changed
 
