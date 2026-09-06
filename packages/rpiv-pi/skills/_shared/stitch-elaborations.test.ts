@@ -803,8 +803,8 @@ describe("whole-plan verification emission", () => {
 		const stitched = readFileSync(planPath, "utf-8");
 
 		// The bullet rides the re-appended tail verbatim — §1.3's stitch moves
-		// whole blocks only, never interprets their body prose (FR5's lift, when
-		// it re-lands, must keep excluding this block as an input).
+		// whole blocks only, never interprets their body prose — a future lift
+		// must keep excluding this block as an input).
 		expect(out).toContain("whole-plan verification: authored");
 		expect(stitched).toContain(bullet);
 		expect((stitched.match(/^## Whole-Plan Verification/gm) ?? []).length).toBe(1);
