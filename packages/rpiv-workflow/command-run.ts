@@ -71,6 +71,10 @@ export async function handleWorkflowCommand(host: WorkflowHost, args: string, ct
 		ctx.ui.notify(MSG_NAME_FLAG_MID_INPUT, "warning");
 	}
 	for (const flag of parsed.duplicateFlags ?? []) {
+		// A doubled --name on @resume: the winner is about to be dropped anyway
+		// (MSG_NAME_IGNORED_ON_RESUME below), so "the first value wins" would be
+		// a false promise stacked on the ignore toast — one warning, not two.
+		if (parsed.kind === "resume" && flag === "--name") continue;
 		ctx.ui.notify(MSG_FLAG_REPEATED(flag), "warning");
 	}
 	// The ceiling is arbitrated before the cap and counts every re-entry

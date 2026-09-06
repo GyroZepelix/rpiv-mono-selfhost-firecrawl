@@ -55,7 +55,14 @@ vi.mock("./load/index.js", () => ({
 	),
 }));
 
-import { MSG_RUNTIME_LOADING, makeWfHandler, PREWARM_DELAY_MS, parseArgs, registerWorkflowCommand } from "./command.js";
+import {
+	FLAG_EXTRACTORS,
+	MSG_RUNTIME_LOADING,
+	makeWfHandler,
+	PREWARM_DELAY_MS,
+	parseArgs,
+	registerWorkflowCommand,
+} from "./command.js";
 import { loadWorkflows } from "./load/index.js";
 import { resumeWorkflowByRunId, runWorkflow } from "./runner/index.js";
 
@@ -89,7 +96,6 @@ describe("parseArgs", () => {
 		expect(parseArgs("@2026-09-05_10-01-29-cc02 --max-jumps 6", built)).toEqual({
 			kind: "resume",
 			ref: "2026-09-05_10-01-29-cc02",
-			droppedName: undefined,
 			maxBackwardJumps: 6,
 		});
 	});
@@ -250,7 +256,6 @@ describe("parseArgs — caps flag permutations", () => {
 		expect(parseArgs("@2026-09-05_10-01-29-cc02 --max-laps 8 --max-jumps 6", built)).toEqual({
 			kind: "resume",
 			ref: "2026-09-05_10-01-29-cc02",
-			droppedName: undefined,
 			maxBackwardJumps: 6,
 			maxLaps: 8,
 		});
@@ -348,7 +353,6 @@ describe("parseArgs — caps flag permutations", () => {
 		expect(parseArgs("@2026-09-05_10-01-29-cc02 --max-laps 4 --max-laps 9", built)).toEqual({
 			kind: "resume",
 			ref: "2026-09-05_10-01-29-cc02",
-			droppedName: undefined,
 			maxLaps: 4,
 			duplicateFlags: ["--max-laps"],
 		});
@@ -389,7 +393,6 @@ describe("parseArgs — caps flag permutations", () => {
 		expect(parseArgs("--max-jumps 6 --max-jumps 9 @2026-09-05_10-01-29-cc02", built)).toEqual({
 			kind: "resume",
 			ref: "2026-09-05_10-01-29-cc02",
-			droppedName: undefined,
 			maxBackwardJumps: 6,
 			duplicateFlags: ["--max-jumps"],
 		});
@@ -431,12 +434,20 @@ describe("parseArgs — caps flag permutations", () => {
 		});
 	});
 
-	it("keeps absent caps keys absent when only --name is supplied (strict toEqual)", () => {
-		expect(parseArgs("--name auth mid go", built)).toEqual({
+	it("keeps absent caps keys absent when only --name is supplied (toStrictEqual — absent, not present-undefined)", () => {
+		expect(parseArgs("--name auth mid go", built)).toStrictEqual({
 			kind: "run",
 			workflow: "mid",
 			input: "go",
 			name: "auth",
+		});
+	});
+
+	it("keeps an absent --name / droppedName ABSENT on both arms (one key-presence convention)", () => {
+		expect(parseArgs("mid go", built)).toStrictEqual({ kind: "run", workflow: "mid", input: "go" });
+		expect(parseArgs("@2026-06-03_07-30-00-ab12", built)).toStrictEqual({
+			kind: "resume",
+			ref: "2026-06-03_07-30-00-ab12",
 		});
 	});
 });
@@ -459,9 +470,11 @@ describe("parseArgs — every leading/trailing permutation keeps the first-typed
 		workflowNames: new Set(["tiny", "mid", "review"]),
 		default: "mid",
 	};
-	type Key = "name" | "maxBackwardJumps" | "maxLaps";
-	const TOKEN: Record<Key, string> = { name: "--name", maxBackwardJumps: "--max-jumps", maxLaps: "--max-laps" };
-	const KEYS: readonly Key[] = ["name", "maxBackwardJumps", "maxLaps"];
+	// Grammar derived from the extractor table itself — a fourth flag row
+	// enters the enumeration without a lockstep edit here.
+	type Key = (typeof FLAG_EXTRACTORS)[number]["key"];
+	const KEYS: readonly Key[] = FLAG_EXTRACTORS.map((f) => f.key);
+	const TOKEN = Object.fromEntries(FLAG_EXTRACTORS.map((f) => [f.key, f.token])) as Record<Key, string>;
 	const REF = "2026-06-03_07-30-00-ab12";
 
 	// Both arms: the run body resolves a workflow + input; the @ref body is
@@ -471,7 +484,7 @@ describe("parseArgs — every leading/trailing permutation keeps the first-typed
 	// arm's masked-head cells are covered structurally, not by hand pins.
 	const BODIES = [
 		{ label: "run", text: "tiny fix the thing", base: { kind: "run", workflow: "tiny", input: "fix the thing" } },
-		{ label: "resume", text: `@${REF}`, base: { kind: "resume", ref: REF, droppedName: undefined } },
+		{ label: "resume", text: `@${REF}`, base: { kind: "resume", ref: REF } },
 	] as const;
 
 	/** Every sequence of `n` keys (with repetition). */
@@ -518,8 +531,33 @@ describe("parseArgs — every leading/trailing permutation keeps the first-typed
 		expect(cases).toHaveLength(2 * (3 * 2 + 9 * 3 + 27 * 4 + 81 * 5));
 	});
 
+	// Strict: an absent key and a present-undefined key are DIFFERENT shapes
+	// here — `toEqual` equates them and could not see a regression either way.
 	it.each(cases)("$line", ({ line, expected }) => {
-		expect(parseArgs(line, built)).toEqual(expected);
+		expect(parseArgs(line, built)).toStrictEqual(expected);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// FLAG_EXTRACTORS — the anchor invariant the typed-offset ranking relies on.
+// ---------------------------------------------------------------------------
+
+describe("FLAG_EXTRACTORS — anchor invariant", () => {
+	it.each(FLAG_EXTRACTORS.map((f) => [f.token, f] as const))(
+		"%s: leading is ^-anchored, trailing is \\s+-prefixed and $-anchored",
+		(_token, f) => {
+			expect(f.leading.source.startsWith("^")).toBe(true);
+			expect(f.trailing.source.startsWith("\\s+")).toBe(true);
+			expect(f.trailing.source.endsWith("$")).toBe(true);
+			// Neither form is global/sticky — `exec` must be stateless across passes.
+			expect(f.leading.flags).toBe("");
+			expect(f.trailing.flags).toBe("");
+		},
+	);
+
+	it("keys and tokens are unique", () => {
+		expect(new Set(FLAG_EXTRACTORS.map((f) => f.key)).size).toBe(FLAG_EXTRACTORS.length);
+		expect(new Set(FLAG_EXTRACTORS.map((f) => f.token)).size).toBe(FLAG_EXTRACTORS.length);
 	});
 });
 

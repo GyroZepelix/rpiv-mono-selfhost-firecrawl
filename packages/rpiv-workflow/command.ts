@@ -128,8 +128,16 @@ const MID_NAME_FLAG = /(?:^|\s)--name(?:\s|$)/;
  * The extractable leading/trailing flags with their reader. One row per
  * flag; the fixpoint in `parseArgs` walks this table so a new flag is a
  * one-row addition, not another copy of the extraction sequence.
+ *
+ * Anchor invariant (the first-typed ranking depends on it): every `leading`
+ * form is `^`-anchored so its match sits at the residual's head, and every
+ * `trailing` form is `\s+`-prefixed and `$`-anchored so `match.index` is the
+ * offset of the whitespace before the token. `parseArgs` turns those into
+ * typed offsets; a row anchored any other way would rank wrong. Pinned by
+ * `command.test.ts`, which also derives its permutation grammar from this
+ * table. Exported for tests only.
  */
-const FLAG_EXTRACTORS = [
+export const FLAG_EXTRACTORS = [
 	{ key: "name", token: "--name", leading: LEADING_NAME_FLAG, trailing: TRAILING_NAME_FLAG },
 	{ key: "maxBackwardJumps", token: "--max-jumps", leading: LEADING_JUMPS_FLAG, trailing: TRAILING_JUMPS_FLAG },
 	{ key: "maxLaps", token: "--max-laps", leading: LEADING_LAPS_FLAG, trailing: TRAILING_LAPS_FLAG },
@@ -221,7 +229,7 @@ export function parseArgs(
 	// resolution. The FIRST-TYPED value wins: extraction order is NOT typed
 	// order (a trailing run peels from the end; a head flag can mask a
 	// leading match for a whole pass), so every occurrence carries its offset
-	// in the original line and the smallest offset wins — no slot heuristic.
+	// in the trimmed line and the smallest offset wins — no slot heuristic.
 	// A mid-position token matches neither form and stays as input text
 	// (silent for both caps flags; `--name` additionally warns via
 	// MID_NAME_FLAG below).
@@ -260,13 +268,16 @@ export function parseArgs(
 	// with the line's shape) so the command layer's warnings are stable.
 	const duplicates = FLAG_EXTRACTORS.filter((f) => repeated.has(f.key)).map((f) => f.token);
 	const name = flags.name;
-	// Conditional spread — an absent flag must stay an ABSENT key (strict
-	// toEqual pins), not a present-undefined one.
+	// Conditional spread — an absent flag must stay an ABSENT key, not a
+	// present-undefined one: ONE key-presence convention for every optional
+	// field, pinned with `toStrictEqual` (a lenient `toEqual` equates the two
+	// shapes and would mask a regression either way).
 	const caps = {
 		...(flags.maxBackwardJumps !== undefined ? { maxBackwardJumps: flags.maxBackwardJumps } : {}),
 		...(flags.maxLaps !== undefined ? { maxLaps: flags.maxLaps } : {}),
 		...(duplicates.length > 0 ? { duplicateFlags: duplicates } : {}),
 	};
+	const named = name !== undefined ? { name } : {};
 
 	const nameFlagIgnored = MID_NAME_FLAG.test(trimmed);
 	const ignored = nameFlagIgnored ? { nameFlagIgnored: true as const } : {};
@@ -277,14 +288,14 @@ export function parseArgs(
 		return {
 			kind: "resume",
 			ref: trimmed.slice(1).trim().split(/\s+/)[0] ?? "",
-			droppedName: name,
+			...(name !== undefined ? { droppedName: name } : {}),
 			...ignored,
 			...caps,
 		};
 	}
 
 	if (!trimmed) {
-		return { kind: "run", workflow: loaded.default ?? "", input: "", name, ...ignored, ...caps };
+		return { kind: "run", workflow: loaded.default ?? "", input: "", ...named, ...ignored, ...caps };
 	}
 
 	const firstSpace = trimmed.indexOf(" ");
@@ -292,8 +303,8 @@ export function parseArgs(
 
 	if (loaded.workflowNames.has(firstToken)) {
 		const remaining = firstSpace === -1 ? "" : trimmed.slice(firstSpace + 1).trim();
-		return { kind: "run", workflow: firstToken, input: remaining, name, ...ignored, ...caps };
+		return { kind: "run", workflow: firstToken, input: remaining, ...named, ...ignored, ...caps };
 	}
 
-	return { kind: "run", workflow: loaded.default ?? "", input: trimmed, name, ...ignored, ...caps };
+	return { kind: "run", workflow: loaded.default ?? "", input: trimmed, ...named, ...ignored, ...caps };
 }

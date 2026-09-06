@@ -13,7 +13,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowHost, WorkflowHostContext } from "./host.js";
 import { formatError } from "./internal-utils.js";
-import { MSG_FLAG_REPEATED, MSG_JUMP_CAP_ABOVE_LAP_CEILING, MSG_RESUME_USAGE, MSG_WORKFLOW_THREW } from "./messages.js";
+import {
+	MSG_FLAG_REPEATED,
+	MSG_JUMP_CAP_ABOVE_LAP_CEILING,
+	MSG_NAME_IGNORED_ON_RESUME,
+	MSG_RESUME_USAGE,
+	MSG_WORKFLOW_THREW,
+} from "./messages.js";
 
 // Mock the loader to a single registered workflow — parseArgs sees "ship" as a
 // workflow name, so `/wf ship <input>` resolves a run without touching disk.
@@ -404,6 +410,31 @@ describe("handleWorkflowCommand — repeated flags", () => {
 			name: "x",
 			maxBackwardJumps: 6,
 		});
+	});
+
+	it("a doubled --name on the @resume arm warns ONCE (ignored-on-resume), not 'first value wins' on a name about to be dropped", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "@my-run --name a --name b", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_NAME_IGNORED_ON_RESUME, "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[1]).toBe("my-run");
+	});
+
+	it("a doubled caps flag beside a doubled --name on @resume still warns for the caps flag", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "--max-laps 4 @my-run --name a --name b --max-laps 9", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-laps"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_NAME_IGNORED_ON_RESUME, "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2]).toMatchObject({ maxLaps: 4 });
 	});
 
 	it("a masked-head doubled --max-jumps on the @resume arm resumes with the first-typed value", async () => {
