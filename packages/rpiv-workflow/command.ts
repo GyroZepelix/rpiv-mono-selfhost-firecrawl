@@ -117,9 +117,36 @@ const LEADING_NAME_FLAG = /^--name\s+(\S+)\s*/;
 /** `--max-jumps <n>` — per-run override of the backward-jump cap; leading or trailing only, like `--name`. */
 const LEADING_JUMPS_FLAG = /^--max-jumps\s+(\d+)\s*/;
 const TRAILING_JUMPS_FLAG = /\s+--max-jumps\s+(\d+)$/;
+/** `--max-laps <n>` — per-run override of the absolute lap ceiling; leading or trailing only, like `--name`. */
+const LEADING_LAPS_FLAG = /^--max-laps\s+(\d+)\s*/;
+const TRAILING_LAPS_FLAG = /\s+--max-laps\s+(\d+)$/;
 const TRAILING_NAME_FLAG = /\s+--name\s+(\S+)$/;
 /** Any surviving `--name` token after the leading/trailing extraction — input text, flagged. */
 const MID_NAME_FLAG = /(?:^|\s)--name(?:\s|$)/;
+
+/**
+ * The extractable leading/trailing flags with their reader. One row per
+ * flag; the fixpoint in `parseArgs` walks this table so a new flag is a
+ * one-row addition, not another copy of the extraction sequence.
+ */
+const FLAG_EXTRACTORS = [
+	{ key: "name", leading: LEADING_NAME_FLAG, trailing: TRAILING_NAME_FLAG },
+	{ key: "maxBackwardJumps", leading: LEADING_JUMPS_FLAG, trailing: TRAILING_JUMPS_FLAG },
+	{ key: "maxLaps", leading: LEADING_LAPS_FLAG, trailing: TRAILING_LAPS_FLAG },
+] as const;
+
+type FlagKey = (typeof FLAG_EXTRACTORS)[number]["key"];
+
+/** Record one extracted flag's raw token under its key. */
+function assignFlag(
+	flags: { name?: string; maxBackwardJumps?: number; maxLaps?: number },
+	key: FlagKey,
+	raw: string,
+): void {
+	if (key === "name") flags.name = raw;
+	else if (key === "maxBackwardJumps") flags.maxBackwardJumps = Number(raw);
+	else flags.maxLaps = Number(raw);
+}
 
 export type ParsedCommand =
 	| {
@@ -129,8 +156,16 @@ export type ParsedCommand =
 			name?: string;
 			nameFlagIgnored?: boolean;
 			maxBackwardJumps?: number;
+			maxLaps?: number;
 	  }
-	| { kind: "resume"; ref: string; droppedName?: string; nameFlagIgnored?: boolean; maxBackwardJumps?: number };
+	| {
+			kind: "resume";
+			ref: string;
+			droppedName?: string;
+			nameFlagIgnored?: boolean;
+			maxBackwardJumps?: number;
+			maxLaps?: number;
+	  };
 
 /**
  * First token is a workflow name iff recognised; otherwise the whole arg is
@@ -142,6 +177,10 @@ export type ParsedCommand =
  * wins when both are present). A `--name` anywhere else is the user's own
  * prompt text (`/wf fix the --name handling bug`) — it stays in the input
  * untouched and `nameFlagIgnored` is set so the command layer can warn.
+ * The two caps flags — `--max-jumps <n>` and `--max-laps <n>` — follow the
+ * same rule (leading or trailing only, at most once per flag, any relative
+ * order among the three); a mid-position caps token stays in the input
+ * untouched and, unlike `--name`, sets no flag.
  *
  * `@<ref>` on the first token is the resume sigil — the first whitespace-
  * delimited token after `@` is the run reference. Leading space after the
@@ -152,37 +191,46 @@ export function parseArgs(
 	loaded: { workflowNames: ReadonlySet<string>; default: string | undefined },
 ): ParsedCommand {
 	let trimmed = args.trim();
-	let name: string | undefined;
-	let maxBackwardJumps: number | undefined;
+	const flags: { name?: string; maxBackwardJumps?: number; maxLaps?: number } = {};
 
-	// Extract --max-jumps <n> from the leading or trailing position (checked
-	// before --name so `--max-jumps 6 --name x` and `--name x --max-jumps 6`
-	// both parse). A mid-position token stays as input text.
-	const leadJ = LEADING_JUMPS_FLAG.exec(trimmed);
-	if (leadJ) {
-		maxBackwardJumps = Number(leadJ[1]);
-		trimmed = trimmed.slice(leadJ[0].length);
-	} else {
-		const trailJ = TRAILING_JUMPS_FLAG.exec(trimmed);
-		if (trailJ) {
-			maxBackwardJumps = Number(trailJ[1]);
-			trimmed = trimmed.slice(0, trailJ.index);
+	// Fixpoint flag extraction: each pass walks every not-yet-extracted flag
+	// and tries its LEADING form first (a flag's first occurrence wins), then
+	// its TRAILING form, against the current residual; a pass that extracts
+	// nothing ends the loop. Each flag extracts at most once. A fixed
+	// extraction SEQUENCE (jumps, then name) silently swallows a flag in
+	// same-slot permutations — `--max-laps 8 --max-jumps 6 --name x` would
+	// strand `--max-jumps 6` as input text; the fixpoint peels the
+	// leading/trailing positions in any relative order. A mid-position token
+	// matches neither form and stays as input text (silent for both caps
+	// flags; `--name` additionally warns via MID_NAME_FLAG below).
+	const extracted = new Set<FlagKey>();
+	for (;;) {
+		let extractedThisPass = false;
+		for (const flag of FLAG_EXTRACTORS) {
+			if (extracted.has(flag.key)) continue;
+			const lead = flag.leading.exec(trimmed);
+			if (lead !== null) {
+				assignFlag(flags, flag.key, lead[1]!);
+				trimmed = trimmed.slice(lead[0].length);
+			} else {
+				const trail = flag.trailing.exec(trimmed);
+				if (trail === null) continue;
+				assignFlag(flags, flag.key, trail[1]!);
+				trimmed = trimmed.slice(0, trail.index);
+			}
+			extracted.add(flag.key);
+			extractedThisPass = true;
 		}
+		if (!extractedThisPass) break;
 	}
-	const jumps = maxBackwardJumps !== undefined ? { maxBackwardJumps } : {};
+	const name = flags.name;
+	// Conditional spread — an absent flag must stay an ABSENT key (strict
+	// toEqual pins), not a present-undefined one.
+	const caps = {
+		...(flags.maxBackwardJumps !== undefined ? { maxBackwardJumps: flags.maxBackwardJumps } : {}),
+		...(flags.maxLaps !== undefined ? { maxLaps: flags.maxLaps } : {}),
+	};
 
-	// Extract --name <slug> from the leading or trailing token position only.
-	const leading = LEADING_NAME_FLAG.exec(trimmed);
-	if (leading) {
-		name = leading[1];
-		trimmed = trimmed.slice(leading[0].length);
-	} else {
-		const trailing = TRAILING_NAME_FLAG.exec(trimmed);
-		if (trailing) {
-			name = trailing[1];
-			trimmed = trimmed.slice(0, trailing.index);
-		}
-	}
 	const nameFlagIgnored = MID_NAME_FLAG.test(trimmed);
 	const ignored = nameFlagIgnored ? { nameFlagIgnored: true as const } : {};
 
@@ -194,12 +242,12 @@ export function parseArgs(
 			ref: trimmed.slice(1).trim().split(/\s+/)[0] ?? "",
 			droppedName: name,
 			...ignored,
-			...jumps,
+			...caps,
 		};
 	}
 
 	if (!trimmed) {
-		return { kind: "run", workflow: loaded.default ?? "", input: "", name, ...ignored, ...jumps };
+		return { kind: "run", workflow: loaded.default ?? "", input: "", name, ...ignored, ...caps };
 	}
 
 	const firstSpace = trimmed.indexOf(" ");
@@ -207,8 +255,8 @@ export function parseArgs(
 
 	if (loaded.workflowNames.has(firstToken)) {
 		const remaining = firstSpace === -1 ? "" : trimmed.slice(firstSpace + 1).trim();
-		return { kind: "run", workflow: firstToken, input: remaining, name, ...ignored, ...jumps };
+		return { kind: "run", workflow: firstToken, input: remaining, name, ...ignored, ...caps };
 	}
 
-	return { kind: "run", workflow: loaded.default ?? "", input: trimmed, name, ...ignored, ...jumps };
+	return { kind: "run", workflow: loaded.default ?? "", input: trimmed, name, ...ignored, ...caps };
 }

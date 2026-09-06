@@ -54,6 +54,7 @@ export function checkStageSemantics(w: Workflow, r: IssueReporter): void {
 		checkVerifyInvariants(stage, name, report);
 		checkPromptInvariants(stage, name === w.start, report);
 		checkInheritsArtifactsKind(stage, report);
+		checkProgressShape(stage, report);
 		checkScriptStageInvariants(stage, report);
 	}
 }
@@ -373,6 +374,21 @@ function checkPromptInvariants(stage: StageDef, isStart: boolean, report: Report
 function checkInheritsArtifactsKind(stage: StageDef, report: ReportFn): void {
 	if (stage.inheritsArtifacts === false && stage.kind === "produces") {
 		report("inherits-artifacts-on-produces");
+	}
+}
+
+/**
+ * `progress` is the optional backward-jump waiver hook, declared on
+ * `StageDefBase` so every dispatch arm carries it. Present ⇒ must be a
+ * function — the guard awaits it per decision-edge re-entry. An absent
+ * hook is valid (every re-entry counts). No exclusion rules: `progress`
+ * composes with `loop` / `verify` / `reads` by design, so this is purely a
+ * shape check (mirrors the `readsData` lint posture: jiti erases the TS
+ * type, the load gate catches a hand-rolled literal).
+ */
+function checkProgressShape(stage: StageDef, report: ReportFn): void {
+	if (stage.progress !== undefined && typeof stage.progress !== "function") {
+		report("progress-not-function");
 	}
 }
 

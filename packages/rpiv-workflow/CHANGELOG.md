@@ -4,6 +4,7 @@
 
 ### Added
 
+- **`/wf … --max-laps <n>` sets an absolute per-destination ceiling on decision-edge re-entries (`MAX_LAPS = 8`), on a fresh run and on a resume.** The backward-jump cap is waive-aware — a stage whose `progress` hook keeps reporting `"improved"` re-enters past `--max-jumps` — while the lap ceiling counts every re-entry, waived or counted, so even an all-improving loop halts on the `maxLaps + 1`-th re-entry of one stage. When both limits would trip on the same re-entry, the ceiling is arbitrated first. Like the cap, the ledger is per invocation (a resume starts both re-entry budgets fresh), and the flag is honored in the leading or trailing position like `--max-jumps`/`--name` — in any relative order among them — with a mid-position token staying as input text.
 - **`/wf … --max-jumps <n>` sets the backward-jump cap per run, on a fresh run and on a resume.** The cap (`MAX_BACKWARD_JUMPS = 3` per re-entered stage) was an embedder-only option; a fix loop that converges slowly — a code panel climbing 55 → 70 → 90 → 92 across four rounds with one finding left — hit it one lap short. The budget is per invocation (a resume starts a fresh count), so the flag is for giving a single invocation more room. It is honored in the leading or trailing position like `--name`; a mid-position token stays as input text.
 
 ### Changed

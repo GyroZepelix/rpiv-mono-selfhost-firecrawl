@@ -31,6 +31,17 @@ import type { RunContext, RunState } from "../types.js";
 export const MAX_BACKWARD_JUMPS = 3;
 
 /**
+ * Per-DESTINATION absolute ceiling on decision-edge re-entries — the
+ * verdict-proof backstop ABOVE the waive-aware `MAX_BACKWARD_JUMPS` cap.
+ * Every re-entry counts toward it, whatever the stage `progress` hook
+ * votes: a destination whose laps keep reporting "improved" waives the
+ * cap but never this ceiling, so the `maxLaps + 1`-th re-entry of one
+ * stage always halts. Fresh per invocation like the cap — a resume
+ * re-opens a closed loop with both budgets restored.
+ */
+export const MAX_LAPS = 8;
+
+/**
  * Run-wide safety cap on loop units — the backstop for any loop kind whose
  * source never terminates (a pull generator that never returns `null`, an
  * assess `done` that never trips). Clamps the effective cap of every loop
@@ -86,6 +97,7 @@ export function buildRunContext(
 	options: {
 		host?: WorkflowHost;
 		maxBackwardJumps?: number;
+		maxLaps?: number;
 		maxIterations?: number;
 		lifecycle?: LifecycleListeners;
 		signal?: AbortSignal;
@@ -105,12 +117,20 @@ export function buildRunContext(
 		// Fresh on every entry point: a resume grants each stage a fresh
 		// re-entry budget, exactly as the pre-ledger streak counter did.
 		revisits: new Map(),
+		// Fresh beside `revisits`: the progress-verdict ring is engine memory
+		// (never persisted), so both entry points — run and resume — start it
+		// empty.
+		progressTrail: new Map(),
+		// Absolute lap ledger — the ceiling's counter, same fresh-per-
+		// invocation rule as `revisits` (a resume re-opens the loop).
+		laps: new Map(),
 		registeredSkills: options.host ? snapshotRegisteredSkills(options.host) : undefined,
 		// Defensive COPY (not the live global Map) so a later registerSkillContracts
 		// call cannot mutate this run's snapshot mid-run — parity with the fresh-Set
 		// copy snapshotRegisteredSkills makes.
 		skillContracts: new Map(getSkillContracts()),
 		maxBackwardJumps: options.maxBackwardJumps ?? MAX_BACKWARD_JUMPS,
+		maxLaps: options.maxLaps ?? MAX_LAPS,
 		maxIterations: options.maxIterations ?? MAX_ITERATIONS,
 		trigger: identity.trigger,
 		lifecycle: new LifecycleDispatcher(options.lifecycle),

@@ -284,6 +284,14 @@ export interface ResumeWorkflowOptions {
 	host?: WorkflowHost;
 	/** Per-destination decision-edge re-entry cap. Defaults to MAX_BACKWARD_JUMPS. */
 	maxBackwardJumps?: number;
+	/**
+	 * Per-destination ABSOLUTE ceiling on decision-edge re-entries — counts
+	 * every re-entry (improved-waived laps included), unlike the waive-aware
+	 * `maxBackwardJumps` cap. The `maxLaps + 1`-th re-entry of one stage
+	 * halts. Defaults to MAX_LAPS; fresh per invocation (a resume starts
+	 * both re-entry ledgers empty).
+	 */
+	maxLaps?: number;
 	/** Run-wide safety cap on loop units (all kinds). Defaults to MAX_ITERATIONS. */
 	maxIterations?: number;
 	/** The user's `@<ref>` — surfaced in trigger.meta + refusal messages. */

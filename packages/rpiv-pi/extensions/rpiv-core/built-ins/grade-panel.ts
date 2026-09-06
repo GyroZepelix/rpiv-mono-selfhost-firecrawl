@@ -11,6 +11,7 @@ import {
 	gateTier,
 	latestVerdictPerDimension,
 	PLAN_DIMENSIONS,
+	panelProgress,
 	planAuthoredRisks,
 	SHIP_DIMENSIONS,
 	SLICE_DIMENSIONS,
@@ -200,6 +201,22 @@ const CODE_CONFIRM_FANOUT = gradePanelFanout("plans", PLAN_DIMENSIONS, "code-ver
 	citeChannel: "code-cite-check",
 });
 
+// The three build lanes' whole-lap progress hooks — one instance per lane,
+// declared on every stage the guard can re-enter (grade / fix-or-confirm /
+// snapshot), beside the fanout twins that grade the same channels. The
+// plan/code lanes amend the plan in place, so their rounds are cut at
+// snapshot rows; the slice lane re-slices to a new file, so its rounds group
+// by artifact basename (see panelProgress).
+const SLICE_PANEL_PROGRESS = panelProgress("slice-verdicts", SLICE_DIMENSIONS);
+const PLAN_PANEL_PROGRESS = panelProgress("plan-verdicts", PLAN_DIMENSIONS, {
+	snapshotChannel: "plan-snapshot",
+	artifactChannel: "plans",
+});
+const CODE_PANEL_PROGRESS = panelProgress("code-verdicts", PLAN_DIMENSIONS, {
+	snapshotChannel: "code-snapshot",
+	artifactChannel: "plans",
+});
+
 /**
  * Ship's grade panel — a bespoke `fanout({...})` mirroring `gradePanelFanout`'s
  * body but binding the roster to `SHIP_DIMENSIONS` DIRECTLY (no
@@ -255,6 +272,11 @@ export const SHIP_DIMENSION_FANOUT = fanout({
 	},
 });
 
+// Ship's whole-lap hook — INERT by topology (the grade gate routes implement
+// or stop, so no edge ever re-enters the grade stage), declared for uniformity
+// so every panel lane names its hook beside its panel.
+const SHIP_PANEL_PROGRESS = panelProgress("ship-verdicts", SHIP_DIMENSIONS);
+
 // Ship's grade panel writes its verdicts to a DISTINCT channel (same
 // directory, different artifact basenames) so they never mix with build's
 // plan/code verdicts — named for the workflow, completing the slice-verdicts
@@ -264,7 +286,11 @@ export const shipVerdictOutcome = verdictOutcome("ship-verdicts", "plans");
 export {
 	CODE_CONFIRM_FANOUT,
 	CODE_DIMENSION_FANOUT,
+	CODE_PANEL_PROGRESS,
 	PLAN_CONFIRM_FANOUT,
 	PLAN_DIMENSION_FANOUT,
+	PLAN_PANEL_PROGRESS,
+	SHIP_PANEL_PROGRESS,
 	SLICE_DIMENSION_FANOUT,
+	SLICE_PANEL_PROGRESS,
 };

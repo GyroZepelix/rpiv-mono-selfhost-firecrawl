@@ -13,8 +13,10 @@ export {
 	latestArtifactPath,
 	latestVerdictPerDimension,
 	PLAN_DIMENSIONS,
+	panelProgress,
 	planAuthoredRisks,
 	planGatePasses,
+	progressFromRoundCounts,
 	rulingEffectivePass,
 	type SeedOnlyVerdict,
 	SHIP_DIMENSIONS,
@@ -26,6 +28,8 @@ export {
 	sliceGatePasses,
 	subplanGatePasses,
 	unitFailedDimensions,
+	type VerdictRecord,
+	verdictBlocks,
 	verdictRiskRulings,
 } from "./gates.js";
 export {
@@ -37,10 +41,14 @@ export {
 export {
 	CODE_CONFIRM_FANOUT,
 	CODE_DIMENSION_FANOUT,
+	CODE_PANEL_PROGRESS,
 	PLAN_CONFIRM_FANOUT,
 	PLAN_DIMENSION_FANOUT,
+	PLAN_PANEL_PROGRESS,
 	SHIP_DIMENSION_FANOUT,
+	SHIP_PANEL_PROGRESS,
 	SLICE_DIMENSION_FANOUT,
+	SLICE_PANEL_PROGRESS,
 	shipVerdictOutcome,
 } from "./grade-panel.js";
 export {

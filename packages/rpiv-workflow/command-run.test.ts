@@ -276,3 +276,59 @@ describe("float tails on a stale launcher ctx", () => {
 		expect(ctx.ui.notify).toHaveBeenLastCalledWith(MSG_WORKFLOW_THREW(formatError(err)), "error");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Caps threading — --max-jumps / --max-laps must reach BOTH float arms'
+// runner options: runWorkflow (fresh run) and resumeWorkflowByRunId (@resume).
+// The parseArgs fixpoint feeds both; these pins hold the handler seam.
+// ---------------------------------------------------------------------------
+
+describe("handleWorkflowCommand — caps threading (both arms)", () => {
+	it("threads --max-jumps + --max-laps through to runWorkflow options", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing --max-jumps 6 --max-laps 8", ctx);
+		await flush();
+
+		const opts = vi.mocked(runWorkflow).mock.calls[0]?.[1];
+		expect(opts?.maxBackwardJumps).toBe(6);
+		expect(opts?.maxLaps).toBe(8);
+	});
+
+	it("threads --max-laps alone on the run arm (maxBackwardJumps stays undefined)", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing --max-laps 8", ctx);
+		await flush();
+
+		const opts = vi.mocked(runWorkflow).mock.calls[0]?.[1];
+		expect(opts?.maxLaps).toBe(8);
+		expect(opts?.maxBackwardJumps).toBeUndefined();
+	});
+
+	it("threads --max-jumps + --max-laps on the @resume arm into resumeWorkflowByRunId options", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "@my-run --max-jumps 6 --max-laps 8", ctx);
+		await flush();
+
+		const opts = vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2];
+		expect(opts).toMatchObject({ maxBackwardJumps: 6, maxLaps: 8 });
+		expect(opts?.host).toBe(HOST);
+	});
+
+	it("threads --max-laps alone on the @resume arm", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "@my-run --max-laps 8", ctx);
+		await flush();
+
+		const opts = vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2];
+		expect(opts?.maxLaps).toBe(8);
+		expect(opts?.maxBackwardJumps).toBeUndefined();
+	});
+});

@@ -8,5 +8,5 @@ export type { RunWorkflowOptions, RunWorkflowResult } from "../types.js";
 export { type RunWorkflowByNameOptions, runWorkflowByName } from "./by-name.js";
 export { type ResumeWorkflowByRunIdOptions, resumeWorkflowByRunId } from "./by-run-id.js";
 export { StagePreflightError } from "./errors.js";
-export { MAX_BACKWARD_JUMPS } from "./run-context.js";
+export { MAX_BACKWARD_JUMPS, MAX_LAPS } from "./run-context.js";
 export { type ResumeWorkflowOptions, resumeWorkflow, runWorkflow } from "./runner.js";

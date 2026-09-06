@@ -151,6 +151,7 @@ const result = await runWorkflow(ctx, {   // ctx: WorkflowHostContext
 | `host` | `WorkflowHost` | none; used for the skill-registration preflight snapshot |
 | `maxIterations` | `number` | `32` — run-wide cap on loop units of every kind |
 | `maxBackwardJumps` | `number` | `3` per destination stage |
+| `maxLaps` | `number` | `8` per destination stage — absolute ceiling on decision-edge re-entries; improved-waived laps count toward it. Fresh per invocation (a resume starts both re-entry ledgers empty) |
 | `trigger` | `RunTrigger` | `{ kind: "programmatic" }` |
 | `lifecycle` | `LifecycleListeners` | none |
 | `signal` | `AbortSignal` | none |

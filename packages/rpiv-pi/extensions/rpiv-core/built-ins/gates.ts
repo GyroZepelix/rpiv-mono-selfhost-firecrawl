@@ -4,7 +4,7 @@
  * per-gate pass predicates. Pure state-reading folds — no fs I/O, no LLM.
  */
 import { basename } from "node:path";
-import { handleToString, type Output, type RunView } from "@juicesharp/rpiv-workflow/registration";
+import { handleToString, type Output, type ProgressValue, type RunView } from "@juicesharp/rpiv-workflow/registration";
 import { FILE_LINE_CITATION_RE, latestFsArtifact } from "./shared.js";
 
 /**
@@ -122,6 +122,8 @@ const gateTier = (state: RunView, verdictChannel: string): GateTier => {
 		const v = o.data as { severity?: unknown; findings?: unknown } | undefined;
 		const s = v?.severity;
 		// Anchor-nit clamp: an all-drift-nit verdict must not escalate the tier.
+		// Deliberately NOT `verdictBlocks` — this fold arbitrates severity VALUES,
+		// not blocking; the clamp lowers the recorded value only.
 		if (typeof s === "string") severities.add(anchorNitsOnly(v) ? "low" : s);
 	}
 	if (
@@ -226,6 +228,32 @@ const anchorNitsOnly = (v: { findings?: unknown } | undefined): boolean => {
 };
 
 /**
+ * The shared verdict shape every blocking fold reads: `pass` (the grader's
+ * free-judgment boolean), `severity` (the graded bar — `low`/`none` never
+ * block), and `findings` (the anchor-nit clamp's input). Consumers narrow
+ * further at their own cast (`allDimensionsPass` also reads `dimension`), so
+ * the dead-unit sentinel shape — a dimension label with none of these
+ * fields — still satisfies it.
+ */
+type VerdictRecord = { pass?: boolean; severity?: string; findings?: unknown };
+
+/**
+ * The ONE blocking predicate over a grade verdict's own fields: a verdict
+ * blocks UNLESS its `pass` is `true`, its severity sits at the `low`/`none`
+ * floor, or the anchor-nit clamp applies (every finding a drift nit).
+ * `dimensionsToRegrade`, `allDimensionsPass`, `confirmDue`, and ship's
+ * `shipGradeStopNote` all fold through this single definition, so the
+ * re-grade list, the gate folds, the confirm arm, and the stop note can
+ * never drift apart (each site used to hand-roll the same disjunction).
+ * Deliberately RISK-BLIND: `risk_rulings` compose ON TOP only where owed
+ * (`confirmDue`), never folded in here. A record with none of the three
+ * exits — a dimension-bearing sentinel, an older bare trail — reads
+ * BLOCKING: fail-safe, same direction as a failed verdict.
+ */
+const verdictBlocks = (v: VerdictRecord | undefined): boolean =>
+	!(v?.pass === true || v?.severity === "low" || v?.severity === "none" || anchorNitsOnly(v));
+
+/**
  * The subset of `dimensions` a re-grade must actually re-run, given the latest
  * verdict per dimension accumulated so far. A dimension needs re-grading when it
  * has NO prior verdict (first pass ⇒ grade every dimension), when its latest
@@ -246,9 +274,8 @@ const dimensionsToRegrade = (
 	return dimensions.filter((d) => {
 		const o = latest.get(d);
 		if (!o) return true; // never graded — must grade at least once
-		const v = o.data as { pass?: boolean; severity?: string; findings?: unknown } | undefined;
-		const dimPass = v?.pass === true || v?.severity === "low" || v?.severity === "none" || anchorNitsOnly(v);
-		if (!dimPass) return true;
+		const v = o.data as VerdictRecord | undefined;
+		if (verdictBlocks(v)) return true;
 		return verdictRiskRulings(o).some((r) => !rulingEffectivePass(r, risks.get(r.id)));
 	});
 };
@@ -294,14 +321,143 @@ const allDimensionsPass = (entries: readonly Output[] = [], roster?: readonly st
 		const v = o.data as { dimension?: string; pass?: boolean; severity?: string; findings?: unknown } | undefined;
 		if (typeof v?.dimension !== "string") continue;
 		if (member && !member.has(v.dimension)) continue;
-		// The anchor-nit clamp: an all-drift-nit verdict never blocks, whatever
-		// severity the grader typed (backstop for the citation-resolution rule).
-		const lowOrNone = v.severity === "low" || v.severity === "none" || anchorNitsOnly(v);
-		latest.set(v.dimension, v.pass === true || lowOrNone);
+		// The shared blocking predicate keeps every severity fold on one
+		// definition of "blocking" (the anchor-nit clamp backstops the
+		// citation-resolution rule: an all-drift-nit verdict never blocks,
+		// whatever severity the grader typed).
+		latest.set(v.dimension, !verdictBlocks(v));
 	}
 	const verdicts = [...latest.values()];
 	return verdicts.length > 0 && verdicts.every(Boolean);
 };
+
+/**
+ * The rule core under every whole-lap progress declaration: map the
+ * blocking-dimension counts of the COMPLETED rounds behind the current one
+ * (oldest first) plus the current round's own count to ONE ProgressValue.
+ *
+ *   []              ⇒ "unknown"    — nothing completed behind the current
+ *                                     round (the first lap): counted, never
+ *                                     waived.
+ *   < min(earlier)   ⇒ "improved"   — the blocking set strictly shrank past
+ *                                     EVERY earlier round's best; no score
+ *                                     tiebreak — the count is the whole signal.
+ *   > last(earlier)  ⇒ "regressed"  — grew past the immediately previous round.
+ *   otherwise        ⇒ "unchanged"  — flat or between: counted.
+ *
+ * Deliberately coarse: the waiver buys one extra lap only when the panel's
+ * blocking set strictly shrank past every completed round, so flat, flapping,
+ * or partially-improving trails keep counting toward the backward-jump cap.
+ * Pure arithmetic over counts — no state, no channel reads — so the lane
+ * instances and the replay harnesses share one definition of "a lap
+ * improved".
+ */
+const progressFromRoundCounts = (earlier: readonly number[], current: number): ProgressValue => {
+	if (earlier.length === 0) return "unknown";
+	if (current < Math.min(...earlier)) return "improved";
+	if (current > earlier[earlier.length - 1]) return "regressed";
+	return "unchanged";
+};
+
+/**
+ * The whole-lap progress hook factory — the `progress` the quality-panel lanes
+ * declare on EVERY stage the backward-jump guard can re-enter (grade /
+ * fix-or-confirm / snapshot per lane). One instance per lane, shared by the
+ * lane's re-entered destinations, so a lap reads as ONE unit: the hook derives
+ * a round's blocking count by folding the lane's OWN verdict channel exactly
+ * the way its gate does — latest verdict per dimension over the entries still
+ * fresh for the current artifact — and counts blocking dimensions through the
+ * shared `verdictBlocks` predicate over the tier roster (`gateRoster(gateTier(
+ * state, verdictChannel), dimensions)`, computed once per call and applied to
+ * every round uniformly).
+ *
+ * ROUND DELINEATION — two modes:
+ *
+ *   snapshot mode (`options.snapshotChannel` set — the plan/code lanes, whose
+ *   fixes AMEND the plan in place so the artifact basename never changes):
+ *   rounds are cut at each snapshot row's `meta.ts` (ISO-8601 compares
+ *   lexicographically); a cut is a COMPLETED earlier round iff the verdict
+ *   channel grew strictly past it — the last cut with nothing after it is the
+ *   CURRENT round, excluded from the earlier set. The current round folds the
+ *   WHOLE channel (carry-forward: a dimension not re-graded keeps its latest
+ *   prior verdict — the same cumulative fold the gate itself reads).
+ *
+ *   basename mode (no snapshotChannel — the slice lane, whose fixes RE-SLICE
+ *   to a new file): rounds are maximal runs of entries sharing
+ *   `basename(data.artifact)`; earlier = every group but the last, current =
+ *   the last group's fold. A regenerated artifact re-grades from scratch, so a
+ *   healthy basename group carries the full roster; an in-place amend keeps
+ *   the basename, so amended rounds merge — degradation is toward counting,
+ *   never toward a spurious waiver.
+ *
+ * FAIL-SAFE: a roster dimension with NO verdict in the current round's fold ⇒
+ * "unknown" (the round is incomplete — never waive on missing evidence); an
+ * entry without a string `meta.ts` lands in every earlier snapshot cut and in
+ * the current fold, so a malformed trail degrades toward counting. Pure
+ * channel history — no module state, no file reads, no model calls — so the
+ * hook is resume-safe by construction (the resume fold replays the same
+ * channels into `state.named`).
+ */
+const panelProgress =
+	(
+		verdictChannel: string,
+		dimensions: readonly string[],
+		{ snapshotChannel, artifactChannel }: { snapshotChannel?: string; artifactChannel?: string } = {},
+	) =>
+	(state: RunView): ProgressValue => {
+		const roster = gateRoster(gateTier(state, verdictChannel), dimensions);
+		const entries = state.named[verdictChannel] ?? [];
+		const currentArtifact = artifactChannel !== undefined ? latestArtifactPath(state, artifactChannel) : undefined;
+		const foldRound = (rows: readonly Output[]): ReadonlyMap<string, Output> =>
+			latestVerdictPerDimension(freshVerdicts(rows, currentArtifact));
+		const countBlocking = (fold: ReadonlyMap<string, Output>): number => {
+			let blocking = 0;
+			for (const d of roster) {
+				const o = fold.get(d);
+				if (o !== undefined && verdictBlocks(o.data as VerdictRecord)) blocking += 1;
+			}
+			return blocking;
+		};
+		// An entry with no string ts reads as "" — it joins every earlier snapshot
+		// cut (never after one), so a malformed trail can only INFLATE earlier
+		// counts: toward counting, never toward a waiver.
+		const tsOf = (o: Output): string => {
+			const ts = o.meta?.ts;
+			return typeof ts === "string" ? ts : "";
+		};
+		const earlierCounts: number[] = [];
+		let currentRows: readonly Output[] = [];
+		if (snapshotChannel !== undefined) {
+			for (const snap of state.named[snapshotChannel] ?? []) {
+				const cut = snap.meta?.ts;
+				if (typeof cut !== "string") continue;
+				// A cut the channel never grew strictly past is the CURRENT round,
+				// not a completed earlier one.
+				if (!entries.some((o) => tsOf(o) > cut)) continue;
+				earlierCounts.push(countBlocking(foldRound(entries.filter((o) => tsOf(o) <= cut))));
+			}
+			currentRows = entries;
+		} else {
+			const groups: { key: string | undefined; rows: Output[] }[] = [];
+			for (const o of entries) {
+				const a = (o.data as { artifact?: unknown } | undefined)?.artifact;
+				const key = typeof a === "string" && a.length > 0 ? basename(a) : undefined;
+				const last = groups.at(-1);
+				// An entry with no artifact continues the current group — the same
+				// compat default freshVerdicts applies; merging rounds degrades
+				// toward counting.
+				if (last !== undefined && (key === undefined || last.key === key)) last.rows.push(o);
+				else groups.push({ key, rows: [o] });
+			}
+			for (const g of groups.slice(0, -1)) earlierCounts.push(countBlocking(foldRound(g.rows)));
+			currentRows = groups.at(-1)?.rows ?? [];
+		}
+		const currentFold = foldRound(currentRows);
+		// An incomplete current round is "unknown" — the roster must be fully
+		// adjudicated before the lap can claim progress.
+		for (const d of roster) if (!currentFold.has(d)) return "unknown";
+		return progressFromRoundCounts(earlierCounts, countBlocking(currentFold));
+	};
 
 /**
  * One plan-authored risk flag ruled by a grade panel. The plan declares a
@@ -677,11 +833,11 @@ const confirmDue = (
 	for (const o of fresh) {
 		const v = o.data as { dimension?: string; pass?: boolean; severity?: string; findings?: unknown } | undefined;
 		if (typeof v?.dimension !== "string" || !roster.has(v.dimension)) continue;
-		// anchorNitsOnly keeps this floor coherent with the other three
-		// severity-fold consumers (gateTier/dimensionsToRegrade/allDimensionsPass).
-		const floored = v.pass === true || v.severity === "low" || v.severity === "none" || anchorNitsOnly(v);
 		const riskFail = verdictRiskRulings(o).some((r) => !rulingEffectivePass(r, risks.get(r.id)));
-		const blocking = !floored || riskFail;
+		// `verdictBlocks` keeps this fold coherent with the other severity-fold
+		// consumers (dimensionsToRegrade/allDimensionsPass/shipGradeStopNote);
+		// risk composes ON TOP — the predicate itself is risk-blind.
+		const blocking = verdictBlocks(v) || riskFail;
 		const prev = byDim.get(v.dimension);
 		byDim.set(v.dimension, {
 			blocking, // the latest verdict decides whether the dimension currently blocks
@@ -730,9 +886,11 @@ export {
 	latestArtifactPath,
 	latestVerdictPerDimension,
 	PLAN_DIMENSIONS,
+	panelProgress,
 	planAuthoredRisks,
 	planGatePasses,
 	procedureSatisfiesDuty,
+	progressFromRoundCounts,
 	type RiskRecord,
 	rulingEffectivePass,
 	type SeedOnlyVerdict,
@@ -742,5 +900,7 @@ export {
 	seedOnlyFindings,
 	sliceGatePasses,
 	subplanGatePasses,
+	type VerdictRecord,
+	verdictBlocks,
 	verdictRiskRulings,
 };

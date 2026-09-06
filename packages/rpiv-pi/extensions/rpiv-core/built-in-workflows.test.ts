@@ -47,7 +47,7 @@ import {
 	type Workflow,
 } from "@juicesharp/rpiv-workflow";
 import { type RunState, runsDir, stateFilePath, takeRouteNote } from "@juicesharp/rpiv-workflow/internal";
-import { fanin, fs as fsHandle, loopSpecOf } from "@juicesharp/rpiv-workflow/registration";
+import { fanin, fs as fsHandle, loopSpecOf, type ProgressValue } from "@juicesharp/rpiv-workflow/registration";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { rpivArtifactMdOutcome } from "./artifact-collector.js";
 import {
@@ -57,7 +57,28 @@ import {
 	shipGatePasses,
 	shipVerdictOutcome,
 } from "./built-in-workflows.js";
-import { codeGatePasses, planGatePasses, sliceGatePasses, unitFailedDimensions } from "./built-ins/gates.js";
+import {
+	codeGatePasses,
+	freshVerdicts,
+	gateRoster,
+	gateTier,
+	latestArtifactPath,
+	latestVerdictPerDimension,
+	PLAN_DIMENSIONS,
+	planGatePasses,
+	progressFromRoundCounts,
+	SLICE_DIMENSIONS,
+	sliceGatePasses,
+	unitFailedDimensions,
+	type VerdictRecord,
+	verdictBlocks,
+} from "./built-ins/gates.js";
+import {
+	CODE_PANEL_PROGRESS,
+	PLAN_PANEL_PROGRESS,
+	SHIP_PANEL_PROGRESS,
+	SLICE_PANEL_PROGRESS,
+} from "./built-ins/grade-panel.js";
 import { seedOnlyFindings } from "./built-ins/index.js";
 import { writeScopeVerdict } from "./built-ins/scope-checks.js";
 import { writeStructureVerdict } from "./built-ins/shared.js";
@@ -3861,6 +3882,399 @@ describe("build audit-drop fixes", () => {
 			// code-grade ×2) — the replay's discharge of the routing-equivalence risk.
 			expect(decisions.filter((d) => d === "plan-grade")).toHaveLength(2);
 			expect(decisions.filter((d) => d === "code-grade")).toHaveLength(2);
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Converging-loop replay — the recorded cap-halt trails re-derived through the
+// real blocking folds and the whole-lap progress rule. Six committed fixtures
+// (each a trimmed excerpt of a gitignored run trail, re-derivable by its
+// `_meta` rules) pin two layers per trail: the per-lap verdicts the rule
+// assigns — which re-entries a panel hook waives — and the guard simulation
+// over those verdicts, where re-entry 1 is always unknown-counting and the run
+// halts when the count exceeds the recorded max. Local halt trails 089a,
+// 8b79, e9f4, 7514 plus the two external research tuples cc02 and ec5e as
+// plain data, a carry-forward synthetic, and the no-hook elaborate evidence
+// whose older halt wording is the no-panel marker.
+// ---------------------------------------------------------------------------
+describe("converging-loop replay pinning (local halts + external tuples + carry-forward)", () => {
+	type StageRow = { type?: undefined; stageNumber: number; stage: string; channel: string; output: Output };
+	type RoutingRow = { type: "routing"; fromStage: string; decision: string };
+	type HaltRow = { type: "halt"; stage: string; errMsg: string };
+	type FixtureRow = StageRow | RoutingRow | HaltRow;
+
+	// Fail-loud loader: every fixture names its run in `_meta.run_id`, the file
+	// name carries the same 4-hex run token, and stage numbers ascend in trail
+	// order — a fixture that silently lost any of these would pin a different
+	// run's shape.
+	const parseRunFixture = (parsed: unknown, file: string): FixtureRow[] => {
+		const token = file.match(/^run-([0-9a-f]{4})-/)?.[1];
+		const meta = (parsed as { _meta?: { run_id?: unknown } })?._meta;
+		const rows = (parsed as { rows?: unknown })?.rows;
+		if (typeof token !== "string" || typeof meta?.run_id !== "string" || !Array.isArray(rows)) {
+			throw new Error(
+				`fixture ${file} is not a run excerpt: expected _meta.run_id for run ${token ?? "?"} and a rows[] array`,
+			);
+		}
+		if (!meta.run_id.endsWith(`-${token}`)) {
+			throw new Error(`fixture ${file}: _meta.run_id "${meta.run_id}" does not name run prefix ${token}`);
+		}
+		let last = 0;
+		for (const row of rows as FixtureRow[]) {
+			if (row.type === undefined) {
+				if (typeof row.stageNumber !== "number" || row.stageNumber <= last) {
+					throw new Error(`fixture ${file}: stageNumbers must ascend in trail order`);
+				}
+				last = row.stageNumber;
+			}
+		}
+		return rows as FixtureRow[];
+	};
+	const loadRunFixture = (file: string): FixtureRow[] =>
+		parseRunFixture(
+			JSON.parse(readFileSync(fileURLToPath(new URL(`./built-ins/__fixtures__/${file}`, import.meta.url)), "utf-8")),
+			file,
+		);
+
+	type Lane = { verdictChannel: string; artifactChannel: string; dimensions: readonly string[]; gradedStage: string };
+	const CODE_LANE: Lane = {
+		verdictChannel: "code-verdicts",
+		artifactChannel: "plans",
+		dimensions: PLAN_DIMENSIONS,
+		gradedStage: "code-grade",
+	};
+	const SLICE_LANE: Lane = {
+		verdictChannel: "slice-verdicts",
+		artifactChannel: "slices",
+		dimensions: SLICE_DIMENSIONS,
+		gradedStage: "slice-grade",
+	};
+
+	// The blocking count over real machinery only: the roster the tier picks,
+	// freshness against the lane's artifact, latest-per-dimension, and the
+	// exported blocking predicate. Never a re-implementation.
+	const countBlocking = (named: Record<string, Output[]>, lane: Lane): number => {
+		const state = { named } as unknown as RunView;
+		const roster = gateRoster(gateTier(state, lane.verdictChannel), lane.dimensions);
+		const fresh = freshVerdicts(named[lane.verdictChannel] ?? [], latestArtifactPath(state, lane.artifactChannel));
+		const latest = latestVerdictPerDimension(fresh);
+		return roster.filter((d) => verdictBlocks(latest.get(d)?.data as VerdictRecord | undefined)).length;
+	};
+
+	// ONE trail-order round rule for all lanes: a round is a maximal run of
+	// verdict-channel stage rows (routing rows are transparent — a confirm
+	// verdict extends the round it confirms), closed by any different-channel
+	// stage row. The blocking count is folded at the round's end, BEFORE the
+	// closer's own channel entry lands, so a fix that regenerates the graded
+	// artifact cannot retroactively drop the round's verdicts. Fixture meta is
+	// trimmed, so the live ts-based cuts cannot run here — trail order is the
+	// only round delimiter.
+	const replay = (rows: FixtureRow[], lane: Lane) => {
+		const named: Record<string, Output[]> = {};
+		const blocking: number[] = [];
+		let reentryCount = 0;
+		let runOpen = false;
+		let firstDispatch = true;
+		let halt: HaltRow | undefined;
+		for (const row of rows) {
+			if (row.type === "routing") {
+				if (row.decision === lane.gradedStage) {
+					if (firstDispatch) {
+						firstDispatch = false;
+					} else {
+						reentryCount++;
+					}
+				}
+				continue;
+			}
+			if (row.type === "halt") {
+				halt = row;
+				continue;
+			}
+			if (row.channel === lane.verdictChannel) {
+				runOpen = true;
+			} else if (runOpen) {
+				blocking.push(countBlocking(named, lane));
+				runOpen = false;
+			}
+			named[row.channel] = (named[row.channel] ?? []).concat(row.output);
+		}
+		return { blocking, reentryCount, halt };
+	};
+
+	// Layer A: the verdict each lap earns off the derived counts. Layer B: the
+	// live guard simulation over those verdicts — re-entry 1 is always unknown
+	// and counts, improved re-entries waive, the run halts at the re-entry
+	// whose increment exceeds the recorded max.
+	const simulateGuard = (blocking: readonly number[], max: number) => {
+		const views: ProgressValue[] = blocking.map((b, k) => progressFromRoundCounts(blocking.slice(0, k), b));
+		let counted = 0;
+		let haltAt: number | null = null;
+		views.forEach((view, k) => {
+			if (view !== "improved") {
+				counted++;
+				if (counted > max && haltAt === null) haltAt = k + 1;
+			}
+		});
+		return { views, counted, haltAt };
+	};
+
+	const pinPanelFixture = (spec: {
+		file: string;
+		lane: Lane;
+		blocking: number[];
+		laps: ProgressValue[];
+		countedLaps: number;
+		views: ProgressValue[];
+		haltsAtReentry: number | null;
+	}) => {
+		const { blocking, reentryCount, halt } = replay(loadRunFixture(spec.file), spec.lane);
+		if (!halt) throw new Error(`fixture ${spec.file}: no halt row`);
+		expect(blocking, `${spec.file} per-round blocking counts`).toEqual(spec.blocking);
+		const laps = blocking.slice(1).map((b, j) => progressFromRoundCounts(blocking.slice(0, j + 1), b));
+		expect(laps, `${spec.file} per-lap verdicts`).toEqual(spec.laps);
+		expect(
+			laps.filter((v) => v !== "improved"),
+			`${spec.file} counted laps`,
+		).toHaveLength(spec.countedLaps);
+		const recorded = halt.errMsg.match(/re-entered (\d+) times \(max (\d+)\)/);
+		expect(recorded, `${spec.file} panel-era halt wording`).not.toBeNull();
+		const recordedReentries = Number(recorded?.[1]);
+		const max = Number(recorded?.[2]);
+		expect(reentryCount, `${spec.file} re-entries in the excerpt`).toBe(blocking.length);
+		expect(recordedReentries, `${spec.file} recorded halt consumed every re-entry`).toBe(reentryCount);
+		const sim = simulateGuard(blocking, max);
+		expect(sim.views, `${spec.file} simulated re-entry verdicts`).toEqual(spec.views);
+		expect(sim.views[0], `${spec.file} first re-entry is always unknown`).toBe("unknown");
+		if (spec.haltsAtReentry === null) {
+			expect(sim.haltAt, `${spec.file} converging trail continues under the whole-lap rule`).toBeNull();
+		} else {
+			expect(sim.haltAt, `${spec.file} halts at the recorded re-entry under both guards`).toBe(spec.haltsAtReentry);
+			expect(recordedReentries).toBe(spec.haltsAtReentry);
+		}
+	};
+
+	it("loader is fail-loud: missing _meta.run_id, a mismatched run prefix, or non-ascending stageNumbers each throw naming the fixture", () => {
+		expect(() => parseRunFixture({ rows: [] }, "run-089a-code-grade-cap.json")).toThrow(
+			/run-089a-code-grade-cap\.json/,
+		);
+		expect(() =>
+			parseRunFixture({ _meta: { run_id: "2026-09-01_11-34-37-dead" }, rows: [] }, "run-089a-code-grade-cap.json"),
+		).toThrow(/089a/);
+		expect(() =>
+			parseRunFixture(
+				{
+					_meta: { run_id: "2026-09-01_11-34-37-089a" },
+					rows: [
+						{ stageNumber: 5, stage: "s", channel: "c", output: {} as Output },
+						{ stageNumber: 5, stage: "s", channel: "c", output: {} as Output },
+					],
+				},
+				"run-089a-code-grade-cap.json",
+			),
+		).toThrow(/ascend/);
+	});
+
+	it("089a: converging code lane — blocking 3/2/1/1, improving laps waive, the cap never trips", () => {
+		pinPanelFixture({
+			file: "run-089a-code-grade-cap.json",
+			lane: CODE_LANE,
+			blocking: [3, 2, 1, 1],
+			laps: ["improved", "improved", "unchanged"],
+			countedLaps: 1,
+			views: ["unknown", "improved", "improved", "unchanged"],
+			haltsAtReentry: null,
+		});
+	});
+
+	it("8b79: converged panel over a persistent floor — blocking 1/0/0, the whole-lap rule continues past the recorded halt", () => {
+		pinPanelFixture({
+			file: "run-8b79-code-grade-cap.json",
+			lane: CODE_LANE,
+			blocking: [1, 0, 0],
+			laps: ["improved", "unchanged"],
+			countedLaps: 1,
+			views: ["unknown", "improved", "unchanged"],
+			haltsAtReentry: null,
+		});
+	});
+
+	it("e9f4: never-improving trail — blocking 1/1/2/1, halts at re-entry 4 under both guards", () => {
+		pinPanelFixture({
+			file: "run-e9f4-code-grade-cap.json",
+			lane: CODE_LANE,
+			blocking: [1, 1, 2, 1],
+			laps: ["unchanged", "regressed", "unchanged"],
+			countedLaps: 3,
+			views: ["unknown", "unchanged", "regressed", "unchanged"],
+			haltsAtReentry: 4,
+		});
+	});
+
+	it("7514: slice lane — blocking 1/1/1/1, halts at re-entry 4 under both guards", () => {
+		pinPanelFixture({
+			file: "run-7514-slice-grade-cap.json",
+			lane: SLICE_LANE,
+			blocking: [1, 1, 1, 1],
+			laps: ["unchanged", "unchanged", "unchanged"],
+			countedLaps: 3,
+			views: ["unknown", "unchanged", "unchanged", "unchanged"],
+			haltsAtReentry: 4,
+		});
+	});
+
+	it("7514: the verbatim slice-lane panel hook over the same fixture reads one merged R3/R4 basename run and never waives", () => {
+		const rows = loadRunFixture("run-7514-slice-grade-cap.json");
+		const named: Record<string, Output[]> = {};
+		const verdicts: ProgressValue[] = [];
+		let firstDispatch = true;
+		for (const row of rows) {
+			if (row.type === "routing") {
+				if (row.decision === "slice-grade") {
+					if (firstDispatch) {
+						firstDispatch = false;
+					} else {
+						// Rounds 3 and 4 share one artifact basename — the in-place
+						// amend — so basename grouping merges them into a single
+						// current round whose fold keeps the newest verdict per
+						// dimension and stays blocking.
+						verdicts.push(SLICE_PANEL_PROGRESS({ named } as unknown as RunView));
+					}
+				}
+				continue;
+			}
+			if (row.type === undefined) {
+				named[row.channel] = (named[row.channel] ?? []).concat(row.output);
+			}
+		}
+		expect(verdicts).toEqual(["unknown", "unchanged", "unchanged", "unchanged"]);
+	});
+
+	it("external tuples: both research trails convert to 2-of-3 counted laps under the rule core", () => {
+		// Scores as data, read by nothing else — the recorded external tuples.
+		const cc02 = [2, 3, 1, 1];
+		const cc02Laps = cc02.slice(1).map((b, j) => progressFromRoundCounts(cc02.slice(0, j + 1), b));
+		expect(cc02Laps).toEqual(["regressed", "improved", "unchanged"]);
+		expect(cc02Laps.filter((v) => v !== "improved")).toHaveLength(2);
+		const ec5e = [2, 1, 2, 1];
+		const ec5eLaps = ec5e.slice(1).map((b, j) => progressFromRoundCounts(ec5e.slice(0, j + 1), b));
+		expect(ec5eLaps).toEqual(["improved", "regressed", "unchanged"]);
+		expect(ec5eLaps.filter((v) => v !== "improved")).toHaveLength(2);
+	});
+
+	it("carry-forward: an in-place artifact keeps carried verdicts; a regenerated basename drops them", () => {
+		const PLAN = ".rpiv/artifacts/plans/2026-09-01_13-01-59_runtime-supervisor-lane.md";
+		const REGENERATED = ".rpiv/artifacts/plans/2026-09-01_13-01-60_runtime-supervisor-lane.md";
+		const verdict = (dimension: string, pass: boolean, artifact: string): Output =>
+			({
+				artifacts: [],
+				kind: "json",
+				meta: {},
+				data: { dimension, pass, severity: pass ? "none" : "medium", artifact },
+			}) as unknown as Output;
+		const plan = (path: string): Output =>
+			({
+				artifacts: [{ handle: { kind: "fs", path } }],
+				kind: "artifact-md",
+				meta: {},
+				data: { phase_count: 8 },
+			}) as unknown as Output;
+		const round1 = PLAN_DIMENSIONS.map((d) =>
+			verdict(d, d === "completeness" || d === "correctness" ? false : true, PLAN),
+		);
+		const state1: Record<string, Output[]> = { plans: [plan(PLAN)], "code-verdicts": round1 };
+		const first = countBlocking(state1, CODE_LANE);
+		expect(first).toBe(2);
+		// Round 2 selectively re-grades only the two blocking dimensions, in
+		// place: the cumulative fold carries the three passing verdicts forward.
+		const selective: Record<string, Output[]> = {
+			plans: [plan(PLAN)],
+			"code-verdicts": [...round1, verdict("completeness", true, PLAN), verdict("correctness", true, PLAN)],
+		};
+		const second = countBlocking(selective, CODE_LANE);
+		expect(second).toBe(0);
+		const fullRoster: Record<string, Output[]> = {
+			plans: [plan(PLAN)],
+			"code-verdicts": [...round1, ...PLAN_DIMENSIONS.map((d) => verdict(d, true, PLAN))],
+		};
+		expect(countBlocking(fullRoster, CODE_LANE), "cumulative fold equals the full-roster form").toBe(second);
+		expect(progressFromRoundCounts([first], second)).toBe("improved");
+		// Control: round 2 regenerated the artifact — the carried verdicts judge
+		// a document the channel has since replaced, so freshness drops them and
+		// their roster dimensions count as blocking again.
+		const regen: Record<string, Output[]> = {
+			plans: [plan(REGENERATED)],
+			"code-verdicts": [
+				...round1,
+				verdict("completeness", true, REGENERATED),
+				verdict("correctness", true, REGENERATED),
+			],
+		};
+		expect(countBlocking(regen, CODE_LANE)).toBe(3);
+	});
+
+	describe("no-hook loops: every re-entry counts — elaborate halts", () => {
+		const pinElaborateFixture = (file: string) => {
+			const rows = loadRunFixture(file);
+			const halt = rows.find((r): r is HaltRow => r.type === "halt");
+			if (!halt) throw new Error(`fixture ${file}: no halt row`);
+			// The older wording is the no-panel marker: elaborate carries no panel
+			// lane, so no progress hook exists and counting is the correct guard.
+			const recorded = halt.errMsg.match(/^Backward-jump limit exceeded: (\d+) backward jumps \(max (\d+)\)$/);
+			expect(recorded, `${file} keeps the pre-panel halt wording`).not.toBeNull();
+			const recordedReentries = Number(recorded?.[1]);
+			const max = Number(recorded?.[2]);
+			const dispatches = rows.filter((r): r is RoutingRow => r.type === "routing" && r.decision === halt.stage);
+			expect(dispatches.length, `${file} first visit plus re-entries`).toBe(recordedReentries + 1);
+			let counted = 0;
+			let haltedAt = 0;
+			for (let i = 1; i < dispatches.length; i++) {
+				counted++;
+				if (counted > max) {
+					haltedAt = i;
+					break;
+				}
+			}
+			expect(haltedAt, `${file} halts at the recorded re-entry`).toBe(recordedReentries);
+			expect(haltedAt, `${file} last routing row is the halted dispatch`).toBe(dispatches.length - 1);
+		};
+
+		it("65fc: halts at the recorded third re-entry under the counting-only guard", () => {
+			pinElaborateFixture("run-65fc-elaborate-cap.json");
+		});
+
+		it("caf9: same shape — the last routing row is the halted dispatch", () => {
+			pinElaborateFixture("run-caf9-elaborate-cap.json");
+		});
+
+		it("live-records complement: no built-in stage outside the four panel lanes declares a progress hook", () => {
+			const panelStages = new Set([
+				"slice-grade",
+				"slice-fix",
+				"slice-seed-lift",
+				"plan-grade",
+				"plan-confirm",
+				"plan-snapshot",
+				"code-grade",
+				"code-confirm",
+				"code-snapshot",
+				"grade",
+			]);
+			const hooked: string[] = [];
+			for (const workflow of builtInWorkflows) {
+				for (const [stage, def] of Object.entries(workflow.stages)) {
+					if ((def as { progress?: unknown } | undefined)?.progress !== undefined) {
+						hooked.push(`${workflow.name}:${stage}`);
+					}
+				}
+			}
+			// The complement direction: every hooked stage is a panel-lane
+			// destination. Non-panel loops — elaborate, reconcile-fix,
+			// validate-fix — and the plain forward edges stay hook-less.
+			for (const id of hooked) {
+				expect(panelStages.has(id.split(":")[1]), `${id} is not a panel-lane stage`).toBe(true);
+			}
 		});
 	});
 });
@@ -8733,5 +9147,115 @@ describe("grade panel unit-failed routing (dimension-bearing sentinels)", () => 
 		});
 		expect(shipEdge({ state: s, output: undefined })).toBe("stop");
 		expect(takeRouteNote(shipEdge)).toBe("unit-failed: architecture-fit produced no verdict");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Whole-lap progress declarations — every stage the backward-jump guard can
+// re-enter in the three quality-panel lanes carries the lane's ONE
+// panelProgress instance, so a lap reads as a single unit at every counted
+// destination. The synthetic states below replay the channel shapes each
+// re-entry point actually sees (snapshot cuts, confirm overturns, seed lifts).
+// ---------------------------------------------------------------------------
+describe("whole-lap progress declarations (panelProgress on the built-in panel lanes)", () => {
+	const PLAN = ".rpiv/artifacts/plans/p.md";
+	const iso = (h: number, m = 0): string =>
+		`2026-09-05T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00.000Z`;
+	const verdict = (dimension: string, pass: boolean, ts: string, extra: Record<string, unknown> = {}): Output =>
+		({
+			artifacts: [],
+			kind: "json",
+			meta: { ts },
+			data: { dimension, pass, severity: pass ? "none" : "high", artifact: PLAN, ...extra },
+		}) as unknown as Output;
+	const snapshotRow = (ts: string): Output =>
+		({ artifacts: [], kind: "", meta: { ts }, data: { snapshot_of: PLAN } }) as unknown as Output;
+	const planRow = (): Output =>
+		({ artifacts: [{ handle: fsHandle(PLAN) }], data: {}, kind: "", meta: {} }) as unknown as Output;
+	const view = (verdictChannel: string, snapshotChannel: string, verdicts: Output[], snapshots: Output[]): RunView =>
+		({
+			named: { plans: [planRow()], [verdictChannel]: verdicts, [snapshotChannel]: snapshots },
+		}) as unknown as RunView;
+	const round = (ts: string, blocking: string[]): Output[] =>
+		PLAN_DIMENSIONS.map((d) => verdict(d, !blocking.includes(d), ts));
+
+	it("declares the lane's ONE progress instance on all ten re-entered panel stages", () => {
+		const build = findWorkflow("build");
+		const lanes: Record<string, string[]> = {
+			slice: ["slice-grade", "slice-fix", "slice-seed-lift"],
+			plan: ["plan-grade", "plan-confirm", "plan-snapshot"],
+			code: ["code-grade", "code-confirm", "code-snapshot"],
+		};
+		const hooks: Record<string, unknown> = {
+			slice: SLICE_PANEL_PROGRESS,
+			plan: PLAN_PANEL_PROGRESS,
+			code: CODE_PANEL_PROGRESS,
+		};
+		for (const [lane, stages] of Object.entries(lanes)) {
+			for (const stage of stages) {
+				expect(build.stages[stage]?.progress, `build/${stage}`).toBe(hooks[lane]);
+			}
+		}
+		expect(findWorkflow("ship").stages.grade?.progress).toBe(SHIP_PANEL_PROGRESS);
+	});
+
+	it("an upholding lap reads the same verdict at all three of the lane's re-entry points", () => {
+		const [A, B, C, D] = PLAN_DIMENSIONS;
+		const r1 = round(iso(10), [A, B, C, D]); // 4 blocking
+		const r2 = round(iso(11), [A, B]); // broad re-grade: 2 blocking
+		const r3 = round(iso(12), [A]); // 1 blocking — the gate is still red
+		const confirmUphold = round(iso(12, 20), [A]); // confirm upholds the blocker
+		const s1 = [snapshotRow(iso(10, 30))];
+		const s2 = [snapshotRow(iso(11, 30))];
+		for (const [hook, verdictChannel, snapshotChannel] of [
+			[PLAN_PANEL_PROGRESS, "plan-verdicts", "plan-snapshot"],
+			[CODE_PANEL_PROGRESS, "code-verdicts", "code-snapshot"],
+		] as const) {
+			// Grade re-entry: rounds 1–2 behind, the last cut still the current round.
+			expect(hook(view(verdictChannel, snapshotChannel, [...r1, ...r2], [...s1, ...s2]))).toBe("improved");
+			// Confirm re-entry: round 3 graded, the fold still pre-confirm.
+			expect(hook(view(verdictChannel, snapshotChannel, [...r1, ...r2, ...r3], [...s1, ...s2]))).toBe("improved");
+			// Snapshot re-entry: the confirm upheld — the post-confirm fold reads the same.
+			expect(
+				hook(view(verdictChannel, snapshotChannel, [...r1, ...r2, ...r3, ...confirmUphold], [...s1, ...s2])),
+			).toBe("improved");
+		}
+	});
+
+	it("a confirm that overturns blockers reads improved only at the post-confirm re-entries", () => {
+		const [A, B, C] = PLAN_DIMENSIONS;
+		const r1 = round(iso(10), [A, B, C]); // 3 blocking
+		const r2 = round(iso(11), [A, B, C]); // re-graded: still 3
+		const overturn = [verdict(B, true, iso(11, 20)), verdict(C, true, iso(11, 20))];
+		const s1 = [snapshotRow(iso(10, 30))];
+		// The confirm re-entry itself reads the PRE-confirm fold: 3 blocking.
+		expect(PLAN_PANEL_PROGRESS(view("plan-verdicts", "plan-snapshot", [...r1, ...r2], s1))).toBe("unchanged");
+		// The snapshot re-entry after the overturn reads the POST-confirm fold: 1.
+		expect(PLAN_PANEL_PROGRESS(view("plan-verdicts", "plan-snapshot", [...r1, ...r2, ...overturn.flat()], s1))).toBe(
+			"improved",
+		);
+	});
+
+	it("a seed lift leaves the verdict channel unchanged — the lap stays one unit", () => {
+		const sliceVerdict = (i: number, ts: string): Output =>
+			({
+				artifacts: [],
+				kind: "json",
+				meta: { ts },
+				data: {
+					dimension: "design-readiness",
+					pass: false,
+					severity: "high",
+					artifact: `.rpiv/artifacts/slices/map-${i}.md`,
+				},
+			}) as unknown as Output;
+		// The grade re-entry that dispatched the lift saw rounds 1–2; the lift
+		// amends the map in place and publishes NO verdict, so the post-lift
+		// re-entry sees a byte-identical channel and reads the same value.
+		const beforeLift = { named: { "slice-verdicts": [sliceVerdict(1, iso(10)), sliceVerdict(2, iso(11))] } };
+		const afterLift = { named: { "slice-verdicts": [sliceVerdict(1, iso(10)), sliceVerdict(2, iso(11))] } };
+		const before = SLICE_PANEL_PROGRESS(beforeLift as unknown as RunView);
+		expect(before).toBe("unchanged");
+		expect(SLICE_PANEL_PROGRESS(afterLift as unknown as RunView)).toBe(before);
 	});
 });

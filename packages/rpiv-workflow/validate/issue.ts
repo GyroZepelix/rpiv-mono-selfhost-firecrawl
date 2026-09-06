@@ -98,6 +98,11 @@ export const ISSUE_DEFS = {
 		() =>
 			"sets `inheritsArtifacts: false` on a `produces` stage — the flag is the `terminal()` factory's mechanism and is only meaningful on side-effect stages",
 	),
+	"progress-not-function": def(
+		"error",
+		() =>
+			'progress must be a function of signature `(state: RunView) => ProgressValue` — the backward-jump guard awaits it per decision-edge re-entry ("improved" waives, anything else counts); an absent hook is valid (every re-entry counts)',
+	),
 
 	// --- loop invariants ------------------------------------------------------
 	"loop-kind-unknown": def<{ kind: string; allowed: string }>(

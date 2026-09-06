@@ -482,7 +482,9 @@ const sourcesCoverageGaps = (state: RunView, cwd: string, sliceNumbers: Set<numb
  * Preflight: a slice with NO design on the `designs` channel halts LOUD before
  * any reconciliation — the fanout drops (or under-feeds) its cluster pre-dispatch
  * (`if (!designs.length) return undefined`), so re-dispatching `subplan` re-drops
- * it every round until `maxBackwardJumps` exhausts with a diagnostic naming the
+ * it every round until the re-entry budgets exhaust (the `maxBackwardJumps`
+ * cap, default 3, or the absolute `maxLaps` ceiling, default 8 — both fresh
+ * per invocation) with a diagnostic naming the
  * refused re-entry instead of the cause. The missing design is upstream
  * (`slice-design`/`design-review`) and unreachable from this loop's backward
  * edge; halting here names the actual defect and spends no jump budget.
@@ -491,7 +493,9 @@ const sourcesCoverageGaps = (state: RunView, cwd: string, sliceNumbers: Set<numb
  * `pass:false` verdict rated `low`/`none`; a lost cluster MUST rate `high` or it
  * ships). Deliberately NOT the `match("verdict", …)` STOP idiom
  * `implementScopeCheck` uses — a lost cluster IS repairable by re-dispatch, so the
- * floor routes the backward edge to `subplan`, bounded by `maxBackwardJumps`.
+ * floor routes the backward edge to `subplan`, bounded by `maxBackwardJumps`
+ * (default 3) under the absolute `maxLaps` ceiling (default 8; both budgets
+ * fresh per invocation).
  * Deterministic ⇒ idempotent across re-dispatch rounds: the verdict basename is
  * keyed on the slice-map basename, so a re-run OVERWRITES its own slot.
  */
@@ -517,8 +521,9 @@ const subplanCoverageCheck = ({ state, cwd }: ScriptContext): Omit<Output, "meta
 
 	// A slice with no design cannot be repaired by the backward edge: the fanout
 	// drops a zero-design cluster pre-dispatch, so every `subplan` re-dispatch
-	// reproduces the identical gap until maxBackwardJumps exhausts blaming the
-	// re-entry. Halt loud at the floor instead, naming the upstream cause.
+	// reproduces the identical gap until the re-entry budgets exhaust (the
+	// maxBackwardJumps cap, default 3, or the absolute maxLaps ceiling, default
+	// 8) blaming the re-entry. Halt loud at the floor instead, naming the upstream cause.
 	const designBySlice = designPathsBySlice(state);
 	const undesigned = designCoverageGap(sliceNumbers, designBySlice);
 	if (undesigned.length > 0) {

@@ -190,12 +190,15 @@ The package sets no explicit file modes; writes use the process umask. If a writ
 
 ## Run caps
 
-Two backstops bound every run regardless of what a workflow declares:
+Three backstops bound every run regardless of what a workflow declares:
 
 | Cap | Default | Effect |
 | --- | --- | --- |
 | `maxIterations` | `32` | Run-wide ceiling on loop units of every kind. The effective loop cap is `min(loop.max, run.maxIterations)` |
-| Backward-jump budget | `3` per destination stage | At most 4 executions of any one stage across decision-edge loop-backs |
+| Backward-jump budget | `3` per destination stage | At most 4 executions of any one stage across decision-edge loop-backs. A stage declaring a `progress` hook that reports `"improved"` waives a re-entry past this budget |
+| Lap ceiling | `8` per destination stage | Absolute ceiling on decision-edge re-entries — counted or waived. Even an all-`"improved"` loop halts on the `maxLaps + 1`-th re-entry of one stage |
+
+Both re-entry budgets are per invocation: a resume (`/wf @<run-id>`) starts them fresh. Raise them per run with `--max-jumps <n>` and `--max-laps <n>` — each honored in the leading or trailing position like `--name`, in any relative order, at most once; a mid-position token stays as workflow input text.
 
 ## Trusting overlay files
 

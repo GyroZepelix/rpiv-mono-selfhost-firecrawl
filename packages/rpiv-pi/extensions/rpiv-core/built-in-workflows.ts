@@ -37,9 +37,9 @@ import {
 import { rpivBucketOutcome } from "./artifact-collector.js";
 import {
 	allDimensionsPass,
-	anchorNitsOnly,
 	CODE_CONFIRM_FANOUT,
 	CODE_DIMENSION_FANOUT,
+	CODE_PANEL_PROGRESS,
 	COMMIT_BASELINE_PROMPT,
 	captureGoal,
 	captureReviewScope,
@@ -61,6 +61,7 @@ import {
 	PLAN_CONFIRM_FANOUT,
 	PLAN_DIMENSION_FANOUT,
 	PLAN_DIMENSIONS,
+	PLAN_PANEL_PROGRESS,
 	planAuthoredRisks,
 	planCitationCheck,
 	planDemote,
@@ -72,9 +73,11 @@ import {
 	rulingEffectivePass,
 	SHIP_DIMENSION_FANOUT,
 	SHIP_DIMENSIONS,
+	SHIP_PANEL_PROGRESS,
 	SLICE_DESIGN_FANOUT,
 	SLICE_DIMENSION_FANOUT,
 	SLICE_DIMENSIONS,
+	SLICE_PANEL_PROGRESS,
 	SYNTH_CLUSTER_FANOUT,
 	scopeQuarantine,
 	seedLiftStuck,
@@ -88,6 +91,8 @@ import {
 	subplanGatePasses,
 	unitFailedDimensions,
 	VALIDATE_GOAL_PROMPT,
+	type VerdictRecord,
+	verdictBlocks,
 	verdictOutcome,
 	verdictRiskRulings,
 } from "./built-ins/index.js";
@@ -142,7 +147,9 @@ const polishWorkflow = defineWorkflow({
 		validate: "code-review",
 		// Backward edge: code-review → blueprint re-plans (implement needs a plan).
 		// The iterate stage re-runs over every review phase; bounded by the
-		// runner's default maxBackwardJumps (3 → up to 4 review iterations).
+		// runner's default maxBackwardJumps (3 → up to 4 review iterations)
+		// under the absolute per-stage maxLaps ceiling (default 8; both
+		// budgets fresh per invocation — a resume re-opens the loop).
 		"code-review": gate("blockers_count", { blueprint: gt(0), commit: eq(0) }, "commit"),
 		commit: "stop",
 	},
@@ -500,7 +507,9 @@ const vetWorkflow = defineWorkflow({
 		// UNCHANGED. The scope-check inserts before validate, so a failing scope
 		// verdict halts before re-review, and a passing one flows into validate and
 		// back to code-review exactly as today. Bounded by the runner's default
-		// maxBackwardJumps (3 → at most 4 review iterations).
+		// maxBackwardJumps (3 → at most 4 review iterations) under the absolute
+		// per-stage maxLaps ceiling (default 8; both budgets fresh per
+		// invocation — a resume re-opens the loop).
 		validate: "code-review",
 		commit: "stop",
 	},
@@ -710,6 +719,10 @@ const buildWorkflow = defineWorkflow({
 			skill: "grade",
 			loop: SLICE_DIMENSION_FANOUT,
 			outcome: sliceVerdictOutcome,
+			// Whole-lap progress: the slice lane's three re-entered destinations
+			// (grade/fix/seed-lift) share ONE hook instance, so every counted
+			// re-entry reads the same verdict-channel fold.
+			progress: SLICE_PANEL_PROGRESS,
 			reads: ["slices"],
 		}),
 		// Re-cut the slice map from the failing verdicts. Routes through `slice`
@@ -720,6 +733,7 @@ const buildWorkflow = defineWorkflow({
 		"slice-fix": produces({
 			skill: "slice",
 			outcome: rpivBucketOutcome("slices"),
+			progress: SLICE_PANEL_PROGRESS,
 			reads: ["slices", fanin("slice-verdicts"), fanin("slice-check")],
 		}),
 		// Deterministic seed lift — the engine-owned half of the cite remedy: a
@@ -730,7 +744,11 @@ const buildWorkflow = defineWorkflow({
 		// outcome; the in-place amend keeps `latestFsArtifact(state, "slices")`
 		// resolving the same amended file), then re-enters `slice-check`, whose
 		// re-run stamps the cite discharge the gate folds on — no second panel.
-		"slice-seed-lift": produces.script({ reads: ["slices", fanin("slice-verdicts")], run: sliceSeedLift }),
+		"slice-seed-lift": produces.script({
+			reads: ["slices", fanin("slice-verdicts")],
+			run: sliceSeedLift,
+			progress: SLICE_PANEL_PROGRESS,
+		}),
 		// Design every slice in parallel.
 		"slice-design": produces({ skill: "design-slice", loop: SLICE_DESIGN_FANOUT }),
 		// One consolidated developer checkpoint over EVERY per-slice design, at the
@@ -772,6 +790,9 @@ const buildWorkflow = defineWorkflow({
 			skill: "grade",
 			loop: PLAN_DIMENSION_FANOUT,
 			outcome: planVerdictOutcome,
+			// Whole-lap progress: the plan lane's three re-entered destinations
+			// (grade/confirm/snapshot) share ONE hook instance — a lap is one unit.
+			progress: PLAN_PANEL_PROGRESS,
 			// `research` is read so the architecture-fit unit can thread it as
 			// --context; `goal` so completeness/correctness anchor on the brief.
 			reads: ["plans", "research", "goal", "acceptance"],
@@ -793,6 +814,7 @@ const buildWorkflow = defineWorkflow({
 			skill: "grade",
 			loop: PLAN_CONFIRM_FANOUT,
 			outcome: planVerdictOutcome,
+			progress: PLAN_PANEL_PROGRESS,
 			reads: ["plans", "research", "goal", "acceptance"],
 		}),
 		"plan-fix": produces({
@@ -814,7 +836,7 @@ const buildWorkflow = defineWorkflow({
 		// rides its stage-name channel, so this publishes to `plan-snapshot`, NOT
 		// `plans` — `latestFsArtifact(state, "plans")` still resolves to the real
 		// (amended) plan.
-		"plan-snapshot": produces.script({ reads: ["plans"], run: planSnapshot }),
+		"plan-snapshot": produces.script({ reads: ["plans"], run: planSnapshot, progress: PLAN_PANEL_PROGRESS }),
 		// Elaborate implement-ready code into each phase in parallel (fanout),
 		// deterministically splice it back into the plan (code-splice), then
 		// re-grade the now code-bearing plan — guarding the blind-splice risk.
@@ -841,6 +863,9 @@ const buildWorkflow = defineWorkflow({
 			skill: "grade",
 			loop: CODE_DIMENSION_FANOUT,
 			outcome: codeVerdictOutcome,
+			// Whole-lap progress: the code lane's three re-entered destinations
+			// (grade/confirm/snapshot) share ONE hook instance — a lap is one unit.
+			progress: CODE_PANEL_PROGRESS,
 			// `research` is read so the architecture-fit unit can thread it as
 			// --context; `goal` so completeness/correctness anchor on the brief.
 			reads: ["plans", "research", "goal", "acceptance"],
@@ -864,6 +889,7 @@ const buildWorkflow = defineWorkflow({
 			skill: "grade",
 			loop: CODE_CONFIRM_FANOUT,
 			outcome: codeVerdictOutcome,
+			progress: CODE_PANEL_PROGRESS,
 			reads: ["plans", "research", "goal", "acceptance"],
 		}),
 		"code-fix": produces({
@@ -879,7 +905,7 @@ const buildWorkflow = defineWorkflow({
 		// Snapshot the graded plan BEFORE code-fix amends it — the code-gate twin
 		// of `plan-snapshot` (code-grade/code-confirm → code-snapshot → code-fix),
 		// publishing the prior on the `code-snapshot` channel.
-		"code-snapshot": produces.script({ reads: ["plans"], run: codeSnapshot }),
+		"code-snapshot": produces.script({ reads: ["plans"], run: codeSnapshot, progress: CODE_PANEL_PROGRESS }),
 		implement: acts({ loop: IMPLEMENT_DAG_FANOUT, reads: ["plans"] }),
 		// Lane-level scope floor — the structural backstop beneath the quality
 		// gates. After the (now concurrent) implement lane lands, judge the working
@@ -963,7 +989,8 @@ const buildWorkflow = defineWorkflow({
 		// slice-fix and loop back. (A dimension whose re-dispatch produced no verdict
 		// takes the fix arm ahead of the seed-only check — a verdict-less dead
 		// dimension is never seed-only.) Bounded by the runner's maxBackwardJumps
-		// (default 3).
+		// (default 3) under the absolute per-stage maxLaps ceiling (default 8;
+		// both budgets fresh per invocation — a resume re-opens the loop).
 		"slice-grade": sliceGradeRoute,
 		"slice-fix": "slice-check",
 		// Deterministic re-entry after the seed lift: the re-run structure check
@@ -976,13 +1003,17 @@ const buildWorkflow = defineWorkflow({
 		// Route the cluster fanout through the deterministic coverage floor before
 		// the root merge — the twin of `slice → slice-check`. A pass folds straight
 		// to `plan`; a lost/clobbered cluster routes the backward edge to `subplan`,
-		// bounded by the runner's maxBackwardJumps.
+		// bounded by the runner's maxBackwardJumps (default 3) under the absolute
+		// per-stage maxLaps ceiling (default 8; both budgets fresh per invocation
+		// — a resume re-opens the loop).
 		subplan: "subplan-check",
 		// Subplan coverage gate. Pass ⇒ root merge. A fail (lost cluster, clobbered
 		// ordinal, tokenless basename, or a slice design absent from every sources:)
 		// routes the backward edge to `subplan` — re-dispatch the cluster fanout,
 		// which re-supplies each cluster's '--cluster <k>'. Bounded by the runner's
-		// maxBackwardJumps. `readsData: false` — the route consults only the
+		// maxBackwardJumps (default 3) under the absolute per-stage maxLaps ceiling
+		// (default 8; both budgets fresh per invocation — a resume re-opens the
+		// loop). `readsData: false` — the route consults only the
 		// deterministic verdict channel (mirrors the slice-check/plan-cite-check routes).
 		"subplan-check": defineRoute(
 			["plan", "subplan"],
@@ -1050,7 +1081,9 @@ const buildWorkflow = defineWorkflow({
 		// back to `code`: the gate fails on plan-text defects (edit anchors, line
 		// citations, naming) that a per-phase code rewrite cannot reach, so the
 		// surgical arm is the one with authority over them. Route logic unchanged —
-		// merely shifted one hop later. Bounded by the runner's maxBackwardJumps.
+		// merely shifted one hop later. Bounded by the runner's maxBackwardJumps
+		// (default 3) under the absolute per-stage maxLaps ceiling (default 8;
+		// both budgets fresh per invocation — a resume re-opens the loop).
 		"code-demote": codeDemoteRoute,
 		"code-confirm": defineRoute(
 			["implement", "code-snapshot"],
@@ -1118,7 +1151,8 @@ const buildWorkflow = defineWorkflow({
  * edges attach their own no-match diagnostics; only these two `defineRoute`
  * gates would otherwise stop silently. Best-effort DIAGNOSTICS, not gates:
  * `allDimensionsPass`/`shipGatePasses` stay the sole routing authorities, and
- * these mirror their severity floor only to NAME the blockers.
+ * these consult the shared `verdictBlocks` predicate — the same fold those
+ * gates route on — only to NAME the blockers.
  */
 const shipCiteStopNote = (state: RunView): string => {
 	const data = state.named["plan-cite-check"]?.at(-1)?.data as { findings?: unknown } | undefined;
@@ -1143,9 +1177,8 @@ const shipGradeStopNote = (state: RunView): string => {
 	for (const d of SHIP_DIMENSIONS) {
 		const o = latest.get(d);
 		if (!o) continue;
-		const v = o.data as { pass?: boolean; severity?: string; findings?: unknown };
-		const floored = v.pass === true || v.severity === "low" || v.severity === "none" || anchorNitsOnly(v);
-		if (!floored) blockers.push(`${d} failed (${v.severity ?? "unrated"})`);
+		const v = o.data as VerdictRecord | undefined;
+		if (verdictBlocks(v)) blockers.push(`${d} failed (${v?.severity ?? "unrated"})`);
 		else if (verdictRiskRulings(o).some((r) => !rulingEffectivePass(r, risks.get(r.id))))
 			blockers.push(`${d} risk flag failed`);
 	}
@@ -1268,6 +1301,10 @@ const shipWorkflow = defineWorkflow({
 			skill: "grade",
 			loop: SHIP_DIMENSION_FANOUT,
 			outcome: shipVerdictOutcome,
+			// Whole-lap progress: declared for uniformity — ship's grade gate
+			// routes implement or stop, so no edge ever re-enters this stage and
+			// the hook never fires.
+			progress: SHIP_PANEL_PROGRESS,
 			reads: ["plans", "research", "goal", "acceptance"],
 		}),
 		// Dep-gated DAG implement — build's lane verbatim.

@@ -184,6 +184,108 @@ describe("parseArgs", () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseArgs — caps flags (--max-jumps / --max-laps) permutation pins. The
+// extraction is a fixpoint (each pass: leading form of every not-yet-
+// extracted flag, else its trailing form, until a pass extracts nothing), so
+// the two caps + --name parse in ANY relative leading/trailing order — the
+// old fixed jumps-then-name sequence silently stranded one caps flag in
+// same-slot permutations.
+// ---------------------------------------------------------------------------
+
+describe("parseArgs — caps flag permutations", () => {
+	const built = {
+		workflowNames: new Set(["tiny", "mid", "review"]),
+		default: "mid",
+	};
+
+	it("parses --max-laps leading before --max-jumps and --name (the same-slot permutation)", () => {
+		expect(parseArgs("--max-laps 8 --max-jumps 6 --name x mid Add dark mode", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "Add dark mode",
+			name: "x",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+		});
+	});
+
+	it("parses the trailing mirror — --name, --max-jumps, --max-laps all trailing", () => {
+		expect(parseArgs("mid Add dark mode --name x --max-jumps 6 --max-laps 8", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "Add dark mode",
+			name: "x",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+		});
+	});
+
+	it("parses trailing-only caps in both relative orders", () => {
+		expect(parseArgs("Add dark mode --max-laps 8 --max-jumps 6", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "Add dark mode",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+		});
+		expect(parseArgs("Add dark mode --max-jumps 6 --max-laps 8", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "Add dark mode",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+		});
+	});
+
+	it("parses a leading --max-laps on a run (the --max-jumps twin)", () => {
+		expect(parseArgs("--max-laps 8 mid Add dark mode", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "Add dark mode",
+			maxLaps: 8,
+		});
+	});
+
+	it("parses both caps on the @resume arm (trailing pair after the ref)", () => {
+		expect(parseArgs("@2026-09-05_10-01-29-cc02 --max-laps 8 --max-jumps 6", built)).toEqual({
+			kind: "resume",
+			ref: "2026-09-05_10-01-29-cc02",
+			droppedName: undefined,
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+		});
+	});
+
+	it("leaves a mid-position --max-laps in the input text (silent, like --max-jumps)", () => {
+		expect(parseArgs("mid fix the --max-laps 8 handling", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "fix the --max-laps 8 handling",
+		});
+	});
+
+	it("keeps leading-wins + nameFlagIgnored for a doubled --name across caps extraction", () => {
+		expect(parseArgs("--name a mid --name b --max-laps 8", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "--name b",
+			name: "a",
+			nameFlagIgnored: true,
+			maxLaps: 8,
+		});
+	});
+
+	it("keeps absent caps keys absent when only --name is supplied (strict toEqual)", () => {
+		expect(parseArgs("--name auth mid go", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "go",
+			name: "auth",
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
 // parseArgs — resume sigil
 // ---------------------------------------------------------------------------
 
