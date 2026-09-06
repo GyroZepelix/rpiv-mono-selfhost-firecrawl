@@ -24,7 +24,12 @@ import {
 	MSG_WORKFLOW_THREW,
 } from "./messages.js";
 import { formatWorkflowDetails, formatWorkflowList } from "./preview.js";
-import { MAX_BACKWARD_JUMPS, MAX_LAPS, resumeWorkflowByRunId, runWorkflow } from "./runner/index.js";
+import { resumeWorkflowByRunId, runWorkflow } from "./runner/index.js";
+// The warning thresholds come from the constants module DIRECTLY, not the
+// runner barrel: the handler suites mock the barrel wholesale (the float
+// boundary), and a barrel import would let those suites pin a stale 3/8 pair
+// while the real defaults drifted.
+import { MAX_BACKWARD_JUMPS, MAX_LAPS } from "./runner/run-context.js";
 import { flushSkillContractProviders } from "./skill-contracts/index.js";
 import { isValidName } from "./state/index.js";
 

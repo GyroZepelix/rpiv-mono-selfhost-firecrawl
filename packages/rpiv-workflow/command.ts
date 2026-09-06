@@ -177,21 +177,25 @@ export type ParsedCommand =
  * surfaces `MSG_NO_WORKFLOWS_REGISTERED`.
  *
  * `--name <slug>` is honored ONLY in leading or trailing position (leading
- * wins when both are present). A `--name` anywhere else is the user's own
- * prompt text (`/wf fix the --name handling bug`) — it stays in the input
- * untouched and `nameFlagIgnored` is set so the command layer can warn.
+ * wins when both are present). A `--name` that is neither — one that still
+ * sits mid-input once every leading/trailing flag has been peeled — is the
+ * user's own prompt text (`/wf fix the --name handling bug`): it stays in
+ * the input untouched and `nameFlagIgnored` is set so the command layer can
+ * warn. (A tail run like `go --name a --name b` is NOT mid-input: both peel
+ * as trailing, the second as a duplicate.)
  * The two caps flags — `--max-jumps <n>` and `--max-laps <n>` — follow the
  * same rule (leading or trailing only, any relative order among the three);
  * a mid-position caps token stays in the input untouched and, unlike
  * `--name`, sets no flag.
  *
  * A flag repeated in a leading/trailing slot (`--max-jumps 6 --max-jumps 9
- * research …`) is consumed, not stranded: the FIRST extraction wins, every
- * later occurrence is stripped, and its token lands in `duplicateFlags` so
- * the command layer can warn. Leaving the repeat in the residual would make
- * `--max-jumps` the first token — not a workflow name — and bind the whole
- * line (the user's intended workflow included) as prompt text for the
- * DEFAULT workflow.
+ * research …`) is consumed, not stranded: the FIRST-TYPED value wins in
+ * every slot (a trailing run peels from the end, so its later peels are the
+ * earlier-typed ones and overwrite), every other occurrence is stripped,
+ * and the token lands in `duplicateFlags` so the command layer can warn.
+ * Leaving the repeat in the residual would make `--max-jumps` the first
+ * token — not a workflow name — and bind the whole line (the user's
+ * intended workflow included) as prompt text for the DEFAULT workflow.
  *
  * `@<ref>` on the first token is the resume sigil — the first whitespace-
  * delimited token after `@` is the run reference. Leading space after the
@@ -212,32 +216,42 @@ export function parseArgs(
 	// in same-slot permutations — `--max-laps 8 --max-jumps 6 --name x` would
 	// strand `--max-jumps 6` as input text; the fixpoint peels the
 	// leading/trailing positions in any relative order. A flag that matches
-	// AGAIN after it was already extracted is stripped without assignment
-	// (first wins) and recorded as a duplicate — skipping it would leave the
-	// repeat as the residual's first token and hijack workflow resolution. A
-	// mid-position token matches neither form and stays as input text (silent
-	// for both caps flags; `--name` additionally warns via MID_NAME_FLAG below).
-	const extracted = new Set<FlagKey>();
+	// AGAIN after it was already extracted is stripped and recorded as a
+	// duplicate — skipping it would leave the repeat as the residual's first
+	// token and hijack workflow resolution. The FIRST-TYPED value wins in
+	// every slot: a leading repeat (or a trailing repeat of a leading
+	// original) is later-typed and is dropped, while a trailing run peels
+	// from the END, so a second trailing match is the EARLIER-typed
+	// occurrence and overwrites (`go --max-jumps 20 --max-jumps 6` keeps 20).
+	// A mid-position token matches neither form and stays as input text
+	// (silent for both caps flags; `--name` additionally warns via
+	// MID_NAME_FLAG below).
+	const extracted = new Map<FlagKey, "leading" | "trailing">();
 	const duplicates: string[] = [];
 	for (;;) {
 		let extractedThisPass = false;
 		for (const flag of FLAG_EXTRACTORS) {
 			let raw: string;
+			let slot: "leading" | "trailing";
 			const lead = flag.leading.exec(trimmed);
 			if (lead !== null) {
 				raw = lead[1]!;
+				slot = "leading";
 				trimmed = trimmed.slice(lead[0].length);
 			} else {
 				const trail = flag.trailing.exec(trimmed);
 				if (trail === null) continue;
 				raw = trail[1]!;
+				slot = "trailing";
 				trimmed = trimmed.slice(0, trail.index);
 			}
-			if (extracted.has(flag.key)) {
-				if (!duplicates.includes(flag.token)) duplicates.push(flag.token);
-			} else {
+			const prior = extracted.get(flag.key);
+			if (prior === undefined) {
 				assignFlag(flags, flag.key, raw);
-				extracted.add(flag.key);
+				extracted.set(flag.key, slot);
+			} else {
+				if (prior === "trailing" && slot === "trailing") assignFlag(flags, flag.key, raw);
+				if (!duplicates.includes(flag.token)) duplicates.push(flag.token);
 			}
 			extractedThisPass = true;
 		}

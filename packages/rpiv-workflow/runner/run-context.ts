@@ -52,12 +52,15 @@ export const MAX_LAPS = 8;
  */
 export const MAX_ITERATIONS = 32;
 
-/** The three run budgets an embedder may override — each a non-negative integer or absent. */
-export interface RunBudgetOptions {
-	maxBackwardJumps?: number;
-	maxLaps?: number;
-	maxIterations?: number;
-}
+/**
+ * The run budgets an embedder may override — the single key list behind
+ * `RunBudgetOptions`, the validator, and `buildRunContext`'s options type, so
+ * a fourth budget is a one-row addition here plus its default below.
+ */
+const BUDGET_KEYS = ["maxBackwardJumps", "maxLaps", "maxIterations"] as const;
+
+/** The run budgets an embedder may override — each a non-negative integer or absent. */
+export type RunBudgetOptions = { [K in (typeof BUDGET_KEYS)[number]]?: number };
 
 /**
  * Validate the budget options an embedder may thread in. `??` passes `NaN`
@@ -73,7 +76,7 @@ export interface RunBudgetOptions {
  * `buildRunContext` throws on it as the backstop.
  */
 export function validateRunBudgets(options: RunBudgetOptions): string | undefined {
-	for (const key of ["maxBackwardJumps", "maxLaps", "maxIterations"] as const) {
+	for (const key of BUDGET_KEYS) {
 		const value = options[key];
 		if (value === undefined) continue;
 		if (!Number.isInteger(value) || value < 0) return MSG_BUDGET_INVALID(key, value);
@@ -124,11 +127,8 @@ export function freshRunState(originalInput: string): RunState {
 export function buildRunContext(
 	cwd: string,
 	workflow: Workflow,
-	options: {
+	options: RunBudgetOptions & {
 		host?: WorkflowHost;
-		maxBackwardJumps?: number;
-		maxLaps?: number;
-		maxIterations?: number;
 		lifecycle?: LifecycleListeners;
 		signal?: AbortSignal;
 		resolveModel?: (id: { workflow: string; stage: string; skill: string }) => ModelSelection | undefined;

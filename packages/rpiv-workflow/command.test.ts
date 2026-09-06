@@ -9,8 +9,6 @@ import { registerBuiltInsProvider } from "./built-ins.js";
 vi.mock("./runner/index.js", () => ({
 	runWorkflow: vi.fn(async () => ({ stagesCompleted: 2, success: true })),
 	resumeWorkflowByRunId: vi.fn(async () => ({ runId: "r", stagesCompleted: 1, success: true })),
-	MAX_BACKWARD_JUMPS: 3,
-	MAX_LAPS: 8,
 }));
 
 // Mock load.ts to avoid jiti + filesystem I/O. The mock provides a stable
@@ -303,15 +301,56 @@ describe("parseArgs — caps flag permutations", () => {
 		});
 	});
 
-	it("a doubled trailing caps flag keeps the FIRST-extracted value and strips the other from the input", () => {
-		// Trailing extraction peels from the END, so the last token is the
-		// first extraction — the outer `9` wins, the inner `6` is the repeat.
+	it("a doubled trailing caps flag keeps the FIRST-TYPED value (the end-peel is corrected for)", () => {
+		// Trailing extraction peels from the END — `9` is extracted first — but
+		// the inner `6` was typed first, so it wins; `9` is the repeat.
 		expect(parseArgs("tiny fix X --max-jumps 6 --max-jumps 9", built)).toEqual({
 			kind: "run",
 			workflow: "tiny",
 			input: "fix X",
+			maxBackwardJumps: 6,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a tripled trailing caps flag keeps the first-typed value", () => {
+		expect(parseArgs("tiny fix X --max-jumps 1 --max-jumps 2 --max-jumps 3", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxBackwardJumps: 1,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a trailing double interleaved with another trailing flag still keeps the first-typed value", () => {
+		expect(parseArgs("tiny fix X --max-jumps 9 --name a --max-jumps 6", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			name: "a",
 			maxBackwardJumps: 9,
 			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a doubled trailing --name (the tail run) keeps the first-typed name, strips the repeat, sets no mid-input flag", () => {
+		expect(parseArgs("mid go --name a --name b", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "go",
+			name: "a",
+			duplicateFlags: ["--name"],
+		});
+	});
+
+	it("a doubled trailing caps flag on the @resume arm keeps the first-typed value", () => {
+		expect(parseArgs("@2026-09-05_10-01-29-cc02 --max-laps 4 --max-laps 9", built)).toEqual({
+			kind: "resume",
+			ref: "2026-09-05_10-01-29-cc02",
+			droppedName: undefined,
+			maxLaps: 4,
+			duplicateFlags: ["--max-laps"],
 		});
 	});
 

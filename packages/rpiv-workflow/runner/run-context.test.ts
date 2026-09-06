@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { defineWorkflow, produces } from "../api.js";
 import { MSG_BUDGET_INVALID } from "../messages.js";
-import { buildRunContext, freshRunState, MAX_BACKWARD_JUMPS, MAX_LAPS, validateRunBudgets } from "./run-context.js";
+import {
+	buildRunContext,
+	freshRunState,
+	MAX_BACKWARD_JUMPS,
+	MAX_ITERATIONS,
+	MAX_LAPS,
+	validateRunBudgets,
+} from "./run-context.js";
 
 const workflow = defineWorkflow({
 	name: "budgets",
@@ -43,10 +50,23 @@ describe("validateRunBudgets", () => {
 });
 
 describe("buildRunContext — budget backstop", () => {
-	it("defaults absent budgets", () => {
+	it("defaults every absent budget", () => {
 		const run = buildRunContext("/tmp/x", workflow, {}, identity());
 		expect(run.maxBackwardJumps).toBe(MAX_BACKWARD_JUMPS);
 		expect(run.maxLaps).toBe(MAX_LAPS);
+		expect(run.maxIterations).toBe(MAX_ITERATIONS);
+	});
+
+	it("applies every supplied budget (zero included — `??` must not treat it as absent)", () => {
+		const run = buildRunContext(
+			"/tmp/x",
+			workflow,
+			{ maxBackwardJumps: 5, maxLaps: 0, maxIterations: 7 },
+			identity(),
+		);
+		expect(run.maxBackwardJumps).toBe(5);
+		expect(run.maxLaps).toBe(0);
+		expect(run.maxIterations).toBe(7);
 	});
 
 	it("throws on a NaN ceiling instead of building a context whose ceiling can never trip", () => {

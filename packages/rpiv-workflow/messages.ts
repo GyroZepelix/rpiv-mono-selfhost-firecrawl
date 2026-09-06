@@ -443,10 +443,11 @@ export const MSG_NAME_FLAG_MID_INPUT =
 	"/wf: --name is only honored as the first or last token — a mid-input --name is treated as workflow input text";
 
 /**
- * A leading/trailing flag appeared more than once. The first occurrence wins
- * and every later one is stripped — never left in the input, where a leading
- * `--max-jumps 9 research …` residual would bind the whole line as prompt
- * text for the DEFAULT workflow.
+ * A leading/trailing flag appeared more than once. The first-TYPED value
+ * wins in every slot (the parser corrects for the trailing form peeling from
+ * the end) and every other occurrence is stripped — never left in the
+ * input, where a leading `--max-jumps 9 research …` residual would bind the
+ * whole line as prompt text for the DEFAULT workflow.
  */
 export const MSG_FLAG_REPEATED = (flag: string) =>
 	`/wf: ${flag} given more than once — the first value wins, the rest are ignored`;
