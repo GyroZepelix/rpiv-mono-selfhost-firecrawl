@@ -2330,6 +2330,33 @@ describe("resumeWorkflow — fresh re-entry budgets (revisits + laps)", () => {
 		expect(result.stagesCompleted).toBe(8);
 	});
 
+	it("a malformed budget is refused pre-flight on resume — no row appended, no re-dispatch", async () => {
+		appendHeader(tmpDir, resumeHeader);
+		const rows = capHaltedRows();
+		for (const row of rows) appendStage(tmpDir, resumeHeader.runId, row);
+		const before = readFileSync(join(tmpDir, ".rpiv", "workflows", "runs", `${resumeHeader.runId}.jsonl`), "utf8");
+		const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+
+		const result = await resumeWorkflow(chain.ctx, {
+			workflow: loopWf(
+				() => "a",
+				() => "improved",
+			),
+			header: resumeHeader,
+			ref: "@2026-06-03_07-30-00-ab12",
+			maxBackwardJumps: 5,
+			maxLaps: Number.NaN,
+		});
+
+		expect(result).toEqual({
+			stagesCompleted: 0,
+			success: false,
+			error: "maxLaps must be a non-negative integer, got NaN",
+		});
+		const after = readFileSync(join(tmpDir, ".rpiv", "workflows", "runs", `${resumeHeader.runId}.jsonl`), "utf8");
+		expect(after).toBe(before);
+	});
+
 	it("the fold never consults the progress hook — reconstructState replays rows without voting", async () => {
 		const progressSpy = vi.fn(() => "improved" as const);
 		const spyWf: Workflow = {

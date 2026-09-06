@@ -2910,6 +2910,49 @@ describe("runWorkflow", () => {
 				expect(result.stagesCompleted).toBe(2);
 			});
 
+			// `??` passes NaN through; `laps > NaN` is always false, so an
+			// always-"improved" hook (cap waived) under `maxLaps: NaN` would
+			// never halt. Refused pre-flight: no name claim, no header, no rows.
+			it("maxLaps: NaN is refused pre-flight — the ceiling never gets to fail open, nothing is written", async () => {
+				const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+				const workflow = wf(
+					"nan-ceiling",
+					["a", "b", "c"],
+					{ a: { progress: () => "improved" } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, {
+					workflow,
+					input: "x",
+					name: "nan-run",
+					maxBackwardJumps: 1,
+					maxLaps: Number("garbage"),
+				});
+
+				expect(result).toEqual({
+					stagesCompleted: 0,
+					success: false,
+					error: "maxLaps must be a non-negative integer, got NaN",
+				});
+				// Refused before the name claim and the header write.
+				expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
+			});
+
+			it("maxBackwardJumps: -1 and a fractional maxIterations are refused the same way", async () => {
+				const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+				const workflow = wf("bad-budgets", ["a"]);
+
+				const negative = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: -1 });
+				expect(negative.success).toBe(false);
+				expect(negative.error).toBe("maxBackwardJumps must be a non-negative integer, got -1");
+
+				const fractional = await runWorkflow(chain.ctx, { workflow, input: "x", maxIterations: 2.5 });
+				expect(fractional.success).toBe(false);
+				expect(fractional.error).toBe("maxIterations must be a non-negative integer, got 2.5");
+				expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
+			});
+
 			it("hook-less defaults: the cap (3) trips before the ceiling (8) — cap arm, never the ceiling arm", async () => {
 				for (let i = 1; i <= 4; i++) {
 					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);

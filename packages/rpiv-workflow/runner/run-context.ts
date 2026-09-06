@@ -9,6 +9,7 @@
 import type { Workflow } from "../api.js";
 import { LifecycleDispatcher, type LifecycleListeners } from "../events.js";
 import type { ModelSelection, WorkflowHost } from "../host.js";
+import { MSG_BUDGET_INVALID } from "../messages.js";
 import { getSkillContracts } from "../skill-contracts/index.js";
 import type { BranchEntry } from "../transcript.js";
 import type { RunTrigger } from "../triggers.js";
@@ -50,6 +51,35 @@ export const MAX_LAPS = 8;
  * any realistic per-stage unit count while still halting a runaway loop.
  */
 export const MAX_ITERATIONS = 32;
+
+/** The three run budgets an embedder may override — each a non-negative integer or absent. */
+export interface RunBudgetOptions {
+	maxBackwardJumps?: number;
+	maxLaps?: number;
+	maxIterations?: number;
+}
+
+/**
+ * Validate the budget options an embedder may thread in. `??` passes `NaN`
+ * straight through to the ledgers, where `laps > NaN` is always false — the
+ * ceiling documented as "always halts" would fail OPEN (an always-"improved"
+ * hook never spends the cap either, so nothing terminates the loop) while
+ * `revisits <= NaN` fails CLOSED on the first counted re-entry. Non-integers
+ * and negatives are refused for the same reason: the compares are integer
+ * arithmetic. The CLI regexes gate `\d+`, so only the programmatic options
+ * path can reach this. Returns the first offending option's message, or
+ * `undefined` when every supplied budget is well-formed; `runWorkflow` and
+ * `resumeWorkflow` refuse pre-flight on it (before any row is written) and
+ * `buildRunContext` throws on it as the backstop.
+ */
+export function validateRunBudgets(options: RunBudgetOptions): string | undefined {
+	for (const key of ["maxBackwardJumps", "maxLaps", "maxIterations"] as const) {
+		const value = options[key];
+		if (value === undefined) continue;
+		if (!Number.isInteger(value) || value < 0) return MSG_BUDGET_INVALID(key, value);
+	}
+	return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // State + context construction
@@ -107,6 +137,10 @@ export function buildRunContext(
 	},
 	identity: { runId: string; state: RunState; visited: Set<string>; trigger: RunTrigger },
 ): RunContext {
+	// Backstop for any constructor path that skipped the pre-flight check —
+	// a malformed budget must never reach the ledgers.
+	const budgetError = validateRunBudgets(options);
+	if (budgetError !== undefined) throw new Error(budgetError);
 	return {
 		cwd,
 		runId: identity.runId,

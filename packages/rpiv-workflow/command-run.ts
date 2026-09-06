@@ -11,7 +11,9 @@ import { formatError } from "./internal-utils.js";
 import { renderConfigLayer } from "./layers.js";
 import { findWorkflow, type Issue, loadWorkflows } from "./load/index.js";
 import {
+	MSG_FLAG_REPEATED,
 	MSG_INTERACTIVE_ONLY,
+	MSG_JUMP_CAP_ABOVE_LAP_CEILING,
 	MSG_LOAD_ABORTED,
 	MSG_NAME_FLAG_MID_INPUT,
 	MSG_NAME_IGNORED_ON_RESUME,
@@ -22,7 +24,7 @@ import {
 	MSG_WORKFLOW_THREW,
 } from "./messages.js";
 import { formatWorkflowDetails, formatWorkflowList } from "./preview.js";
-import { resumeWorkflowByRunId, runWorkflow } from "./runner/index.js";
+import { MAX_BACKWARD_JUMPS, MAX_LAPS, resumeWorkflowByRunId, runWorkflow } from "./runner/index.js";
 import { flushSkillContractProviders } from "./skill-contracts/index.js";
 import { isValidName } from "./state/index.js";
 
@@ -62,6 +64,19 @@ export async function handleWorkflowCommand(host: WorkflowHost, args: string, ct
 
 	if (parsed.nameFlagIgnored) {
 		ctx.ui.notify(MSG_NAME_FLAG_MID_INPUT, "warning");
+	}
+	for (const flag of parsed.duplicateFlags ?? []) {
+		ctx.ui.notify(MSG_FLAG_REPEATED(flag), "warning");
+	}
+	// The ceiling is arbitrated before the cap and counts every re-entry
+	// (`revisits ≤ laps`), so a cap at or above the ceiling can never trip —
+	// `--max-jumps 20` alone silently delivers MAX_LAPS re-entries. Warn on
+	// the EFFECTIVE pair (a flag absent ⇒ its default) before either arm runs;
+	// the run still proceeds, bounded by the ceiling.
+	const effectiveCap = parsed.maxBackwardJumps ?? MAX_BACKWARD_JUMPS;
+	const effectiveCeiling = parsed.maxLaps ?? MAX_LAPS;
+	if (effectiveCap >= effectiveCeiling) {
+		ctx.ui.notify(MSG_JUMP_CAP_ABOVE_LAP_CEILING(effectiveCap, effectiveCeiling), "warning");
 	}
 
 	if (parsed.kind === "resume") {

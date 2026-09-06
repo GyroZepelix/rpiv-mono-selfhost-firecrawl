@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A repeated `/wf` flag no longer hijacks workflow resolution.** `/wf --max-jumps 6 --max-jumps 9 research fix X` stripped the first `--max-jumps` and skipped the second, leaving `--max-jumps 9 research fix X` as the residual — `--max-jumps` is not a workflow name, so the whole line (the intended `research` token included) ran as prompt input to the DEFAULT workflow, silently. The flag extractor now consumes a repeated leading/trailing flag (`--name`, `--max-jumps`, `--max-laps`): the first extraction wins, later ones are stripped, and `/wf` warns once per repeated token. A doubled `--name` follows the same rule (it used to stay in the input as prompt text with the mid-input warning).
+- **`/wf` warns when `--max-jumps` is at or above the lap ceiling.** The ceiling counts every re-entry and is arbitrated first, so a cap at or above it can never trip — `--max-jumps 20` alone still delivered at most 8 re-entries with no hint why. The warning names the effective pair (an absent flag is its default) on both the run and `@resume` arms; the run proceeds, bounded by the ceiling. Raise `--max-laps` beside the cap to widen a run.
+- **Programmatic budget options are validated pre-flight.** `runWorkflow` / `resumeWorkflow` refuse a `maxBackwardJumps`, `maxLaps`, or `maxIterations` that is not a non-negative integer (`NaN`, `Infinity`, a negative, a fraction) with a pre-flight envelope before any row is written — `??` passed `NaN` straight to the ledgers, where `laps > NaN` is always false, so the ceiling documented as "always halts" failed OPEN under an always-`"improved"` hook. `buildRunContext` throws on the same check as the backstop; `validateRunBudgets` is exported from the runner barrel.
+
 ### Added
 
 - **`/wf … --max-laps <n>` sets an absolute per-destination ceiling on decision-edge re-entries (`MAX_LAPS = 8`), on a fresh run and on a resume.** The backward-jump cap is waive-aware — a stage whose `progress` hook keeps reporting `"improved"` re-enters past `--max-jumps` — while the lap ceiling counts every re-entry, waived or counted, so even an all-improving loop halts on the `maxLaps + 1`-th re-entry of one stage. When both limits would trip on the same re-entry, the ceiling is arbitrated first. Like the cap, the ledger is per invocation (a resume starts both re-entry budgets fresh), and the flag is honored in the leading or trailing position like `--max-jumps`/`--name` — in any relative order among them — with a mid-position token staying as input text.

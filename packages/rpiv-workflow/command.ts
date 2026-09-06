@@ -130,9 +130,9 @@ const MID_NAME_FLAG = /(?:^|\s)--name(?:\s|$)/;
  * one-row addition, not another copy of the extraction sequence.
  */
 const FLAG_EXTRACTORS = [
-	{ key: "name", leading: LEADING_NAME_FLAG, trailing: TRAILING_NAME_FLAG },
-	{ key: "maxBackwardJumps", leading: LEADING_JUMPS_FLAG, trailing: TRAILING_JUMPS_FLAG },
-	{ key: "maxLaps", leading: LEADING_LAPS_FLAG, trailing: TRAILING_LAPS_FLAG },
+	{ key: "name", token: "--name", leading: LEADING_NAME_FLAG, trailing: TRAILING_NAME_FLAG },
+	{ key: "maxBackwardJumps", token: "--max-jumps", leading: LEADING_JUMPS_FLAG, trailing: TRAILING_JUMPS_FLAG },
+	{ key: "maxLaps", token: "--max-laps", leading: LEADING_LAPS_FLAG, trailing: TRAILING_LAPS_FLAG },
 ] as const;
 
 type FlagKey = (typeof FLAG_EXTRACTORS)[number]["key"];
@@ -148,8 +148,11 @@ function assignFlag(
 	else flags.maxLaps = Number(raw);
 }
 
+/** Flag tokens (`--name`, `--max-jumps`, `--max-laps`) that appeared more than once — first wins, the rest were stripped. */
+type DuplicateFlags = { duplicateFlags?: readonly string[] };
+
 export type ParsedCommand =
-	| {
+	| ({
 			kind: "run";
 			workflow: string;
 			input: string;
@@ -157,15 +160,15 @@ export type ParsedCommand =
 			nameFlagIgnored?: boolean;
 			maxBackwardJumps?: number;
 			maxLaps?: number;
-	  }
-	| {
+	  } & DuplicateFlags)
+	| ({
 			kind: "resume";
 			ref: string;
 			droppedName?: string;
 			nameFlagIgnored?: boolean;
 			maxBackwardJumps?: number;
 			maxLaps?: number;
-	  };
+	  } & DuplicateFlags);
 
 /**
  * First token is a workflow name iff recognised; otherwise the whole arg is
@@ -178,9 +181,17 @@ export type ParsedCommand =
  * prompt text (`/wf fix the --name handling bug`) — it stays in the input
  * untouched and `nameFlagIgnored` is set so the command layer can warn.
  * The two caps flags — `--max-jumps <n>` and `--max-laps <n>` — follow the
- * same rule (leading or trailing only, at most once per flag, any relative
- * order among the three); a mid-position caps token stays in the input
- * untouched and, unlike `--name`, sets no flag.
+ * same rule (leading or trailing only, any relative order among the three);
+ * a mid-position caps token stays in the input untouched and, unlike
+ * `--name`, sets no flag.
+ *
+ * A flag repeated in a leading/trailing slot (`--max-jumps 6 --max-jumps 9
+ * research …`) is consumed, not stranded: the FIRST extraction wins, every
+ * later occurrence is stripped, and its token lands in `duplicateFlags` so
+ * the command layer can warn. Leaving the repeat in the residual would make
+ * `--max-jumps` the first token — not a workflow name — and bind the whole
+ * line (the user's intended workflow included) as prompt text for the
+ * DEFAULT workflow.
  *
  * `@<ref>` on the first token is the resume sigil — the first whitespace-
  * delimited token after `@` is the run reference. Leading space after the
@@ -193,32 +204,41 @@ export function parseArgs(
 	let trimmed = args.trim();
 	const flags: { name?: string; maxBackwardJumps?: number; maxLaps?: number } = {};
 
-	// Fixpoint flag extraction: each pass walks every not-yet-extracted flag
-	// and tries its LEADING form first (a flag's first occurrence wins), then
-	// its TRAILING form, against the current residual; a pass that extracts
-	// nothing ends the loop. Each flag extracts at most once. A fixed
-	// extraction SEQUENCE (jumps, then name) silently swallows a flag in
-	// same-slot permutations — `--max-laps 8 --max-jumps 6 --name x` would
+	// Fixpoint flag extraction: each pass walks every flag and tries its
+	// LEADING form first (a flag's first occurrence wins), then its TRAILING
+	// form, against the current residual; a pass that extracts nothing ends
+	// the loop (every extraction shortens the residual, so it terminates). A
+	// fixed extraction SEQUENCE (jumps, then name) silently swallows a flag
+	// in same-slot permutations — `--max-laps 8 --max-jumps 6 --name x` would
 	// strand `--max-jumps 6` as input text; the fixpoint peels the
-	// leading/trailing positions in any relative order. A mid-position token
-	// matches neither form and stays as input text (silent for both caps
-	// flags; `--name` additionally warns via MID_NAME_FLAG below).
+	// leading/trailing positions in any relative order. A flag that matches
+	// AGAIN after it was already extracted is stripped without assignment
+	// (first wins) and recorded as a duplicate — skipping it would leave the
+	// repeat as the residual's first token and hijack workflow resolution. A
+	// mid-position token matches neither form and stays as input text (silent
+	// for both caps flags; `--name` additionally warns via MID_NAME_FLAG below).
 	const extracted = new Set<FlagKey>();
+	const duplicates: string[] = [];
 	for (;;) {
 		let extractedThisPass = false;
 		for (const flag of FLAG_EXTRACTORS) {
-			if (extracted.has(flag.key)) continue;
+			let raw: string;
 			const lead = flag.leading.exec(trimmed);
 			if (lead !== null) {
-				assignFlag(flags, flag.key, lead[1]!);
+				raw = lead[1]!;
 				trimmed = trimmed.slice(lead[0].length);
 			} else {
 				const trail = flag.trailing.exec(trimmed);
 				if (trail === null) continue;
-				assignFlag(flags, flag.key, trail[1]!);
+				raw = trail[1]!;
 				trimmed = trimmed.slice(0, trail.index);
 			}
-			extracted.add(flag.key);
+			if (extracted.has(flag.key)) {
+				if (!duplicates.includes(flag.token)) duplicates.push(flag.token);
+			} else {
+				assignFlag(flags, flag.key, raw);
+				extracted.add(flag.key);
+			}
 			extractedThisPass = true;
 		}
 		if (!extractedThisPass) break;
@@ -229,6 +249,7 @@ export function parseArgs(
 	const caps = {
 		...(flags.maxBackwardJumps !== undefined ? { maxBackwardJumps: flags.maxBackwardJumps } : {}),
 		...(flags.maxLaps !== undefined ? { maxLaps: flags.maxLaps } : {}),
+		...(duplicates.length > 0 ? { duplicateFlags: duplicates } : {}),
 	};
 
 	const nameFlagIgnored = MID_NAME_FLAG.test(trimmed);

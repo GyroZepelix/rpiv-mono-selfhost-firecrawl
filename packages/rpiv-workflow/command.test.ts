@@ -9,6 +9,8 @@ import { registerBuiltInsProvider } from "./built-ins.js";
 vi.mock("./runner/index.js", () => ({
 	runWorkflow: vi.fn(async () => ({ stagesCompleted: 2, success: true })),
 	resumeWorkflowByRunId: vi.fn(async () => ({ runId: "r", stagesCompleted: 1, success: true })),
+	MAX_BACKWARD_JUMPS: 3,
+	MAX_LAPS: 8,
 }));
 
 // Mock load.ts to avoid jiti + filesystem I/O. The mock provides a stable
@@ -264,14 +266,102 @@ describe("parseArgs — caps flag permutations", () => {
 		});
 	});
 
-	it("keeps leading-wins + nameFlagIgnored for a doubled --name across caps extraction", () => {
-		expect(parseArgs("--name a mid --name b --max-laps 8", built)).toEqual({
+	it("a doubled --name across caps extraction: first wins, the repeat is stripped and reported (not left as input)", () => {
+		expect(parseArgs("--name a mid go --name b --max-laps 8", built)).toEqual({
 			kind: "run",
 			workflow: "mid",
-			input: "--name b",
+			input: "go",
 			name: "a",
-			nameFlagIgnored: true,
 			maxLaps: 8,
+			duplicateFlags: ["--name"],
+		});
+	});
+
+	// Doubled caps flags. Before the duplicate rule, pass 1 stripped the first
+	// `--max-jumps 6` and the `extracted` set skipped the second, leaving
+	// `--max-jumps 9 research fix X` as the residual: `--max-jumps` is not a
+	// workflow name, so the WHOLE line — the user's intended workflow token
+	// included — bound as prompt input to the DEFAULT workflow. Now the repeat
+	// is consumed (first wins) and surfaced for the command layer to warn on.
+	it("a doubled leading --max-jumps resolves the user's workflow, not the default (the hijack)", () => {
+		expect(parseArgs("--max-jumps 6 --max-jumps 9 tiny fix X", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxBackwardJumps: 6,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a doubled leading --max-laps resolves the same way", () => {
+		expect(parseArgs("--max-laps 6 --max-laps 9 tiny fix X", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxLaps: 6,
+			duplicateFlags: ["--max-laps"],
+		});
+	});
+
+	it("a doubled trailing caps flag keeps the FIRST-extracted value and strips the other from the input", () => {
+		// Trailing extraction peels from the END, so the last token is the
+		// first extraction — the outer `9` wins, the inner `6` is the repeat.
+		expect(parseArgs("tiny fix X --max-jumps 6 --max-jumps 9", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxBackwardJumps: 9,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a leading + trailing pair of the same caps flag: leading wins, trailing is the repeat", () => {
+		expect(parseArgs("--max-jumps 6 tiny fix X --max-jumps 9", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxBackwardJumps: 6,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("both caps doubled report both tokens, each once, in extraction order", () => {
+		expect(parseArgs("--max-jumps 6 --max-laps 8 --max-jumps 7 --max-laps 9 tiny fix X", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+			duplicateFlags: ["--max-jumps", "--max-laps"],
+		});
+	});
+
+	it("a tripled caps flag reports its token once", () => {
+		expect(parseArgs("--max-jumps 1 --max-jumps 2 --max-jumps 3 tiny fix X", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X",
+			maxBackwardJumps: 1,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a doubled caps flag on the @resume arm strips the repeat before the ref is read", () => {
+		expect(parseArgs("--max-jumps 6 --max-jumps 9 @2026-09-05_10-01-29-cc02", built)).toEqual({
+			kind: "resume",
+			ref: "2026-09-05_10-01-29-cc02",
+			droppedName: undefined,
+			maxBackwardJumps: 6,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a repeat WITHOUT a numeric value matches no form and stays as input text (no duplicate reported)", () => {
+		expect(parseArgs("--max-jumps 6 tiny fix X --max-jumps", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "fix X --max-jumps",
+			maxBackwardJumps: 6,
 		});
 	});
 

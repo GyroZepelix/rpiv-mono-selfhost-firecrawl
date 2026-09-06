@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowHost, WorkflowHostContext } from "./host.js";
 import { formatError } from "./internal-utils.js";
-import { MSG_RESUME_USAGE, MSG_WORKFLOW_THREW } from "./messages.js";
+import { MSG_FLAG_REPEATED, MSG_JUMP_CAP_ABOVE_LAP_CEILING, MSG_RESUME_USAGE, MSG_WORKFLOW_THREW } from "./messages.js";
 
 // Mock the loader to a single registered workflow — parseArgs sees "ship" as a
 // workflow name, so `/wf ship <input>` resolves a run without touching disk.
@@ -32,6 +32,8 @@ vi.mock("./load/index.js", () => ({
 vi.mock("./runner/index.js", () => ({
 	runWorkflow: vi.fn(),
 	resumeWorkflowByRunId: vi.fn(),
+	MAX_BACKWARD_JUMPS: 3,
+	MAX_LAPS: 8,
 }));
 
 import { handleWorkflowCommand } from "./command-run.js";
@@ -330,5 +332,130 @@ describe("handleWorkflowCommand — caps threading (both arms)", () => {
 		const opts = vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2];
 		expect(opts?.maxLaps).toBe(8);
 		expect(opts?.maxBackwardJumps).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Repeated flags — a doubled `--max-jumps`/`--max-laps` once hijacked
+// workflow resolution (the stranded repeat became the residual's first
+// token, so the whole line ran as prompt input to the DEFAULT workflow).
+// The parser now strips the repeat first-wins; the handler warns per token.
+// ---------------------------------------------------------------------------
+
+describe("handleWorkflowCommand — repeated flags", () => {
+	it("a doubled leading --max-jumps warns once and still runs the user's workflow with the first value", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "--max-jumps 6 --max-jumps 7 ship do the thing", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-jumps"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+		const opts = vi.mocked(runWorkflow).mock.calls[0]?.[1];
+		expect(opts?.workflow).toMatchObject({ name: "ship" });
+		expect(opts).toMatchObject({ input: "do the thing", maxBackwardJumps: 6 });
+	});
+
+	it("both caps doubled warn once per token", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "--max-jumps 6 --max-laps 8 ship do the thing --max-jumps 7 --max-laps 9", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-jumps"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-laps"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+		expect(vi.mocked(runWorkflow).mock.calls[0]?.[1]).toMatchObject({
+			input: "do the thing",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+		});
+	});
+
+	it("a doubled caps flag on the @resume arm warns and resumes with the first value", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "@my-run --max-laps 4 --max-laps 9", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-laps"), "warning");
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[1]).toBe("my-run");
+		// Trailing extraction peels from the end: `9` is the first extraction.
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2]).toMatchObject({ maxLaps: 9 });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cap-above-ceiling — the ceiling counts every re-entry and is arbitrated
+// first, so a jump cap at or above the lap ceiling can never trip. The
+// handler warns on the EFFECTIVE pair (absent flag ⇒ default) and proceeds.
+// ---------------------------------------------------------------------------
+
+describe("handleWorkflowCommand — --max-jumps at or above the lap ceiling", () => {
+	it("--max-jumps alone above the default ceiling warns with the effective pair and still runs", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing --max-jumps 20", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_JUMP_CAP_ABOVE_LAP_CEILING(20, 8), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(runWorkflow).mock.calls[0]?.[1]).toMatchObject({ maxBackwardJumps: 20 });
+		expect(vi.mocked(runWorkflow).mock.calls[0]?.[1]?.maxLaps).toBeUndefined();
+	});
+
+	it("equal budgets warn too (revisits ≤ laps — the ceiling still wins the tie)", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing --max-jumps 8 --max-laps 8", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_JUMP_CAP_ABOVE_LAP_CEILING(8, 8), "warning");
+	});
+
+	it("--max-laps alone BELOW the default cap warns on the effective pair (cap 3 ≥ ceiling 2)", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing --max-laps 2", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_JUMP_CAP_ABOVE_LAP_CEILING(3, 2), "warning");
+	});
+
+	it("a cap strictly below the ceiling is silent", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing --max-jumps 6 --max-laps 8", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
+	});
+
+	it("the defaults (3 < 8) are silent", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "ship do the thing", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
+	});
+
+	it("warns on the @resume arm as well (both arms thread the same budgets)", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "@my-run --max-jumps 9", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_JUMP_CAP_ABOVE_LAP_CEILING(9, 8), "warning");
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2]).toMatchObject({ maxBackwardJumps: 9 });
 	});
 });
