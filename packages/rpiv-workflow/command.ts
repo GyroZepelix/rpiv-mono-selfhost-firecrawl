@@ -148,7 +148,7 @@ function assignFlag(
 	else flags.maxLaps = Number(raw);
 }
 
-/** Flag tokens (`--name`, `--max-jumps`, `--max-laps`) that appeared more than once — first wins, the rest were stripped. */
+/** Flag tokens that appeared more than once (first-typed wins, the rest were stripped) — in `--name`, `--max-jumps`, `--max-laps` order. */
 type DuplicateFlags = { duplicateFlags?: readonly string[] };
 
 export type ParsedCommand =
@@ -190,9 +190,9 @@ export type ParsedCommand =
  *
  * A flag repeated in a leading/trailing slot (`--max-jumps 6 --max-jumps 9
  * research …`) is consumed, not stranded: the FIRST-TYPED value wins in
- * every slot (a trailing run peels from the end, so its later peels are the
- * earlier-typed ones and overwrite), every other occurrence is stripped,
- * and the token lands in `duplicateFlags` so the command layer can warn.
+ * every slot (each occurrence is ranked by its offset in the line, not by
+ * extraction order), every other occurrence is stripped, and the token
+ * lands in `duplicateFlags` so the command layer can warn.
  * Leaving the repeat in the residual would make `--max-jumps` the first
  * token — not a workflow name — and bind the whole line (the user's
  * intended workflow included) as prompt text for the DEFAULT workflow.
@@ -209,54 +209,56 @@ export function parseArgs(
 	const flags: { name?: string; maxBackwardJumps?: number; maxLaps?: number } = {};
 
 	// Fixpoint flag extraction: each pass walks every flag and tries its
-	// LEADING form first (a flag's first occurrence wins), then its TRAILING
-	// form, against the current residual; a pass that extracts nothing ends
-	// the loop (every extraction shortens the residual, so it terminates). A
-	// fixed extraction SEQUENCE (jumps, then name) silently swallows a flag
-	// in same-slot permutations — `--max-laps 8 --max-jumps 6 --name x` would
-	// strand `--max-jumps 6` as input text; the fixpoint peels the
-	// leading/trailing positions in any relative order. A flag that matches
-	// AGAIN after it was already extracted is stripped and recorded as a
-	// duplicate — skipping it would leave the repeat as the residual's first
-	// token and hijack workflow resolution. The FIRST-TYPED value wins in
-	// every slot: a leading repeat (or a trailing repeat of a leading
-	// original) is later-typed and is dropped, while a trailing run peels
-	// from the END, so a second trailing match is the EARLIER-typed
-	// occurrence and overwrites (`go --max-jumps 20 --max-jumps 6` keeps 20).
+	// LEADING form first, then its TRAILING form, against the current
+	// residual; a pass that extracts nothing ends the loop (every extraction
+	// shortens the residual, so it terminates). A fixed extraction SEQUENCE
+	// (jumps, then name) silently swallows a flag in same-slot permutations —
+	// `--max-laps 8 --max-jumps 6 --name x` would strand `--max-jumps 6` as
+	// input text; the fixpoint peels the leading/trailing positions in any
+	// relative order. A flag that matches AGAIN after it was already
+	// extracted is stripped and recorded as a duplicate — skipping it would
+	// leave the repeat as the residual's first token and hijack workflow
+	// resolution. The FIRST-TYPED value wins: extraction order is NOT typed
+	// order (a trailing run peels from the end; a head flag can mask a
+	// leading match for a whole pass), so every occurrence carries its offset
+	// in the original line and the smallest offset wins — no slot heuristic.
 	// A mid-position token matches neither form and stays as input text
 	// (silent for both caps flags; `--name` additionally warns via
 	// MID_NAME_FLAG below).
-	const extracted = new Map<FlagKey, "leading" | "trailing">();
-	const duplicates: string[] = [];
+	const extracted = new Map<FlagKey, number>(); // key → typed offset of the kept occurrence
+	const repeated = new Set<FlagKey>();
+	let consumedHead = 0; // chars sliced off the front of `trimmed` so far — restores typed offsets
 	for (;;) {
 		let extractedThisPass = false;
 		for (const flag of FLAG_EXTRACTORS) {
 			let raw: string;
-			let slot: "leading" | "trailing";
+			let offset: number;
 			const lead = flag.leading.exec(trimmed);
 			if (lead !== null) {
 				raw = lead[1]!;
-				slot = "leading";
+				offset = consumedHead;
 				trimmed = trimmed.slice(lead[0].length);
+				consumedHead += lead[0].length;
 			} else {
 				const trail = flag.trailing.exec(trimmed);
 				if (trail === null) continue;
 				raw = trail[1]!;
-				slot = "trailing";
+				offset = consumedHead + trail.index;
 				trimmed = trimmed.slice(0, trail.index);
 			}
 			const prior = extracted.get(flag.key);
-			if (prior === undefined) {
+			if (prior === undefined || offset < prior) {
 				assignFlag(flags, flag.key, raw);
-				extracted.set(flag.key, slot);
-			} else {
-				if (prior === "trailing" && slot === "trailing") assignFlag(flags, flag.key, raw);
-				if (!duplicates.includes(flag.token)) duplicates.push(flag.token);
+				extracted.set(flag.key, offset);
 			}
+			if (prior !== undefined) repeated.add(flag.key);
 			extractedThisPass = true;
 		}
 		if (!extractedThisPass) break;
 	}
+	// Reported in FLAG_EXTRACTORS order (not extraction order, which varies
+	// with the line's shape) so the command layer's warnings are stable.
+	const duplicates = FLAG_EXTRACTORS.filter((f) => repeated.has(f.key)).map((f) => f.token);
 	const name = flags.name;
 	// Conditional spread — an absent flag must stay an ABSENT key (strict
 	// toEqual pins), not a present-undefined one.

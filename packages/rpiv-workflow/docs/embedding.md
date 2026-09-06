@@ -23,10 +23,10 @@ package boundary.
 
 | Entry | Contents | When to import it |
 | --- | --- | --- |
-| `@juicesharp/rpiv-workflow` | Everything in `/registration` plus the runner (`runWorkflow`, `runWorkflowByName`, `resumeWorkflow`, `resumeWorkflowByRunId`), the budget defaults (`MAX_BACKWARD_JUMPS`, `MAX_LAPS`, `MAX_ITERATIONS`) and `validateRunBudgets` | Embedders that execute runs |
+| `@juicesharp/rpiv-workflow` | Everything in `/registration` plus the runner (`runWorkflow`, `runWorkflowByName`, `resumeWorkflow`, `resumeWorkflowByRunId`), the budget defaults (`MAX_BACKWARD_JUMPS`, `MAX_LAPS`, `MAX_ITERATIONS`), `validateRunBudgets` and its `RunBudgetOptions` type | Embedders that execute runs |
 | `@juicesharp/rpiv-workflow/registration` | The runner-free surface: DSL, loader, outcomes, handles, validators, host port types. The single canonical enumeration of the public API | Authoring, loading, validating — skips the ~530 ms engine graph |
 | `@juicesharp/rpiv-workflow/startup` | Only the registrars a sibling wires at extension load (~9 ms) | Extension `default` exports |
-| `@juicesharp/rpiv-workflow/runner` | The runner surface on its own, plus `StagePreflightError`, the budget defaults (`MAX_BACKWARD_JUMPS`, `MAX_LAPS`, `MAX_ITERATIONS`) and `validateRunBudgets` | Callers that already hold the DSL elsewhere |
+| `@juicesharp/rpiv-workflow/runner` | The runner surface on its own, plus `StagePreflightError`, the budget defaults (`MAX_BACKWARD_JUMPS`, `MAX_LAPS`, `MAX_ITERATIONS`), `validateRunBudgets` and its `RunBudgetOptions` type | Callers that already hold the DSL elsewhere |
 | `@juicesharp/rpiv-workflow/internal` | Test-only seams (`recordStage`, registry resets) | Tests |
 
 The Pi extension `default` entry is `./extension.ts`, not the barrel — loading

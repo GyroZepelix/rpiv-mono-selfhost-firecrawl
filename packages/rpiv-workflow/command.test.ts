@@ -364,7 +364,7 @@ describe("parseArgs — caps flag permutations", () => {
 		});
 	});
 
-	it("both caps doubled report both tokens, each once, in extraction order", () => {
+	it("both caps doubled report both tokens, each once, in flag-table order", () => {
 		expect(parseArgs("--max-jumps 6 --max-laps 8 --max-jumps 7 --max-laps 9 tiny fix X", built)).toEqual({
 			kind: "run",
 			workflow: "tiny",
@@ -404,6 +404,33 @@ describe("parseArgs — caps flag permutations", () => {
 		});
 	});
 
+	// The head-flag shapes: a flag whose leading occurrence is masked by a
+	// LATER-row flag at the head of the line is extracted trailing first, and
+	// its earlier-typed leading occurrence only surfaces in pass 2. A slot
+	// heuristic ("overwrite on trailing-after-trailing") kept the later-typed
+	// value here; ranking by typed offset keeps the first.
+	it("a head --max-laps masking a leading --max-jumps: the earlier-typed leading value still wins", () => {
+		expect(parseArgs("--max-laps 8 --max-jumps 6 tiny go --max-jumps 7", built)).toEqual({
+			kind: "run",
+			workflow: "tiny",
+			input: "go",
+			maxBackwardJumps: 6,
+			maxLaps: 8,
+			duplicateFlags: ["--max-jumps"],
+		});
+	});
+
+	it("a head --max-jumps masking a leading --name: the earlier-typed name wins (it is the one claimed on disk)", () => {
+		expect(parseArgs("--max-jumps 6 --name x mid go --name y", built)).toEqual({
+			kind: "run",
+			workflow: "mid",
+			input: "go",
+			name: "x",
+			maxBackwardJumps: 6,
+			duplicateFlags: ["--name"],
+		});
+	});
+
 	it("keeps absent caps keys absent when only --name is supplied (strict toEqual)", () => {
 		expect(parseArgs("--name auth mid go", built)).toEqual({
 			kind: "run",
@@ -411,6 +438,74 @@ describe("parseArgs — caps flag permutations", () => {
 			input: "go",
 			name: "auth",
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// parseArgs — exhaustive leading/trailing permutation property. Three review
+// rounds each found the next unpinned duplicate cell of the extractor; hand
+// pins close one cell at a time. This enumerates EVERY sequence of 1..4 flag
+// tokens over the three keys and every split of it into a leading run and a
+// trailing run around a fixed body, and checks each parse against a plain
+// reference model: the kept value is the first-typed occurrence, the input
+// is the body untouched, and `duplicateFlags` names exactly the repeated
+// keys in flag-table order. Leading and trailing tokens are all peelable
+// by the fixpoint (any relative order), so the model is exact over this
+// grammar — a mid-position token is outside it by design.
+// ---------------------------------------------------------------------------
+
+describe("parseArgs — every leading/trailing permutation keeps the first-typed value", () => {
+	const built = {
+		workflowNames: new Set(["tiny", "mid", "review"]),
+		default: "mid",
+	};
+	type Key = "name" | "maxBackwardJumps" | "maxLaps";
+	const TOKEN: Record<Key, string> = { name: "--name", maxBackwardJumps: "--max-jumps", maxLaps: "--max-laps" };
+	const KEYS: readonly Key[] = ["name", "maxBackwardJumps", "maxLaps"];
+	const BODY = "tiny fix the thing";
+
+	/** Every sequence of `n` keys (with repetition). */
+	const sequences = (n: number): Key[][] =>
+		n === 0 ? [[]] : sequences(n - 1).flatMap((prefix) => KEYS.map((k) => [...prefix, k]));
+
+	/** `--name n3` for names, `--max-jumps 3` for caps — the ordinal doubles as the typed value. */
+	const render = (key: Key, ordinal: number) => `${TOKEN[key]} ${key === "name" ? `n${ordinal}` : ordinal}`;
+
+	const cases: { line: string; expected: Record<string, unknown> }[] = [];
+	for (let n = 1; n <= 4; n++) {
+		for (const seq of sequences(n)) {
+			for (let split = 0; split <= n; split++) {
+				const tokens = seq.map((key, i) => ({ key, ordinal: i + 1, text: render(key, i + 1) }));
+				const leading = tokens.slice(0, split).map((t) => t.text);
+				const trailing = tokens.slice(split).map((t) => t.text);
+				const line = [...leading, BODY, ...trailing].join(" ");
+
+				const expected: Record<string, unknown> = { kind: "run", workflow: "tiny", input: "fix the thing" };
+				const seen = new Set<Key>();
+				const repeated = new Set<Key>();
+				for (const t of tokens) {
+					if (seen.has(t.key)) {
+						repeated.add(t.key);
+						continue;
+					}
+					seen.add(t.key);
+					expected[t.key] = t.key === "name" ? `n${t.ordinal}` : t.ordinal;
+				}
+				// Reported in flag-table order, whatever the typed order.
+				const duplicateFlags = KEYS.filter((k) => repeated.has(k)).map((k) => TOKEN[k]);
+				if (duplicateFlags.length > 0) expected.duplicateFlags = duplicateFlags;
+				cases.push({ line, expected });
+			}
+		}
+	}
+
+	it(`enumerates the grammar (${cases.length} cases)`, () => {
+		// 3 + 9 + 27 + 81 sequences × (n + 1) splits each.
+		expect(cases).toHaveLength(3 * 2 + 9 * 3 + 27 * 4 + 81 * 5);
+	});
+
+	it.each(cases)("$line", ({ line, expected }) => {
+		expect(parseArgs(line, built)).toEqual(expected);
 	});
 });
 

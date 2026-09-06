@@ -387,6 +387,26 @@ describe("handleWorkflowCommand — repeated flags", () => {
 		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2]).toMatchObject({ maxLaps: 4 });
 	});
 
+	it("the two warnings agree on the head-flag shape: a masked leading --max-jumps still wins over the trailing repeat", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		// `--max-laps 8` heads the line, so `--max-jumps 9` is masked in pass 1
+		// and the trailing `2` is extracted first. First-typed 9 ≥ ceiling 8:
+		// both toasts fire on the same value, and 9 is what the run receives.
+		await handleWorkflowCommand(HOST, "--max-laps 8 --max-jumps 9 ship do the thing --max-jumps 2", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-jumps"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_JUMP_CAP_ABOVE_LAP_CEILING(9, 8), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(2);
+		expect(vi.mocked(runWorkflow).mock.calls[0]?.[1]).toMatchObject({
+			input: "do the thing",
+			maxBackwardJumps: 9,
+			maxLaps: 8,
+		});
+	});
+
 	it("the two warnings agree on a trailing double: the toast's kept value is the one the ceiling check arbitrates", async () => {
 		const ctx = makeCtx();
 		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });

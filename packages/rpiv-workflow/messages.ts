@@ -444,8 +444,8 @@ export const MSG_NAME_FLAG_MID_INPUT =
 
 /**
  * A leading/trailing flag appeared more than once. The first-TYPED value
- * wins in every slot (the parser corrects for the trailing form peeling from
- * the end) and every other occurrence is stripped — never left in the
+ * wins in every slot (the parser ranks occurrences by their offset in the
+ * line, not by extraction order) and every other occurrence is stripped — never left in the
  * input, where a leading `--max-jumps 9 research …` residual would bind the
  * whole line as prompt text for the DEFAULT workflow.
  */
