@@ -462,7 +462,17 @@ describe("parseArgs — every leading/trailing permutation keeps the first-typed
 	type Key = "name" | "maxBackwardJumps" | "maxLaps";
 	const TOKEN: Record<Key, string> = { name: "--name", maxBackwardJumps: "--max-jumps", maxLaps: "--max-laps" };
 	const KEYS: readonly Key[] = ["name", "maxBackwardJumps", "maxLaps"];
-	const BODY = "tiny fix the thing";
+	const REF = "2026-06-03_07-30-00-ab12";
+
+	// Both arms: the run body resolves a workflow + input; the @ref body is
+	// the resume sigil, where a name is carried as `droppedName` (the command
+	// layer warns it is ignored) and the caps thread through unchanged. The
+	// same flag arrangements are enumerated around each body so the resume
+	// arm's masked-head cells are covered structurally, not by hand pins.
+	const BODIES = [
+		{ label: "run", text: "tiny fix the thing", base: { kind: "run", workflow: "tiny", input: "fix the thing" } },
+		{ label: "resume", text: `@${REF}`, base: { kind: "resume", ref: REF, droppedName: undefined } },
+	] as const;
 
 	/** Every sequence of `n` keys (with repetition). */
 	const sequences = (n: number): Key[][] =>
@@ -472,36 +482,40 @@ describe("parseArgs — every leading/trailing permutation keeps the first-typed
 	const render = (key: Key, ordinal: number) => `${TOKEN[key]} ${key === "name" ? `n${ordinal}` : ordinal}`;
 
 	const cases: { line: string; expected: Record<string, unknown> }[] = [];
-	for (let n = 1; n <= 4; n++) {
-		for (const seq of sequences(n)) {
-			for (let split = 0; split <= n; split++) {
-				const tokens = seq.map((key, i) => ({ key, ordinal: i + 1, text: render(key, i + 1) }));
-				const leading = tokens.slice(0, split).map((t) => t.text);
-				const trailing = tokens.slice(split).map((t) => t.text);
-				const line = [...leading, BODY, ...trailing].join(" ");
+	for (const body of BODIES) {
+		for (let n = 1; n <= 4; n++) {
+			for (const seq of sequences(n)) {
+				for (let split = 0; split <= n; split++) {
+					const tokens = seq.map((key, i) => ({ key, ordinal: i + 1, text: render(key, i + 1) }));
+					const leading = tokens.slice(0, split).map((t) => t.text);
+					const trailing = tokens.slice(split).map((t) => t.text);
+					const line = [...leading, body.text, ...trailing].join(" ");
 
-				const expected: Record<string, unknown> = { kind: "run", workflow: "tiny", input: "fix the thing" };
-				const seen = new Set<Key>();
-				const repeated = new Set<Key>();
-				for (const t of tokens) {
-					if (seen.has(t.key)) {
-						repeated.add(t.key);
-						continue;
+					const expected: Record<string, unknown> = { ...body.base };
+					const seen = new Set<Key>();
+					const repeated = new Set<Key>();
+					for (const t of tokens) {
+						if (seen.has(t.key)) {
+							repeated.add(t.key);
+							continue;
+						}
+						seen.add(t.key);
+						const value = t.key === "name" ? `n${t.ordinal}` : t.ordinal;
+						// The resume arm carries the name as `droppedName`, never `name`.
+						expected[t.key === "name" && body.label === "resume" ? "droppedName" : t.key] = value;
 					}
-					seen.add(t.key);
-					expected[t.key] = t.key === "name" ? `n${t.ordinal}` : t.ordinal;
+					// Reported in flag-table order, whatever the typed order.
+					const duplicateFlags = KEYS.filter((k) => repeated.has(k)).map((k) => TOKEN[k]);
+					if (duplicateFlags.length > 0) expected.duplicateFlags = duplicateFlags;
+					cases.push({ line, expected });
 				}
-				// Reported in flag-table order, whatever the typed order.
-				const duplicateFlags = KEYS.filter((k) => repeated.has(k)).map((k) => TOKEN[k]);
-				if (duplicateFlags.length > 0) expected.duplicateFlags = duplicateFlags;
-				cases.push({ line, expected });
 			}
 		}
 	}
 
 	it(`enumerates the grammar (${cases.length} cases)`, () => {
-		// 3 + 9 + 27 + 81 sequences × (n + 1) splits each.
-		expect(cases).toHaveLength(3 * 2 + 9 * 3 + 27 * 4 + 81 * 5);
+		// Per body: 3 + 9 + 27 + 81 sequences × (n + 1) splits each = 546; two bodies.
+		expect(cases).toHaveLength(2 * (3 * 2 + 9 * 3 + 27 * 4 + 81 * 5));
 	});
 
 	it.each(cases)("$line", ({ line, expected }) => {

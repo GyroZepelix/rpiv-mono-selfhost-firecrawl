@@ -387,6 +387,38 @@ describe("handleWorkflowCommand — repeated flags", () => {
 		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2]).toMatchObject({ maxLaps: 4 });
 	});
 
+	it("a masked-head doubled --name: the duplicate toast fires, no mid-input warning, and the FIRST-typed name reaches the run", async () => {
+		const ctx = makeCtx();
+		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		// `--max-jumps 6` heads the line, so `--name x` is masked in pass 1 and
+		// the trailing `--name y` is extracted first; `x` was typed first and is
+		// the name the run claims on disk.
+		await handleWorkflowCommand(HOST, "--max-jumps 6 --name x ship do the thing --name y", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--name"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(runWorkflow).mock.calls[0]?.[1]).toMatchObject({
+			input: "do the thing",
+			name: "x",
+			maxBackwardJumps: 6,
+		});
+	});
+
+	it("a masked-head doubled --max-jumps on the @resume arm resumes with the first-typed value", async () => {
+		const ctx = makeCtx();
+		vi.mocked(resumeWorkflowByRunId).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
+
+		await handleWorkflowCommand(HOST, "--max-laps 8 --max-jumps 6 @my-run --max-jumps 7", ctx);
+		await flush();
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(MSG_FLAG_REPEATED("--max-jumps"), "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[1]).toBe("my-run");
+		expect(vi.mocked(resumeWorkflowByRunId).mock.calls[0]?.[2]).toMatchObject({ maxBackwardJumps: 6, maxLaps: 8 });
+	});
+
 	it("the two warnings agree on the head-flag shape: a masked leading --max-jumps still wins over the trailing repeat", async () => {
 		const ctx = makeCtx();
 		vi.mocked(runWorkflow).mockResolvedValue({ stagesCompleted: 1, success: true, runId: "r1" });
