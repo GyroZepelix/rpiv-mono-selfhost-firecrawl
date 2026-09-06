@@ -96,19 +96,25 @@ export async function handleWorkflowCommand(host: WorkflowHost, args: string, ct
 		return;
 	}
 
+	// Name validity is checked on run AND preview (a preview with a malformed
+	// --name still refuses, as it always did) — never on resume, where the
+	// name is dropped with its own warning above.
+	if (parsed.name !== undefined && !isValidName(parsed.name)) {
+		ctx.ui.notify(MSG_NAME_INVALID(parsed.name), "error");
+		return;
+	}
+
+	if (parsed.kind === "preview") {
+		// The parser decided list-vs-details on the flag-stripped residual;
+		// re-testing the raw line here would miss `/wf --max-jumps 6 review`.
+		ctx.ui.notify(
+			parsed.workflow !== undefined ? formatWorkflowDetails(loaded, parsed.workflow) : formatWorkflowList(loaded),
+			"info",
+		);
+		return;
+	}
+
 	const { workflow: workflowName, input, name } = parsed;
-
-	if (name !== undefined && !isValidName(name)) {
-		ctx.ui.notify(MSG_NAME_INVALID(name), "error");
-		return;
-	}
-
-	if (!input) {
-		const trimmed = args.trim();
-		const previewing = trimmed.length > 0 && workflowNames.has(trimmed);
-		ctx.ui.notify(previewing ? formatWorkflowDetails(loaded, trimmed) : formatWorkflowList(loaded), "info");
-		return;
-	}
 
 	// Block execution on load errors — running a partially-loaded workflow set
 	// would silently mask the user's intent (e.g. their preferred workflow

@@ -161,6 +161,21 @@ type DuplicateFlags = { duplicateFlags?: readonly string[] };
 
 export type ParsedCommand =
 	| ({
+			/**
+			 * Nothing to run: the residual after flag extraction was empty (list
+			 * every workflow) or exactly one registered workflow name (`workflow`
+			 * — show its details). Decided HERE, on the flag-stripped residual,
+			 * so `/wf --max-jumps 6 review` previews `review` — the command layer
+			 * never re-reads the raw line.
+			 */
+			kind: "preview";
+			workflow?: string;
+			name?: string;
+			nameFlagIgnored?: boolean;
+			maxBackwardJumps?: number;
+			maxLaps?: number;
+	  } & DuplicateFlags)
+	| ({
 			kind: "run";
 			workflow: string;
 			input: string;
@@ -182,7 +197,9 @@ export type ParsedCommand =
  * First token is a workflow name iff recognised; otherwise the whole arg is
  * input bound to the resolved default. When no default is registered (the
  * empty-registry case), the returned `workflow` is `""` and the orchestrator
- * surfaces `MSG_NO_WORKFLOWS_REGISTERED`.
+ * surfaces `MSG_NO_WORKFLOWS_REGISTERED`. An empty residual, or a residual
+ * that is exactly a workflow name, is a `preview` (list / details) — a `run`
+ * always carries non-empty input.
  *
  * `--name <slug>` is honored ONLY in leading or trailing position (leading
  * wins when both are present). A `--name` that is neither — one that still
@@ -295,7 +312,7 @@ export function parseArgs(
 	}
 
 	if (!trimmed) {
-		return { kind: "run", workflow: loaded.default ?? "", input: "", ...named, ...ignored, ...caps };
+		return { kind: "preview", ...named, ...ignored, ...caps };
 	}
 
 	const firstSpace = trimmed.indexOf(" ");
@@ -303,6 +320,9 @@ export function parseArgs(
 
 	if (loaded.workflowNames.has(firstToken)) {
 		const remaining = firstSpace === -1 ? "" : trimmed.slice(firstSpace + 1).trim();
+		if (!remaining) {
+			return { kind: "preview", workflow: firstToken, ...named, ...ignored, ...caps };
+		}
 		return { kind: "run", workflow: firstToken, input: remaining, ...named, ...ignored, ...caps };
 	}
 

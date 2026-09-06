@@ -120,16 +120,42 @@ describe("parseArgs", () => {
 		expect(parseArgs("Add dark mode", built)).toEqual({ kind: "run", workflow: "mid", input: "Add dark mode" });
 	});
 
-	it("parses a workflow-name-only token with no input", () => {
-		expect(parseArgs("review", built)).toEqual({ kind: "run", workflow: "review", input: "" });
+	it("a workflow-name-only token is a preview of that workflow (nothing to run)", () => {
+		expect(parseArgs("review", built)).toStrictEqual({ kind: "preview", workflow: "review" });
 	});
 
-	it("handles empty string", () => {
-		expect(parseArgs("", built)).toEqual({ kind: "run", workflow: "mid", input: "" });
+	it("handles empty string — a preview with no workflow (the listing)", () => {
+		expect(parseArgs("", built)).toStrictEqual({ kind: "preview" });
 	});
 
-	it("handles whitespace-only string", () => {
-		expect(parseArgs("   ", built)).toEqual({ kind: "run", workflow: "mid", input: "" });
+	it("handles whitespace-only string — the listing", () => {
+		expect(parseArgs("   ", built)).toStrictEqual({ kind: "preview" });
+	});
+
+	// The preview decision is made on the flag-stripped residual. The old
+	// handler re-tested the RAW line against the workflow names, so any flag
+	// beside a bare workflow token fell through to the generic listing.
+	it("a bare workflow token beside caps flags previews that workflow, flags carried", () => {
+		expect(parseArgs("--max-jumps 6 --max-jumps 9 tiny", built)).toStrictEqual({
+			kind: "preview",
+			workflow: "tiny",
+			maxBackwardJumps: 6,
+			duplicateFlags: ["--max-jumps"],
+		});
+		expect(parseArgs("tiny --max-laps 8", built)).toStrictEqual({ kind: "preview", workflow: "tiny", maxLaps: 8 });
+	});
+
+	it("flags alone are the listing, flags carried", () => {
+		expect(parseArgs("--max-jumps 6", built)).toStrictEqual({ kind: "preview", maxBackwardJumps: 6 });
+		expect(parseArgs("--name x", built)).toStrictEqual({ kind: "preview", name: "x" });
+	});
+
+	it("a bare DEFAULT workflow token previews it too (explicit token, not the default fallback)", () => {
+		expect(parseArgs("--max-jumps 6 mid", built)).toStrictEqual({
+			kind: "preview",
+			workflow: "mid",
+			maxBackwardJumps: 6,
+		});
 	});
 
 	it("uses custom default when no workflow name is recognized", () => {
@@ -175,11 +201,10 @@ describe("parseArgs", () => {
 		});
 	});
 
-	it("extracts --name on a workflow-name-only invocation", () => {
-		expect(parseArgs("review --name r1", built)).toEqual({
-			kind: "run",
+	it("extracts --name on a workflow-name-only invocation (a preview of that workflow)", () => {
+		expect(parseArgs("review --name r1", built)).toStrictEqual({
+			kind: "preview",
 			workflow: "review",
-			input: "",
 			name: "r1",
 		});
 	});
@@ -677,6 +702,44 @@ describe("/wf — valid invocation", () => {
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Available workflows"), "info");
 		expect(runWorkflow).not.toHaveBeenCalled();
 	});
+
+	it("a bare workflow token beside a flag shows THAT workflow's details, not the generic list", async () => {
+		const { pi, captured } = createMockPi();
+		registerWorkflowCommand(pi);
+		const ctx = createMockCommandCtx({ hasUI: true });
+		await captured.commands.get("wf")?.handler("--max-jumps 6 review", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("workflow: review"), "info");
+		expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Available workflows"), "info");
+		expect(runWorkflow).not.toHaveBeenCalled();
+	});
+
+	it("a bare workflow token with a trailing --name shows its details (the name is a run-time concern)", async () => {
+		const { pi, captured } = createMockPi();
+		registerWorkflowCommand(pi);
+		const ctx = createMockCommandCtx({ hasUI: true });
+		await captured.commands.get("wf")?.handler("review --name r1", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("workflow: review"), "info");
+		expect(runWorkflow).not.toHaveBeenCalled();
+	});
+
+	it("flags alone show the full list", async () => {
+		const { pi, captured } = createMockPi();
+		registerWorkflowCommand(pi);
+		const ctx = createMockCommandCtx({ hasUI: true });
+		await captured.commands.get("wf")?.handler("--max-jumps 6", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Available workflows"), "info");
+		expect(runWorkflow).not.toHaveBeenCalled();
+	});
+
+	it("an invalid --name still refuses on a preview (unchanged from the run path)", async () => {
+		const { pi, captured } = createMockPi();
+		registerWorkflowCommand(pi);
+		const ctx = createMockCommandCtx({ hasUI: true });
+		await captured.commands.get("wf")?.handler("review --name 1bad", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("invalid name"), "error");
+		expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("workflow: review"), "info");
+		expect(runWorkflow).not.toHaveBeenCalled();
+	});
 });
 
 describe("/wf — --name flag", () => {
@@ -962,7 +1025,7 @@ describe("parseArgs — empty registry", () => {
 	it('returns workflow="" when no default is set and the first token doesn\'t match a workflow', () => {
 		const empty = { workflowNames: new Set<string>(), default: undefined };
 		expect(parseArgs("Add feature", empty)).toEqual({ kind: "run", workflow: "", input: "Add feature" });
-		expect(parseArgs("", empty)).toEqual({ kind: "run", workflow: "", input: "" });
+		expect(parseArgs("", empty)).toStrictEqual({ kind: "preview" });
 	});
 });
 
