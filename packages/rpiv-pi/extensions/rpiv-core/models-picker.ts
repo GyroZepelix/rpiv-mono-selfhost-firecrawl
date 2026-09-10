@@ -1,16 +1,17 @@
 /**
  * models-picker — filterable select panel for /rpiv-models cascade pickers.
  *
- * Clone of the advisor's showFilterablePicker (advisor-ui.ts:65-115) at
- * Phase-1 zero-cross-imports contract enforcement. Promotion to a shared TUI
- * package (e.g. packages/rpiv-tui/) is queued as a follow-up.
+ * Local clone of the advisor's showFilterablePicker (advisor-ui.ts) — the
+ * zero-cross-imports contract forbids an rpiv-core → rpiv-advisor import.
+ * Promotion to a shared TUI package (e.g. packages/rpiv-tui/) is a candidate
+ * follow-up.
  */
 
 import { DynamicBorder, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
 
 const MAX_VISIBLE_ROWS = 10;
-const NAV_HINT = "type to filter • ↑↓ navigate • enter select • esc cancel";
+const navHint = (escAction: string) => `type to filter • ↑↓ navigate • enter select • esc ${escAction}`;
 
 interface FilterablePickerOptions {
 	title: string;
@@ -18,6 +19,12 @@ interface FilterablePickerOptions {
 	items: SelectItem[];
 	/** Value to preselect while query is empty (e.g. current setting). */
 	preferredValue?: string;
+	/**
+	 * Word describing what ESC does, shown in the nav hint. Defaults to "cancel"
+	 * (top-level picker closes); inner cascade levels pass "back" since ESC there
+	 * steps one level up rather than closing the whole flow.
+	 */
+	escHint?: string;
 }
 
 function selectListTheme(theme: Theme) {
@@ -30,7 +37,14 @@ function selectListTheme(theme: Theme) {
 	};
 }
 
-function buildPanel(theme: Theme, title: string, prose: string[], query: string, list: SelectList): Container {
+function buildPanel(
+	theme: Theme,
+	title: string,
+	prose: string[],
+	query: string,
+	list: SelectList,
+	escHint: string,
+): Container {
 	const c = new Container();
 	const border = () => new DynamicBorder((s: string) => theme.fg("accent", s));
 	c.addChild(border());
@@ -46,7 +60,7 @@ function buildPanel(theme: Theme, title: string, prose: string[], query: string,
 	c.addChild(new Spacer(1));
 	c.addChild(list);
 	c.addChild(new Spacer(1));
-	c.addChild(new Text(theme.fg("dim", NAV_HINT), 1, 0));
+	c.addChild(new Text(theme.fg("dim", navHint(escHint)), 1, 0));
 	c.addChild(new Spacer(1));
 	c.addChild(border());
 	return c;
@@ -82,7 +96,7 @@ export function showFilterablePicker(ctx: ExtensionContext, opts: FilterablePick
 				const idx = filtered.findIndex((it) => it.value === opts.preferredValue);
 				if (idx >= 0) list.setSelectedIndex(idx);
 			}
-			panel = buildPanel(theme, opts.title, opts.proseLines, query, list);
+			panel = buildPanel(theme, opts.title, opts.proseLines, query, list, opts.escHint ?? "cancel");
 		};
 		rebuild();
 

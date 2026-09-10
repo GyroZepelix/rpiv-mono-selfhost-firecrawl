@@ -15,34 +15,35 @@
  * Standard Schema's `issues` only carries `message` + `path`.
  */
 
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import type { Static, TSchema } from "typebox";
-import { Value } from "typebox/value";
-import type { StageSchema } from "./api.js";
+import type { JsonSchemaCapable, JsonSchemaObject } from "./json-schema.js";
+import { jsonSchemaConverter, validateToJsonSchemaIssues } from "./json-schema.js";
 
 /**
- * Wrap a TypeBox schema to satisfy `StageSchema` (Standard Schema v1). The
- * returned object is structurally a Standard Schema; downstream code
- * (`validateOutputData`) consults `~standard.validate` and never sees
- * the underlying TypeBox value.
+ * Wrap a TypeBox schema to return a `JsonSchemaCapable` — a Standard Schema v1
+ * that ALSO exposes its JSON Schema as data via the spec `jsonSchema` Converter.
+ * Downstream code (`validateOutputData`) still consults `~standard.validate`;
+ * the new Converter lets the edge-compat checker extract the schema as
+ * data without needing to know the schema library.
  *
  * Generic over the input schema `S` so the parsed type (`Static<S>`) flows
- * through `StageSchema<unknown, Static<S>>` and into the surrounding
+ * through `JsonSchemaCapable<unknown, Static<S>>` and into the surrounding
  * `StageDef<TIn, TOut>` — predicate bodies + downstream stage consumers can
  * read `output.data` with the parsed type instead of `unknown`.
  */
-export function typeboxSchema<S extends TSchema>(schema: S): StageSchema<unknown, Static<S>> {
+export function typeboxSchema<S extends TSchema>(schema: S): JsonSchemaCapable<unknown, Static<S>> {
 	return {
 		"~standard": {
 			version: 1,
 			vendor: "typebox",
-			validate: (value: unknown) => {
-				if (Value.Check(schema, value)) return { value };
-				const issues = [...Value.Errors(schema, value)].map((err) => ({
-					message: err.message || `${err.keyword} validation failed at ${err.instancePath || "root"}`,
-					path: err.instancePath ? err.instancePath.split("/").filter(Boolean) : undefined,
-				}));
-				return { issues };
-			},
+			validate: ((value: unknown) => validateToJsonSchemaIssues(schema, value)) as StandardSchemaV1<
+				unknown,
+				Static<S>
+			>["~standard"]["validate"],
+			// A TypeBox v1 schema is structurally a clean JSON Schema (zero symbol
+			// keys, runtime-verified), so it doubles as the captured `jsonSchema` data.
+			jsonSchema: jsonSchemaConverter(schema as unknown as JsonSchemaObject),
 		},
 	};
 }

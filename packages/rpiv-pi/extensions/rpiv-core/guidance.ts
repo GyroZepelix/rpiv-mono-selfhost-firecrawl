@@ -15,8 +15,8 @@
  * `resolveGuidance` is pure logic with no ExtensionAPI references
  * (utility-module rule from extensions/rpiv-core/CLAUDE.md). Side
  * effects (sendMessage, in-memory dedup Set) live in
- * `handleToolCallGuidance`, `injectRootGuidance`, and
- * `clearInjectionState`.
+ * `handleToolCallGuidance` (sendMessage only), `resolveAndFormatNewGuidance`
+ * and `injectRootGuidance` (dedup-Set owners), and `clearInjectionState`.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -125,34 +125,45 @@ export function clearInjectionState() {
 // ---------------------------------------------------------------------------
 
 /**
- * Inject the root `.rpiv/guidance/architecture.md` at session start.
+ * Take the root `.rpiv/guidance/architecture.md` payload without sending it.
  *
- * Called from `session_start` so the root guidance is available before the
- * first agent turn — without waiting for a read/edit/write tool_call.
- * Uses the same `injectedGuidance` Set for dedup, so `handleToolCallGuidance`
- * won't re-inject it later.
+ * The split between take and send lets `before_agent_start` merge deferred
+ * post-compaction context into ONE message. Calling `pi.sendMessage` from
+ * `session_compact` queues a steering turn while overflow recovery is active;
+ * one-at-a-time delivery can otherwise make the model answer injected context
+ * instead of resuming the interrupted user task. `force` bypasses the
+ * process-global dedup marker for a specifically compacted SessionManager, so
+ * another concurrent session cannot suppress that session's restoration.
  */
-export function injectRootGuidance(cwd: string, pi: ExtensionAPI): void {
+export function takeRootGuidance(cwd: string, trigger = "auto-loaded at session start", force = false): string | null {
 	const relativePath = ROOT_GUIDANCE_KEY;
 
-	if (injectedGuidance.has(relativePath)) return;
+	if (!force && injectedGuidance.has(relativePath)) return null;
 
 	const absolutePath = join(cwd, relativePath);
-	if (!existsSync(absolutePath)) return;
+	if (!existsSync(absolutePath)) return null;
 
 	let content: string;
 	try {
 		content = readFileSync(absolutePath, "utf-8");
 	} catch {
-		// Silent failure mirrors handleToolCallGuidance's posture — session_start
-		// runs before any UI is bound, so a permissions/race error here must not
-		// crash the hook. Don't mark as injected so a later tool_call can retry.
-		return;
+		// Silent failure mirrors handleToolCallGuidance's posture. Don't mark as
+		// injected so a later tool_call can retry.
+		return null;
 	}
 	injectedGuidance.add(relativePath);
 
 	const file: GuidanceFile = { relativePath, absolutePath, content, kind: "architecture" };
-	sendGuidanceMessage(pi, wrapGuidance(formatLabel(file), content, "auto-loaded at session start"));
+	return wrapGuidance(formatLabel(file), content, trigger);
+}
+
+/**
+ * Inject root guidance at session start, before the first agent turn.
+ * Uses the same `injectedGuidance` Set as tool-call injection.
+ */
+export function injectRootGuidance(cwd: string, pi: ExtensionAPI): void {
+	const content = takeRootGuidance(cwd);
+	if (content !== null) sendGuidanceMessage(pi, content);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,8 +171,37 @@ export function injectRootGuidance(cwd: string, pi: ExtensionAPI): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Handle guidance injection on tool_call events for read/edit/write.
- * Sends hidden messages via pi.sendMessage as a side effect.
+ * Resolve, dedup, mark, and format guidance for a touched file — the "build"
+ * half of tool-call injection (no `ExtensionAPI`, no `sendMessage`). Owns the
+ * `injectedGuidance` Set read+mark so the dedup filter and the mark step stay
+ * in one function: marking before returning content lets the caller send with
+ * idempotence > reliability.
+ *
+ * Returns the `"\n\n---\n\n"`-joined formatted blocks, or `null` when nothing
+ * resolves along the ladder OR every resolved file is already injected (marks
+ * nothing in the null cases).
+ */
+export function resolveAndFormatNewGuidance(filePath: string, cwd: string, toolName: string): string | null {
+	const resolved = resolveGuidance(filePath, cwd);
+	const newFiles = resolved.filter((g) => !injectedGuidance.has(g.relativePath));
+	if (newFiles.length === 0) return null;
+
+	// Mark before send — idempotence > reliability.
+	for (const g of newFiles) {
+		injectedGuidance.add(g.relativePath);
+	}
+
+	const trigger = `auto-loaded because ${toolName} touched ${shortenPath(filePath, cwd)}`;
+	const contextParts = newFiles.map((g) => wrapGuidance(formatLabel(g), g.content, trigger));
+
+	return contextParts.join("\n\n---\n\n");
+}
+
+/**
+ * Handle guidance injection on tool_call events for read/edit/write — a thin
+ * wiring pipeline: filter → extract → delegate → send. Resolve/dedup/mark/format
+ * live in `resolveAndFormatNewGuidance`; this handler adds no direct
+ * `injectedGuidance` reference.
  */
 export function handleToolCallGuidance(
 	event: { toolName: string; input: Record<string, unknown> },
@@ -173,21 +213,8 @@ export function handleToolCallGuidance(
 	const filePath = (event.input as any).file_path ?? (event.input as any).path;
 	if (!filePath) return;
 
-	const resolved = resolveGuidance(filePath, ctx.cwd);
-	if (resolved.length === 0) return;
-
-	const newFiles = resolved.filter((g) => !injectedGuidance.has(g.relativePath));
-	if (newFiles.length === 0) return;
-
-	// Mark before sendMessage — idempotence > reliability.
-	for (const g of newFiles) {
-		injectedGuidance.add(g.relativePath);
-	}
-
-	const trigger = `auto-loaded because ${event.toolName} touched ${shortenPath(filePath, ctx.cwd)}`;
-	const contextParts = newFiles.map((g) => wrapGuidance(formatLabel(g), g.content, trigger));
-
-	sendGuidanceMessage(pi, contextParts.join("\n\n---\n\n"));
+	const content = resolveAndFormatNewGuidance(filePath, ctx.cwd, event.toolName);
+	if (content !== null) sendGuidanceMessage(pi, content);
 }
 
 /**

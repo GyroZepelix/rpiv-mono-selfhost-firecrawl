@@ -74,9 +74,25 @@ describe("toErrorMessage", () => {
 });
 
 describe("isModuleNotFound", () => {
-	it("is true for an ERR_MODULE_NOT_FOUND error", () => {
+	it("is true for an ERR_MODULE_NOT_FOUND error (Node native ESM resolver)", () => {
 		const err = Object.assign(new Error("Cannot find package"), { code: "ERR_MODULE_NOT_FOUND" });
 		expect(isModuleNotFound(err)).toBe(true);
+	});
+
+	it("is true for a MODULE_NOT_FOUND error (jiti resolver — what Pi actually uses)", () => {
+		// jiti 2.7.0 rejects a missing `import("@juicesharp/rpiv-…")` with this
+		// CJS-style code; the absent-sibling guards must treat it as a no-op.
+		const err = Object.assign(new Error("Cannot find module '@juicesharp/rpiv-workflow/startup'"), {
+			code: "MODULE_NOT_FOUND",
+		});
+		expect(isModuleNotFound(err)).toBe(true);
+	});
+
+	it("is true when the resolution code is nested under cause", () => {
+		const wrapped = Object.assign(new Error("wrapped"), {
+			cause: Object.assign(new Error("Cannot find module"), { code: "MODULE_NOT_FOUND" }),
+		});
+		expect(isModuleNotFound(wrapped)).toBe(true);
 	});
 
 	it("is false for other error codes and codeless errors", () => {
@@ -92,12 +108,10 @@ describe("isModuleNotFound", () => {
 });
 
 describe("isStaleCtxError", () => {
-	// The exact phrase pi-core's ExtensionRunner throws from an invalidated proxy.
-	// If pi-core changes this wording, THIS TEST MUST FAIL so the regex in
-	// utils.ts gets updated in lockstep (L2-02 phrase-pinning guard).
-	const STALE_CTX_MESSAGE =
-		"This extension ctx is stale after session replacement or reload. " +
-		"Do not use a captured pi or command ctx after ctx.newSession().";
+	// Pins the substring the `isStaleCtxError` regex matches inside pi-core's
+	// invalidated-proxy error. If pi-core changes this wording, THIS TEST MUST
+	// FAIL so the regex in utils.ts gets updated in lockstep.
+	const STALE_CTX_MESSAGE = "This extension ctx is stale after session replacement or reload.";
 
 	it("matches the exact pi-core stale-ctx error message", () => {
 		expect(isStaleCtxError(new Error(STALE_CTX_MESSAGE))).toBe(true);

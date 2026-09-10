@@ -1,4 +1,4 @@
-import { CURSOR_MARKER } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, getKeybindings } from "@earendil-works/pi-tui";
 import { createMockPi } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAskUserQuestionTool } from "./ask-user-question.js";
@@ -36,13 +36,13 @@ function driveCustom(script: (c: RenderableComponent, done: (v: unknown) => void
 			const f = factory as (
 				tui: { requestRender: () => void; terminal: { columns: number; rows: number } },
 				theme: typeof identityTheme,
-				kb: undefined,
+				kb: ReturnType<typeof getKeybindings>,
 				done: (v: unknown) => void,
 			) => RenderableComponent;
 			const component = f(
 				{ requestRender, terminal: { columns: 120, rows: 24 } },
 				identityTheme,
-				undefined,
+				getKeybindings(),
 				resolve,
 			);
 			script(component, resolve);
@@ -224,14 +224,12 @@ describe("ask_user_question — single-question navigation", () => {
 		expect(r?.details.answers[0].answer).toBe("Beta");
 	});
 
-	it("UP from Alpha cycles through chat → Type-something → Gamma", async () => {
+	it("UP from Alpha wraps to Type-something, then UP to Gamma", async () => {
 		const tool = register();
 		const { custom } = driveCustom((c) => {
-			// Items = [Alpha, Beta, Gamma, "Type something."] — chat is the virtual extra row
-			// at the top of the cycle. UP at index 0 wraps INTO chat; UP from chat lands on
-			// items.length-1 (Type something); UP from there decrements to Gamma.
-			c.handleInput(KEY.UP); // Alpha (0) → focus_chat
-			c.handleInput(KEY.UP); // chat → focus_options at index 3 (Type something, inputMode)
+			// Items = [Alpha, Beta, Gamma, "Type something."] (no chat row). UP at index 0
+			// wraps to the last item (Type something, inputMode); UP from there → Gamma.
+			c.handleInput(KEY.UP); // Alpha (0) → wrap to Type something (3, inputMode)
 			c.handleInput(KEY.UP); // Type something (3) → Gamma (2)
 			c.handleInput(KEY.ENTER); // confirm Gamma
 		});
@@ -315,63 +313,7 @@ describe("ask_user_question — 'Type something.' free-text flow", () => {
 	});
 });
 
-describe("ask_user_question — chat focus integration", () => {
-	it("DOWN past last option focuses chat row; ENTER returns kind:'chat'", async () => {
-		const tool = register();
-		const { custom } = driveCustom((c) => {
-			// items = [Alpha, Beta, Gamma, "Type something."] (4 items)
-			c.handleInput(KEY.DOWN); // → Beta
-			c.handleInput(KEY.DOWN); // → Gamma
-			c.handleInput(KEY.DOWN); // → Type something (inputMode=true)
-			c.handleInput(KEY.DOWN); // → focus_chat
-			c.handleInput(KEY.ENTER); // confirm chat
-		});
-		const ctx = { hasUI: true, ui: { custom } } as never;
-		const r = (await tool.execute?.("tc", threeOptionParams as never, undefined as never, undefined as never, ctx)) as
-			| ToolResult
-			| undefined;
-		expect(r?.details.cancelled).toBe(false);
-		expect(r?.details.answers[0]?.kind).toBe("chat");
-		expect(r?.details.answers[0]?.answer).toBe("Chat about this");
-		expect(r?.content[0].text).toContain("Continue the conversation");
-	});
-
-	it("UP-from-chat clears chatFocused; subsequent ENTER returns options answer (not kind:'chat')", async () => {
-		const tool = register();
-		const { custom } = driveCustom((c) => {
-			c.handleInput(KEY.DOWN); // → Beta
-			c.handleInput(KEY.DOWN); // → Gamma
-			c.handleInput(KEY.DOWN); // → Type something (inputMode=true)
-			c.handleInput(KEY.DOWN); // → focus_chat
-			c.handleInput(KEY.UP); // → focus_options (back to Type something)
-			c.handleInput(KEY.ENTER); // confirm via inputMode branch with empty buffer
-		});
-		const ctx = { hasUI: true, ui: { custom } } as never;
-		const r = (await tool.execute?.("tc", threeOptionParams as never, undefined as never, undefined as never, ctx)) as
-			| ToolResult
-			| undefined;
-		expect(r?.details.cancelled).toBe(false);
-		expect(r?.details.answers[0]?.kind).not.toBe("chat");
-		expect(r?.details.answers[0]?.kind).toBe("custom");
-		expect(r?.details.answers[0]?.answer).toBeNull();
-	});
-
-	it("Esc from chat cancels the whole dialog", async () => {
-		const tool = register();
-		const { custom } = driveCustom((c) => {
-			c.handleInput(KEY.DOWN); // → Beta
-			c.handleInput(KEY.DOWN); // → Gamma
-			c.handleInput(KEY.DOWN); // → Type something
-			c.handleInput(KEY.DOWN); // → focus_chat
-			c.handleInput(KEY.ESC); // cancel
-		});
-		const ctx = { hasUI: true, ui: { custom } } as never;
-		const r = (await tool.execute?.("tc", threeOptionParams as never, undefined as never, undefined as never, ctx)) as
-			| ToolResult
-			| undefined;
-		expect(r?.details.cancelled).toBe(true);
-	});
-
+describe("ask_user_question — tab-switch height stability", () => {
 	it("dialog total line count is identical across tab switches (mixed single+multi fixture)", async () => {
 		const tool = register();
 		let lengthTab0 = 0;
@@ -407,6 +349,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 			c.handleInput(KEY.DOWN); // → Backend
 			c.handleInput(KEY.SPACE); // toggle Backend ON
 			c.handleInput(KEY.DOWN); // → DevOps (not toggled)
+			c.handleInput(KEY.DOWN); // → "Type something." row
 			c.handleInput(KEY.DOWN); // → Next sentinel
 			c.handleInput(KEY.ENTER); // commit + advance (single question → submit)
 		});
@@ -429,6 +372,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 			c.handleInput(KEY.ENTER); // toggle Backend ON via Enter
 			c.handleInput(KEY.ENTER); // toggle Backend OFF via Enter
 			c.handleInput(KEY.DOWN); // → DevOps
+			c.handleInput(KEY.DOWN); // → "Type something." row
 			c.handleInput(KEY.DOWN); // → Next
 			c.handleInput(KEY.ENTER); // commit
 		});
@@ -448,6 +392,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 			c.handleInput(KEY.DOWN); // → Backend
 			c.handleInput(KEY.SPACE); // Backend ON
 			c.handleInput(KEY.DOWN); // → DevOps
+			c.handleInput(KEY.DOWN); // → "Type something." row
 			c.handleInput(KEY.DOWN); // → Next
 			c.handleInput(KEY.ENTER);
 		});
@@ -463,6 +408,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.DOWN); // → Backend
 			c.handleInput(KEY.DOWN); // → DevOps
+			c.handleInput(KEY.DOWN); // → "Type something." row
 			c.handleInput(KEY.DOWN); // → Next
 			c.handleInput(KEY.ENTER); // commit with no toggles
 		});
@@ -521,6 +467,7 @@ describe("ask_user_question — multi-select toggle persistence (regression)", (
 			c.handleInput(KEY.DOWN); // optionIndex 1 = BE
 			c.handleInput(KEY.SPACE); // toggle BE ON (should NOT erase FE)
 			c.handleInput(KEY.DOWN); // → DB
+			c.handleInput(KEY.DOWN); // → "Type something." row
 			c.handleInput(KEY.DOWN); // → Next
 			c.handleInput(KEY.ENTER); // commit (auto-advance to Q2)
 			c.handleInput(KEY.ENTER); // Q2: A → Submit
@@ -613,6 +560,32 @@ describe("ask_user_question — multi-question tab cycling flow", () => {
 		expect(r?.details.cancelled).toBe(false);
 		expect(r?.details.answers).toHaveLength(1);
 		expect(r?.details.answers[0].question).toBe("Q1?");
+	});
+
+	// Global note on the Submit tab: TAB to Submit, `n` opens the shared editor, the
+	// committed note rides the result as details.globalNote and the envelope gains a
+	// `global note:` segment — a note alone turns a zero-answer submit into an answered
+	// result rather than the decline.
+	it("TAB → Submit, n + note + Enter commits, Enter submits → details.globalNote set + 'global note:' in envelope", async () => {
+		const tool = register();
+		const { custom } = driveCustom((c) => {
+			c.handleInput(KEY.TAB); // Q1 → Q2
+			c.handleInput(KEY.TAB); // Q2 → Submit
+			c.handleInput("n"); // Submit tab: open the global-note editor
+			c.handleInput("s");
+			c.handleInput("h");
+			c.handleInput("i");
+			c.handleInput("p"); // type "ship"
+			c.handleInput(KEY.ENTER); // commit the note (notes_exit → notesByTab[questions.length])
+			c.handleInput(KEY.ENTER); // Submit row (default index 0) → submit
+		});
+		const ctx = { hasUI: true, ui: { custom } } as never;
+		const r = (await tool.execute?.("tc", twoParams as never, undefined as never, undefined as never, ctx)) as
+			| ToolResult
+			| undefined;
+		expect(r?.details.cancelled).toBe(false);
+		expect(r?.details.globalNote).toBe("ship");
+		expect(r?.content[0].text).toContain("global note:");
 	});
 
 	it("answer all → Submit tab → DOWN → Enter on Cancel returns cancelled=true with all answers preserved", async () => {
@@ -745,7 +718,7 @@ describe("ask_user_question — MAX_QUESTIONS (15 questions) complete flow", () 
 		expect(r?.details.answers).toHaveLength(MAX_QUESTIONS);
 		const labels = r?.details.answers.map((a: QuestionAnswer) => a.answer);
 		expect(labels).toEqual(Array.from({ length: MAX_QUESTIONS }, (_, i) => `A${i + 1}`));
-		// Phase 3 envelope: single CC-style sentence chain.
+		// Envelope: single CC-style sentence chain.
 		expect(r?.content[0].text).toContain('"Q1?"="A1".');
 		expect(r?.content[0].text).toContain(`"Q${MAX_QUESTIONS}?"="A${MAX_QUESTIONS}".`);
 		expect(r?.content[0].text).toMatch(/^User has answered your questions:/);
@@ -779,7 +752,8 @@ describe("ask_user_question — mixed single+multi question flow", () => {
 			c.handleInput(KEY.SPACE); // toggle DB ON
 			c.handleInput(KEY.DOWN); // → QA (3)
 			c.handleInput(KEY.DOWN); // → Ops (4)
-			c.handleInput(KEY.DOWN); // → Next sentinel (5)
+			c.handleInput(KEY.DOWN); // → "Type something." row (5)
+			c.handleInput(KEY.DOWN); // → Next sentinel (6)
 			c.handleInput(KEY.ENTER); // commit multi-select → Submit tab
 			c.handleInput(KEY.ENTER); // Submit (all answered)
 		});
@@ -813,7 +787,7 @@ describe("ask_user_question — notes pre-answer (Slice 5 notes UX)", () => {
 		const { custom } = driveCustom((c) => {
 			// Items: [Centered (preview), Left, "Type something."]
 			// On startup we're focused on Centered (option 0), which has preview.
-			// Slice 5 gate: focusedOptionHasPreview === true → 'n' triggers notes_enter.
+			// Universal `n` gate: 'n' triggers notes_enter on the preview-bearing focused option.
 			c.handleInput("n"); // enter notes mode
 			c.handleInput("h");
 			c.handleInput("e");
@@ -836,12 +810,19 @@ describe("ask_user_question — notes pre-answer (Slice 5 notes UX)", () => {
 		expect(r?.details.answers[0].notes).toBe("hello");
 	});
 
-	it("'n' keypress is ignored when focused option has no preview (notes scoped to preview-bearing options)", async () => {
+	it("'n' opens the notes editor on a no-preview option and lands the note on the answer (universal `n` gate)", async () => {
 		const tool = register();
 		const { custom } = driveCustom((c) => {
+			// Items: [Centered (preview), Left, "Type something."]
 			c.handleInput(KEY.DOWN); // → option Left (no preview)
-			c.handleInput("n"); // ignored — focusedOptionHasPreview === false
-			c.handleInput(KEY.ENTER); // confirms Left
+			c.handleInput("n"); // universal gate: 'n' triggers notes_enter regardless of preview
+			c.handleInput("h");
+			c.handleInput("e");
+			c.handleInput("l");
+			c.handleInput("l");
+			c.handleInput("o");
+			c.handleInput(KEY.ESC); // exit notes (commits to notesByTab)
+			c.handleInput(KEY.ENTER); // confirm Left → notesByTab merges into answer
 		});
 		const ctx = { hasUI: true, ui: { custom } } as never;
 		const r = (await tool.execute?.(
@@ -853,7 +834,7 @@ describe("ask_user_question — notes pre-answer (Slice 5 notes UX)", () => {
 		)) as ToolResult | undefined;
 		expect(r?.details.cancelled).toBe(false);
 		expect(r?.details.answers[0].answer).toBe("Left");
-		expect(r?.details.answers[0].notes).toBeUndefined();
+		expect(r?.details.answers[0].notes).toBe("hello");
 	});
 });
 
@@ -894,7 +875,7 @@ describe("ask_user_question — bracketed paste + Kitty CSI-u (dictation parity)
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.DOWN);
 			c.handleInput(KEY.DOWN); // inputMode
-			// Stdin chunks the paste — pi-tui's Input.pasteBuffer accumulator handles split chunks.
+			// Stdin chunks the paste — pi-tui's Editor paste accumulator handles split chunks.
 			c.handleInput("\x1b[200~Hel");
 			c.handleInput("lo\x1b[201~");
 			c.handleInput(KEY.ENTER);
@@ -906,9 +887,9 @@ describe("ask_user_question — bracketed paste + Kitty CSI-u (dictation parity)
 		expect(r?.details.answers[0].answer).toBe("Hello");
 	});
 
-	it("bracketed paste strips embedded \\n/\\r and converts \\t to 4 spaces (single-line invariant)", async () => {
-		// Wispr Flow auto-chunks long dictations into multiple bracketed pastes BUT a single
-		// paste may contain literal newlines. handlePaste at input.js:356 cleans them.
+	it("bracketed paste preserves line breaks and expands tabs", async () => {
+		// Multiline paste follows Pi Editor semantics: LF and CR become line breaks,
+		// while tabs expand to spaces.
 		const tool = register();
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.DOWN);
@@ -920,13 +901,12 @@ describe("ask_user_question — bracketed paste + Kitty CSI-u (dictation parity)
 		const r = (await tool.execute?.("tc", freeTextParams as never, undefined as never, undefined as never, ctx)) as
 			| ToolResult
 			| undefined;
-		// \n and \r stripped entirely; \t → 4 spaces.
-		expect(r?.details.answers[0].answer).toBe("Helloworld    withmix");
+		expect(r?.details.answers[0].answer).toBe("Hello\nworld    with\nmix");
 	});
 
 	it("Kitty CSI-u printables (\\x1b[97u …) are decoded and committed", async () => {
 		// On Warp/Ghostty/kitty/WezTerm/modern Alacritty with Kitty flags 1+2+4,
-		// every printable arrives as a CSI-u sequence. Input.handleInput decodes
+		// every printable arrives as a CSI-u sequence. Editor.handleInput decodes
 		// these via decodeKittyPrintable BEFORE the C0 control-char rejection.
 		const tool = register();
 		const { custom } = driveCustom((c) => {
@@ -980,5 +960,117 @@ describe("ask_user_question — bracketed paste + Kitty CSI-u (dictation parity)
 			| undefined;
 		expect(r?.details.answers[0].kind).toBe("custom");
 		expect(r?.details.answers[0].answer).toBe("Hello world");
+	});
+
+	it("large bracketed paste (>10 lines) commits the expanded content, not the compact marker", async () => {
+		// Pi-tui's Editor stashes pastes over 10 lines / 1000 chars in a private map and
+		// inserts a "[paste #N +L lines]" marker. Submitting must expand the marker back
+		// to the stored body — pi core submits main-prompt input the same way.
+		const bigPaste = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n");
+		const tool = register();
+		const { custom } = driveCustom((c) => {
+			c.handleInput(KEY.DOWN);
+			c.handleInput(KEY.DOWN); // inputMode on "Type something."
+			c.handleInput(`\x1b[200~${bigPaste}\x1b[201~`);
+			c.handleInput(KEY.ENTER);
+		});
+		const ctx = { hasUI: true, ui: { custom } } as never;
+		const r = (await tool.execute?.("tc", freeTextParams as never, undefined as never, undefined as never, ctx)) as
+			| ToolResult
+			| undefined;
+		expect(r?.details.cancelled).toBe(false);
+		expect(r?.details.answers[0].kind).toBe("custom");
+		expect(r?.details.answers[0].answer).toBe(bigPaste);
+		expect(r?.details.answers[0].answer).not.toContain("[paste #");
+	});
+
+	it("large bracketed paste into notes lands the expanded text in answer.notes", async () => {
+		const bigNotes = Array.from({ length: 12 }, (_, i) => `note ${i + 1}`).join("\n");
+		const tool = register();
+		const { custom } = driveCustom((c) => {
+			c.handleInput("n"); // universal notes gate (focus starts on Default)
+			c.handleInput(`\x1b[200~${bigNotes}\x1b[201~`);
+			c.handleInput(KEY.ESC); // exit notes → commits to notesByTab
+			c.handleInput(KEY.ENTER); // confirm Default with the note
+		});
+		const ctx = { hasUI: true, ui: { custom } } as never;
+		const r = (await tool.execute?.("tc", freeTextParams as never, undefined as never, undefined as never, ctx)) as
+			| ToolResult
+			| undefined;
+		expect(r?.details.answers[0].answer).toBe("Default");
+		expect(r?.details.answers[0].notes).toBe(bigNotes);
+	});
+
+	it("large paste survives a tab-switch draft round-trip (restores go through setText)", async () => {
+		// Drafts restore via Editor.setText, which clears the backing paste map —
+		// so the draft must already be expanded when captured.
+		const twoQuestionParams = {
+			questions: [
+				{ question: "Q1?", header: "First", options: [{ label: "A" }, { label: "B" }] },
+				{ question: "Q2?", header: "Second", options: [{ label: "X" }, { label: "Y" }] },
+			],
+		};
+		const bigPaste = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n");
+		const tool = register();
+		const { custom } = driveCustom((c) => {
+			c.handleInput(KEY.DOWN);
+			c.handleInput(KEY.DOWN); // Q1 "Type something." row → inputMode
+			c.handleInput(`\x1b[200~${bigPaste}\x1b[201~`);
+			c.handleInput(KEY.DOWN); // wrap to A — nav saves the (expanded) draft
+			c.handleInput(KEY.TAB); // → Q2
+			c.handleInput(KEY.SHIFT_TAB); // ← Q1 (draft restored via setText)
+			c.handleInput(KEY.DOWN);
+			c.handleInput(KEY.DOWN); // back on "Type something.", draft re-restored
+			c.handleInput(KEY.ENTER); // commit custom → auto-advance to Q2
+			c.handleInput(KEY.TAB); // → Submit
+			c.handleInput(KEY.ENTER); // submit
+		});
+		const ctx = { hasUI: true, ui: { custom } } as never;
+		const r = (await tool.execute?.("tc", twoQuestionParams as never, undefined as never, undefined as never, ctx)) as
+			| ToolResult
+			| undefined;
+		expect(r?.details.cancelled).toBe(false);
+		const q1 = r?.details.answers.find((a) => a.questionIndex === 0);
+		expect(q1?.kind).toBe("custom");
+		expect(q1?.answer).toBe(bigPaste);
+		expect(q1?.answer).not.toContain("[paste #");
+	});
+});
+
+const multiNotesParams = {
+	questions: [
+		{
+			question: "Pick areas",
+			header: "Areas",
+			multiSelect: true,
+			options: [{ label: "FE" }, { label: "BE" }],
+		},
+	],
+};
+
+describe("ask_user_question — multi-select notes end-to-end", () => {
+	it("n → type → Esc → Space → Next+Enter lands a multi answer carrying the typed note", async () => {
+		const tool = register();
+		const { custom } = driveCustom((c) => {
+			// Items: [FE (0), BE (1), "Type something." (2), Next (3)]. Startup focuses FE.
+			// Universal `n` gate (Phase 1) opens notes on this multi-select tab.
+			c.handleInput("n"); // enter notes
+			c.handleInput("h");
+			c.handleInput("i"); // type "hi"
+			c.handleInput(KEY.ESC); // exit notes → commits "hi" to notesByTab[0]
+			c.handleInput(KEY.SPACE); // toggle FE ON (persistMultiSelectAnswer merges the note)
+			c.handleInput(KEY.DOWN); // → BE
+			c.handleInput(KEY.DOWN); // → "Type something." (inputMode on, then off via DOWN)
+			c.handleInput(KEY.DOWN); // → Next sentinel
+			c.handleInput(KEY.ENTER); // multi_confirm + done (single question → submit)
+		});
+		const ctx = { hasUI: true, ui: { custom } } as never;
+		const r = (await tool.execute?.("tc", multiNotesParams as never, undefined as never, undefined as never, ctx)) as
+			| ToolResult
+			| undefined;
+		expect(r?.details.cancelled).toBe(false);
+		expect(r?.details.answers[0]).toMatchObject({ kind: "multi" });
+		expect(r?.details.answers[0].selected).toContain("FE");
+		expect(r?.details.answers[0].notes).toBe("hi");
 	});
 });

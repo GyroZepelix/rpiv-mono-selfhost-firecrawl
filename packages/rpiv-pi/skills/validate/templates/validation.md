@@ -6,7 +6,8 @@ commit: {Current commit hash}
 branch: {Current branch name}
 repository: {Repository name}
 topic: "Validation of {plan topic}"
-status: {complete | needs_changes}
+status: ready
+verdict: {pass | fail}
 parent: "{plan path}"
 tags: [validation, {inherit relevant tags from the plan's frontmatter}]
 last_updated: {Same ISO timestamp as date: above}
@@ -41,7 +42,7 @@ last_updated: {Same ISO timestamp as date: above}
 
 #### Pattern Conformance:
 
-_Optional subsection — include when codebase-pattern-finder surfaced observations worth recording. Omit the whole `#### Pattern Conformance:` block when there is nothing to say._
+_Optional subsection — include when the pattern-conformance check surfaced observations worth recording. Omit the whole `#### Pattern Conformance:` block when there is nothing to say._
 
 - ✓ {Imports / test structure / naming / mock patterns / etc.} follow established codebase conventions
 - Minor observation: {non-blocking variation worth flagging — explicitly tag as "acceptable variation, not a deviation"}
@@ -68,4 +69,4 @@ None — {one-line reason, e.g., "the plan explicitly requires no functional cha
 
 - {Actionable bullet — e.g., "Address linting warnings before merge"}
 - {…}
-- {Or, when status is `complete`:} Ready to commit — implementation is complete and validated.
+- {Or, when `verdict: pass`:} Ready to commit — implementation is complete and validated.

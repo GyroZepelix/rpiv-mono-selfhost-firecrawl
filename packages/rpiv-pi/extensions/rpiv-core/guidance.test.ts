@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMockPi, writeGuidanceTree } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, type vi } from "vitest";
-import { clearInjectionState, handleToolCallGuidance, injectRootGuidance, resolveGuidance } from "./guidance.js";
+import {
+	clearInjectionState,
+	handleToolCallGuidance,
+	injectRootGuidance,
+	resolveAndFormatNewGuidance,
+	resolveGuidance,
+	takeRootGuidance,
+} from "./guidance.js";
 
 let projectDir: string;
 
@@ -86,10 +93,55 @@ describe("injectRootGuidance", () => {
 		expect(pi.sendMessage).toHaveBeenCalledTimes(2);
 	});
 
+	it("force-takes root guidance after another session marked it injected", () => {
+		writeGuidanceTree(projectDir, { ".rpiv/guidance/architecture.md": "body" });
+		const { pi } = createMockPi();
+		injectRootGuidance(projectDir, pi);
+		expect(takeRootGuidance(projectDir)).toBeNull();
+		expect(takeRootGuidance(projectDir, "post compact", true)).toContain("body");
+	});
+
 	it("no-ops when root architecture.md is missing", () => {
 		const { pi } = createMockPi();
 		injectRootGuidance(projectDir, pi);
 		expect(pi.sendMessage).not.toHaveBeenCalled();
+	});
+});
+
+describe("resolveAndFormatNewGuidance", () => {
+	it("returns null when nothing resolves along the ladder", () => {
+		expect(resolveAndFormatNewGuidance(join(projectDir, "x.ts"), projectDir, "read")).toBeNull();
+	});
+
+	it("returns null when all resolved files are already injected (cross-call dedup)", () => {
+		writeGuidanceTree(projectDir, { "src/AGENTS.md": "a" });
+		const filePath = join(projectDir, "src", "x.ts");
+		const { pi } = createMockPi();
+		// Handler marks via the helper on the first tool_call.
+		handleToolCallGuidance({ toolName: "read", input: { file_path: filePath } }, { cwd: projectDir }, pi);
+		// Helper now sees everything as injected → null.
+		expect(resolveAndFormatNewGuidance(filePath, projectDir, "read")).toBeNull();
+	});
+
+	it("returns joined formatted blocks for multiple new files including the trigger string", () => {
+		writeGuidanceTree(projectDir, {
+			".rpiv/guidance/architecture.md": "root",
+			"src/AGENTS.md": "src",
+		});
+		const content = resolveAndFormatNewGuidance(join(projectDir, "src", "x.ts"), projectDir, "write");
+		expect(content).toContain("root");
+		expect(content).toContain("src");
+		expect(content).toContain("auto-loaded because write touched src/x.ts");
+		expect(content?.split("\n\n---\n\n")).toHaveLength(2);
+	});
+
+	it("marks injected files before returning — a second call returns null", () => {
+		writeGuidanceTree(projectDir, { "src/AGENTS.md": "a" });
+		const filePath = join(projectDir, "src", "x.ts");
+		// First call returns content AND marks the dedup Set.
+		expect(resolveAndFormatNewGuidance(filePath, projectDir, "read")).not.toBeNull();
+		// The mark landed before the return, so the dedup filter now excludes it.
+		expect(resolveAndFormatNewGuidance(filePath, projectDir, "read")).toBeNull();
 	});
 });
 

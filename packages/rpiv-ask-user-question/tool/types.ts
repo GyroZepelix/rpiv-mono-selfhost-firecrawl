@@ -21,25 +21,20 @@ export type SentinelLabel = (typeof SENTINEL_LABELS)[SentinelKind];
 
 /**
  * Labels reserved for Pi-internal sentinels — authoring an option with any
- * of these labels triggers the `reserved_label` runtime guard. Three of the
- * four come from `ROW_INTENT_META` (the runtime kinds); `"Other"` is
+ * of these labels triggers the `reserved_label` runtime guard. Two of the
+ * three come from `ROW_INTENT_META` (the runtime kinds); `"Other"` is
  * reserved for CC parity only (the model is conditioned to reach for
  * "Other" in CC; we reject it so the runtime sentinel is the single source
  * of truth) and has no runtime kind.
  *
- * Reserved unconditionally — multiSelect questions also reject these labels
- * even though the runtime sentinel is suppressed there.
+ * Reserved unconditionally — every question mode rejects these labels, even
+ * when a given runtime sentinel is not appended in that mode.
  *
  * Order is pinned by `types.test.ts:292` — keep the explicit
- * `["Other", other, chat, next]` literal so consumers using
+ * `["Other", other, next]` literal so consumers using
  * `RESERVED_LABELS[i]` indexing or `Set` membership see no behavior change.
  */
-export const RESERVED_LABELS = [
-	"Other",
-	ROW_INTENT_META.other.label,
-	ROW_INTENT_META.chat.label,
-	ROW_INTENT_META.next.label,
-] as const;
+export const RESERVED_LABELS = ["Other", ROW_INTENT_META.other.label, ROW_INTENT_META.next.label] as const;
 export type ReservedLabel = (typeof RESERVED_LABELS)[number];
 
 export const OptionSchema = Type.Object({
@@ -106,13 +101,12 @@ export type QuestionParams = Static<typeof QuestionParamsSchema>;
  * Variant semantics:
  * - `option`: user picked one of the author-defined options. `answer` is the option's label.
  * - `custom`: user typed free-text via the "Type something." row. `answer` is the typed text or null.
- * - `chat`: user picked the chat sentinel. `answer` is the literal "Chat about this".
  * - `multi`: user committed multi-select choices. `selected` carries chosen labels; `answer` is null.
  */
 export interface QuestionAnswer {
 	questionIndex: number;
 	question: string;
-	kind: "option" | "custom" | "chat" | "multi";
+	kind: "option" | "custom" | "multi";
 	answer: string | null;
 	selected?: string[];
 	notes?: string;
@@ -120,24 +114,38 @@ export interface QuestionAnswer {
 	 * Markdown text from the matched option's `preview` field, populated only
 	 * when the user lands on a single-select option carrying a `preview`.
 	 * Used by `buildQuestionnaireResponse` to echo `selected preview: <preview>`
-	 * into the LLM-facing envelope. Undefined for multi-select, custom-text
-	 * (`kind: "custom"`), and chat (`kind: "chat"`) answers.
+	 * into the LLM-facing envelope. Undefined for multi-select and custom-text
+	 * (`kind: "custom"`) answers.
 	 */
 	preview?: string;
 }
 
 export type QuestionnaireError =
 	| "no_ui"
+	| "no_custom_ui"
 	| "no_questions"
 	| "empty_options"
 	| "too_many_questions"
 	| "duplicate_question"
 	| "duplicate_option_label"
-	| "reserved_label";
+	| "reserved_label"
+	| "session_load_failed"
+	| "stale_module_cache";
 
 export interface QuestionnaireResult {
 	answers: QuestionAnswer[];
 	cancelled: boolean;
+	/**
+	 * Global note authored on the Submit tab: `n` opens the shared notes editor there,
+	 * and the committed text lives at the `notesByTab[questions.length]` pseudo-index
+	 * (a slot no question tab can occupy) until `doneFor` lifts it onto the result —
+	 * attached on both submit and cancel, like per-question `answers[].notes`.
+	 * Conditional-spread contract, mirroring `QuestionAnswer.notes`: the key appears
+	 * only via conditional spread of a non-empty string — never assigned `undefined`,
+	 * never kept for an empty/whitespace-only draft — so note-free results stay
+	 * byte-identical (`!("globalNote" in result)` holds).
+	 */
+	globalNote?: string;
 	error?: QuestionnaireError;
 }
 

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { buildItemsForQuestion, buildQuestionnaireResponse, buildToolResult } from "./ask-user-question.js";
-import { chatNumberingFor } from "./state/selectors/derivations.js";
 import type { QuestionnaireResult, QuestionParams } from "./tool/types.js";
 
 describe("buildItemsForQuestion", () => {
@@ -20,7 +19,7 @@ describe("buildItemsForQuestion", () => {
 		]);
 	});
 
-	it("appends the Next sentinel (not Type-something) when multiSelect is true", () => {
+	it("appends 'Type something.' + Next sentinels when multiSelect is true", () => {
 		const items = buildItemsForQuestion({
 			question: "Pick areas",
 			header: "Areas",
@@ -35,9 +34,10 @@ describe("buildItemsForQuestion", () => {
 			{ kind: "option", label: "FE", description: "Frontend" },
 			{ kind: "option", label: "BE", description: "Backend" },
 			{ kind: "option", label: "Tests", description: "Tests" },
+			{ kind: "other", label: "Type something." },
 			{ kind: "next", label: "Next" },
 		]);
-		expect(items.some((i) => i.kind === "other")).toBe(false);
+		expect(items.some((i) => i.kind === "other")).toBe(true);
 	});
 
 	it("appends the sentinel when multiSelect is false", () => {
@@ -63,7 +63,7 @@ describe("buildItemsForQuestion", () => {
 		expect(items[1]).toEqual({ kind: "other", label: "Type something." });
 	});
 
-	it("skips the sentinel when any single-select option carries a preview", () => {
+	it("appends the Type-something sentinel even when a single-select option carries a preview", () => {
 		const items = buildItemsForQuestion({
 			question: "Layout?",
 			header: "Layout",
@@ -75,11 +75,12 @@ describe("buildItemsForQuestion", () => {
 		expect(items).toEqual([
 			{ kind: "option", label: "Centered", description: "centered logo" },
 			{ kind: "option", label: "Left", description: "left logo" },
+			{ kind: "other", label: "Type something." },
 		]);
-		expect(items.some((i) => i.kind === "other")).toBe(false);
+		expect(items.some((i) => i.kind === "other")).toBe(true);
 	});
 
-	it("appends the sentinel when single-select options have only empty-string previews", () => {
+	it("appends the Type-something sentinel for single-select regardless of preview content", () => {
 		const items = buildItemsForQuestion({
 			question: "Pick",
 			header: "Pick",
@@ -92,7 +93,7 @@ describe("buildItemsForQuestion", () => {
 		expect(items[2]).toEqual({ kind: "other", label: "Type something." });
 	});
 
-	it("appends the Next sentinel for multiSelect even if an option has a preview (preview is dropped)", () => {
+	it("appends 'Type something.' + Next for multiSelect even if an option has a preview (preview is dropped)", () => {
 		const items = buildItemsForQuestion({
 			question: "Areas",
 			header: "Areas",
@@ -105,60 +106,9 @@ describe("buildItemsForQuestion", () => {
 		expect(items).toEqual([
 			{ kind: "option", label: "FE", description: "Frontend" },
 			{ kind: "option", label: "BE", description: "Backend" },
+			{ kind: "other", label: "Type something." },
 			{ kind: "next", label: "Next" },
 		]);
-		expect(items.some((i) => i.kind === "other")).toBe(false);
-	});
-});
-
-describe("chatNumberingFor", () => {
-	// Single-select items already include the `Type something.` row, which IS a numbered
-	// (visible-numbered) row in MultiSelectView/WrappingSelect, so the chat row that
-	// follows simply continues the count: 2 options + Type-something = 3 → chat is 4.
-	it("single-select with Type-something: chat number continues past the Type-something row", () => {
-		const items = buildItemsForQuestion({
-			question: "q",
-			header: "H",
-			options: [
-				{ label: "A", description: "a" },
-				{ label: "B", description: "b" },
-			],
-		});
-		expect(chatNumberingFor(items)).toEqual({ offset: 3, total: 4 });
-	});
-
-	// Defect 1: Multi-select tabs render 4 visible-numbered rows (1-4) followed by the
-	// un-numbered Next sentinel. The chat row should therefore display "5." — i.e. the
-	// numbering MUST exclude `kind:'next'` rows so chat continues the *visible* numbered
-	// sequence rather than the raw items.length.
-	it("multi-select: chat number excludes the Next sentinel from the numbered count", () => {
-		const items = buildItemsForQuestion({
-			question: "Pick areas",
-			header: "Areas",
-			multiSelect: true,
-			options: [
-				{ label: "Unit tests", description: "U" },
-				{ label: "Integration tests", description: "I" },
-				{ label: "Contract tests", description: "C" },
-				{ label: "Manual QA", description: "M" },
-			],
-		});
-		// 4 numbered rows + Next sentinel (un-numbered) → chat must read "5.", not "6.".
-		expect(chatNumberingFor(items)).toEqual({ offset: 4, total: 5 });
-	});
-
-	// Side-by-side preview layout suppresses Type-something, so 3 options → chat is "4.".
-	it("preview-layout single-select (no Type-something): chat number = options.length + 1", () => {
-		const items = buildItemsForQuestion({
-			question: "Layout?",
-			header: "Layout",
-			options: [
-				{ label: "Centered", description: "centered logo", preview: "## Centered" },
-				{ label: "Left", description: "left logo" },
-				{ label: "Right", description: "right logo" },
-			],
-		});
-		expect(chatNumberingFor(items)).toEqual({ offset: 3, total: 4 });
 	});
 });
 
@@ -342,27 +292,6 @@ describe("buildQuestionnaireResponse — completed", () => {
 		expect(r.content[0].text).toContain('"Free?"="(no input)"');
 	});
 
-	it("chat answer's <A> is the chat continuation message verbatim", () => {
-		const params: QuestionParams = {
-			questions: [
-				{
-					question: "Help",
-					header: "Help",
-					options: [
-						{ label: "Yes", description: "Y" },
-						{ label: "No", description: "N" },
-					],
-				},
-			],
-		};
-		const result: QuestionnaireResult = {
-			cancelled: false,
-			answers: [{ questionIndex: 0, question: "Help", kind: "chat", answer: "Chat about this" }],
-		};
-		const r = buildQuestionnaireResponse(result, params);
-		expect(r.content[0].text).toContain("Continue the conversation");
-	});
-
 	it("notes are echoed as 'user notes: <text>' AND preserved in details", () => {
 		const params: QuestionParams = {
 			questions: [
@@ -385,6 +314,33 @@ describe("buildQuestionnaireResponse — completed", () => {
 		expect(r.details.answers[0].notes).toBe("because of X");
 	});
 
+	it("multiSelect answer with notes renders 'user notes:' suffix and NO 'selected preview:' suffix (FR-7)", () => {
+		const params: QuestionParams = {
+			questions: [
+				{
+					question: "Areas",
+					header: "Areas",
+					multiSelect: true,
+					options: [
+						{ label: "FE", description: "Frontend" },
+						{ label: "BE", description: "Backend" },
+					],
+				},
+			],
+		};
+		const result: QuestionnaireResult = {
+			cancelled: false,
+			answers: [
+				{ questionIndex: 0, question: "Areas", kind: "multi", answer: null, selected: ["FE", "BE"], notes: "both" },
+			],
+		};
+		const r = buildQuestionnaireResponse(result, params);
+		expect(r.content[0].text).toContain('"Areas"="FE, BE"');
+		expect(r.content[0].text).toContain("user notes: both");
+		expect(r.content[0].text).not.toContain("selected preview:");
+		expect(r.details.answers[0].notes).toBe("both");
+	});
+
 	it("cancelled: false with no matching answers still returns DECLINE_MESSAGE text", () => {
 		const params: QuestionParams = {
 			questions: [
@@ -402,6 +358,76 @@ describe("buildQuestionnaireResponse — completed", () => {
 		const r = buildQuestionnaireResponse(result, params);
 		expect(r.details.cancelled).toBe(true);
 		expect(r.content[0]).toEqual({ type: "text", text: "User declined to answer questions" });
+	});
+});
+
+describe("buildQuestionnaireResponse — global note", () => {
+	const params: QuestionParams = {
+		questions: [
+			{
+				question: "Pick?",
+				header: "H",
+				options: [
+					{ label: "A", description: "a" },
+					{ label: "B", description: "b" },
+				],
+			},
+		],
+	};
+
+	it("success + note: exact envelope bytes with the trailing 'global note: <note>.' segment (raw multiline echo)", () => {
+		const result: QuestionnaireResult = {
+			cancelled: false,
+			answers: [{ questionIndex: 0, question: "Pick?", kind: "option", answer: "A" }],
+			globalNote: "ship it\nFriday",
+		};
+		const r = buildQuestionnaireResponse(result, params);
+		expect(r.content[0].text).toBe(
+			'User has answered your questions: "Pick?"="A". global note: ship it\nFriday. You can now continue with the user\'s answers in mind.',
+		);
+		expect(r.details).toBe(result);
+	});
+
+	it("the global-note segment is anchored by the envelope suffix", () => {
+		const result: QuestionnaireResult = {
+			cancelled: false,
+			answers: [{ questionIndex: 0, question: "Pick?", kind: "option", answer: "A" }],
+			globalNote: "ship it Friday",
+		};
+		const r = buildQuestionnaireResponse(result, params);
+		expect(r.content[0].text).toMatch(
+			/global note: ship it Friday\. You can now continue with the user's answers in mind\.$/,
+		);
+	});
+
+	it("zero answers + note is NOT a decline — answered envelope with details by reference", () => {
+		const result: QuestionnaireResult = { cancelled: false, answers: [], globalNote: "note alone" };
+		const r = buildQuestionnaireResponse(result, params);
+		expect(r.content[0].text.startsWith("User has answered your questions:")).toBe(true);
+		expect(r.content[0].text).toContain("global note:");
+		expect(r.details.cancelled).toBe(false);
+		expect(r.details.globalNote).toBe("note alone");
+		expect(r.details).toBe(result);
+	});
+
+	it("cancelled + note: DECLINE_MESSAGE text, answers forwarded AND globalNote preserved in details", () => {
+		const result: QuestionnaireResult = {
+			cancelled: true,
+			answers: [{ questionIndex: 0, question: "Pick?", kind: "option", answer: "A" }],
+			globalNote: "kept for replay",
+		};
+		const r = buildQuestionnaireResponse(result, params);
+		expect(r.content[0].text).toBe("User declined to answer questions");
+		expect(r.details.answers).toEqual(result.answers);
+		expect(r.details.cancelled).toBe(true);
+		expect(r.details.globalNote).toBe("kept for replay");
+	});
+
+	it("zero answers + no note still declines (fresh details literal carries no globalNote key)", () => {
+		const result: QuestionnaireResult = { cancelled: false, answers: [] };
+		const r = buildQuestionnaireResponse(result, params);
+		expect(r.content[0].text).toBe("User declined to answer questions");
+		expect(r.details).toEqual({ answers: [], cancelled: true });
 	});
 });
 
@@ -476,14 +502,14 @@ describe("buildQuestionnaireResponse — multi-question mixed types", () => {
 			answers: [
 				{ questionIndex: 0, question: "Q1?", kind: "option", answer: "A" },
 				{ questionIndex: 1, question: "Q2?", kind: "custom", answer: "my own thing" },
-				{ questionIndex: 2, question: "Q3?", kind: "chat", answer: "Chat about this" },
+				{ questionIndex: 2, question: "Q3?", kind: "option", answer: "Y" },
 			],
 		};
 		const r = buildQuestionnaireResponse(result, params);
 		const text = r.content[0].text;
 		expect(text).toContain('"Q1?"="A"');
 		expect(text).toContain('"Q2?"="my own thing"');
-		expect(text).toContain("Continue the conversation");
+		expect(text).toContain('"Q3?"="Y"');
 	});
 
 	it("skips unanswered questions (omits their segment from envelope)", () => {

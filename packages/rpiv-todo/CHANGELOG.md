@@ -7,6 +7,100 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+## [2.6.2] - 2026-08-18
+
+### Changed
+
+- The todo overlay now follows Pi's tool-output expansion mode: expanding shows every task instead of retaining the `+N more` summary, while collapsing reapplies `maxWidgetLines`.
+
+### Fixed
+
+- The in_progress prompt guideline now says "a task from the todo list" instead of "any task", so it no longer overrides the "skip it for single trivial tasks" rule in Pi's flat guideline list and pushes the model into one-item todo lists for every request (#154).
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- Package card cover on pi.dev: `package.json` now declares `pi.image` pointing at the package's `docs/cover.png`.
+
+## [2.6.0] - 2026-08-15
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+### Fixed
+- Terminal control characters (ANSI/C1 escape sequences, newlines, bidi overrides) in model-controlled task text — subject, description, activeForm, owner — are now stripped before terminal rendering (#151, #152).
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+### Changed
+- The todo overlay is now lazy-loaded, deferring its module cost from session start to first render (#108).
+
+### Fixed
+- A model no longer gets trapped in a failure loop when it omits the `status` field from an `update` call after context compaction: the error message now enumerates the mutable fields, the `status` parameter description leads with its mutation role instead of reading like a list filter, and a prompt guideline carries the literal `update {id, status: 'completed'}` call shape as a durable recipe (#137).
+- A transient overlay-load failure during tool execution no longer surfaces as an extension error: the tool result stands, a `[rpiv-todo]`-prefixed warning is logged, and the overlay retries on the next event. A rejected overlay import is no longer cached for the process lifetime, so a late first load after dependency churn recovers instead of staying broken.
+
+## [2.1.0] - 2026-07-23
+
+### Changed
+- README rewritten to follow the documentation standard shared across all packages.
+- npm tarball now includes the versioned `docs/` reference and no longer ships cover or screenshot art.
+
+### Fixed
+- The todo overlay now follows theme changes live instead of keeping colors from the theme active when it was first rendered, and its color semantics are clearer: in-progress subjects are highlighted, task IDs and metadata are dimmed, and completed/deleted tasks are muted.
+
+## [2.0.0] - 2026-07-21
+
+### Added
+- Configurable collapse/expand shortcut for the todo overlay via the new `collapseKey` config field (default `ctrl+shift+t`; `off` disables it).
+- Configurable overlay height via the new `maxWidgetLines` config field (default 12, applied on the next repaint).
+- Todo state is now isolated per session, so a detached or child session can no longer read or overwrite another session's tasks.
+- Honor `XDG_CONFIG_HOME` when locating the config file, falling back to the legacy `~/.config` location when the new one is absent.
+
+### Fixed
+- An update that changes nothing now reports `No change` instead of `Updated`, so a model no longer re-issues the same no-op update in a loop.
+- Session shutdown tears the overlay down cleanly even when disposal races a stale terminal context, instead of leaving it rendering empty.
+- Tool registration no longer fails with a missing-module error under package installers that do not materialise peer dependencies.
+
+## [1.20.0] - 2026-06-15
+
+### Added
+- Chinese (`zh`) translations (`locales/zh.json`) (#68).
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+### Fixed
+- The todos overlay renders a trailing blank line so its last row no longer sits flush against the input box. (#65)
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
 ### Fixed
 - Stale extension context after auto-compaction no longer causes spurious warnings during overlay replay.
 

@@ -1,5 +1,67 @@
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- `GuidanceFields` (interface, `GuidanceFieldsSchema`, `validateGuidanceFields`) now supports an optional `description` field — kept when it is a non-empty string, dropped otherwise. Consumers that read `validateGuidanceFields` output and ignore the field are unaffected; consumers that compose `GuidanceFieldsSchema` into a `Value.Check`-validated config now reject a *wrong-typed* `description` (previously tolerated as an unknown key), so such consumers should degrade per field rather than per file.
+
+## [2.6.0] - 2026-08-15
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+## [2.1.0] - 2026-07-23
+
+### Changed
+- README rewritten to follow the documentation standard shared across all packages.
+
+## [2.0.0] - 2026-07-21
+
+### Added
+- Add `resolveConfigDir()`, which honors `XDG_CONFIG_HOME` per the XDG spec: unset, empty, whitespace, or relative values fall back to `~/.config`; a leading `~/` is expanded (a `~user` form is not) and the result must be absolute.
+- Add `loadJsonConfigWithLegacyFallback()`, which prefers the XDG config path and reads the legacy `~/.config` file only when the XDG file is absent; a malformed XDG file warns and returns an empty config rather than silently falling back.
+
+### Fixed
+- Load correctly under installers that do not materialize peer dependencies by declaring the schema library as a direct dependency.
+
+## [1.20.0] - 2026-06-15
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
 ### Added
 - `modelKey` and `parseModelKey` are now exported from `@juicesharp/rpiv-config` (consolidated out of `rpiv-advisor`) so all consumers share one model-key codec.
 

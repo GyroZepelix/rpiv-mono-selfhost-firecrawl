@@ -23,6 +23,8 @@ vi.mock("@earendil-works/pi-tui", async (orig) => {
 	return { ...actual, Markdown: FakeMarkdown };
 });
 
+import { applyLocale, registerStrings } from "@juicesharp/rpiv-i18n";
+import { I18N_NAMESPACE } from "../../../state/i18n-bridge.js";
 import type { QuestionData } from "../../../tool/types.js";
 import { OptionListView } from "../option-list-view.js";
 import type { WrappingSelectItem } from "../wrapping-select.js";
@@ -129,16 +131,21 @@ describe("PreviewPane.render — layout switching", () => {
 		expect(trailing).toBeLessThanOrEqual(MAX_PREVIEW_HEIGHT_STACKED);
 	});
 
-	it("width 99 → stacked, width 100 → side-by-side (threshold boundary)", () => {
-		const narrow = makePane(question, () => 99);
-		narrow.optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		const narrowLines = narrow.pane.render(99);
+	it("a resize from width 99 to 100 switches from stacked to right-aligned side-by-side", () => {
+		let terminalWidth = 99;
+		const view = makePane(question, () => terminalWidth);
+		view.pane.setGlobalLeftWidth((w) =>
+			crossTabLeftWidthWithDonation([{ multiSelect: false }], [view.items], [question], w),
+		);
+		view.optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
+		const narrowLines = view.pane.render(99);
 		expect(narrowLines.findIndex((l) => /MD\[\d+\]:/.test(l))).toBeGreaterThan(0);
 
-		const wide = makePane(question, () => PREVIEW_MIN_WIDTH);
-		wide.optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		const wideLines = wide.pane.render(PREVIEW_MIN_WIDTH);
+		terminalWidth = PREVIEW_MIN_WIDTH;
+		const wideLines = view.pane.render(PREVIEW_MIN_WIDTH);
 		expect(wideLines.some((l) => /MD\[\d+\]:/.test(l))).toBe(true);
+		const previewTop = wideLines.find((line) => line.includes("┌"));
+		expect(visibleWidth(previewTop!)).toBe(PREVIEW_MIN_WIDTH);
 	});
 });
 
@@ -155,15 +162,15 @@ describe("PreviewPane — cache + invalidate", () => {
 	it("creates one Markdown per option lazily; revisit hits cache", () => {
 		const { pane, optionListView } = makePane(question, () => 120);
 		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: false });
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: false, inputMode: false });
 		pane.render(120);
 		expect(markdownConstructed).toBe(1);
 		optionListView.setProps({ selectedIndex: 1, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: false });
+		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: false, inputMode: false });
 		pane.render(120);
 		expect(markdownConstructed).toBe(2);
 		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: false });
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: false, inputMode: false });
 		pane.render(120);
 		expect(markdownConstructed).toBe(2);
 	});
@@ -208,7 +215,7 @@ describe("PreviewPane — empty preview placeholder (per-question hide-when-no-p
 		};
 		const { pane, optionListView } = makePane(question, () => 80);
 		optionListView.setProps({ selectedIndex: 1, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: false });
+		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: false, inputMode: false });
 		const lines = pane.render(80);
 		const mdIndex = lines.findIndex((l) => l.includes(NO_PREVIEW_TEXT));
 		expect(mdIndex).toBeGreaterThan(-1);
@@ -346,7 +353,7 @@ describe("PreviewPane.maxNaturalHeight", () => {
 		const max = pane.maxNaturalHeight(w);
 		for (let i = 0; i < mixedQuestion.options.length; i++) {
 			optionListView.setProps({ selectedIndex: i, focused: true, inputBuffer: "" });
-			pane.setProps({ notesVisible: false, selectedIndex: i, focused: true });
+			pane.setProps({ notesVisible: false, selectedIndex: i, focused: true, inputMode: false });
 			expect(pane.naturalHeight(w)).toBeLessThanOrEqual(max);
 		}
 	});
@@ -357,7 +364,7 @@ describe("PreviewPane.maxNaturalHeight", () => {
 		const max = pane.maxNaturalHeight(w);
 		for (let i = 0; i < mixedQuestion.options.length; i++) {
 			optionListView.setProps({ selectedIndex: i, focused: true, inputBuffer: "" });
-			pane.setProps({ notesVisible: false, selectedIndex: i, focused: true });
+			pane.setProps({ notesVisible: false, selectedIndex: i, focused: true, inputMode: false });
 			expect(pane.naturalHeight(w)).toBeLessThanOrEqual(max);
 		}
 	});
@@ -365,19 +372,19 @@ describe("PreviewPane.maxNaturalHeight", () => {
 	it("maxNaturalHeight is index-independent (does not depend on the current props.selectedIndex)", () => {
 		const { pane: paneA, optionListView: olA } = makePane(mixedQuestion, () => 120);
 		olA.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		paneA.setProps({ notesVisible: false, selectedIndex: 0, focused: true });
+		paneA.setProps({ notesVisible: false, selectedIndex: 0, focused: true, inputMode: false });
 		const maxA = paneA.maxNaturalHeight(120);
 
 		const { pane: paneB, optionListView: olB } = makePane(mixedQuestion, () => 120);
 		olB.setProps({ selectedIndex: 1, focused: true, inputBuffer: "" });
-		paneB.setProps({ notesVisible: false, selectedIndex: 1, focused: true });
+		paneB.setProps({ notesVisible: false, selectedIndex: 1, focused: true, inputMode: false });
 		const maxB = paneB.maxNaturalHeight(120);
 
 		expect(maxA).toBe(maxB);
 	});
 });
 
-describe("PreviewPane — left-aligned preview with top/left padding (side-by-side only)", () => {
+describe("PreviewPane — right-aligned preview with a bounded options column", () => {
 	const question: QuestionData = {
 		question: "pick",
 		header: "pick",
@@ -391,13 +398,11 @@ describe("PreviewPane — left-aligned preview with top/left padding (side-by-si
 		return joined.filter((l) => /MD\[\d+\]:/.test(l));
 	}
 
-	// Spec: preview content is NO LONGER horizontally centered. The MD marker should land at
-	// the same X-column whether the body is short or long — because both leftMargin slabs are
-	// fixed (options column max-width + gap + PREVIEW_PADDING_LEFT).
-	it("side-by-side preview lines have a fixed left-padding offset, NOT a content-dependent center margin", () => {
+	it("content-sized preview boxes share the right edge while retaining their natural widths", () => {
 		const short = makePane(question, () => 120);
 		short.optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		const shortMD = extractPreviewColumnLines(short.pane.render(120))[0].indexOf("MD[");
+		const shortLines = short.pane.render(120);
+		const shortMD = extractPreviewColumnLines(shortLines)[0].indexOf("MD[");
 
 		const longQ: QuestionData = {
 			question: "pick",
@@ -409,9 +414,12 @@ describe("PreviewPane — left-aligned preview with top/left padding (side-by-si
 		};
 		const long = makePane(longQ, () => 120);
 		long.optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		const longMD = extractPreviewColumnLines(long.pane.render(120))[0].indexOf("MD[");
+		const longLines = long.pane.render(120);
+		const longMD = extractPreviewColumnLines(longLines)[0].indexOf("MD[");
 
-		expect(shortMD).toBe(longMD);
+		expect(visibleWidth(shortLines.find((line) => line.includes("┌"))!)).toBe(120);
+		expect(visibleWidth(longLines.find((line) => line.includes("┌"))!)).toBe(120);
+		expect(shortMD).toBeGreaterThan(longMD);
 	});
 
 	it("side-by-side: adaptive left width adjusts options column based on label content", () => {
@@ -479,13 +487,11 @@ describe("PreviewPane — left-aligned preview with top/left padding (side-by-si
 });
 
 describe("PreviewPane — slack donation to left column", () => {
-	// 26-char label → labelDriven > MIN_LEFT, escapes the compact-content guard so
-	// donation actually engages. Short labels would suppress donation by design (Stage 5).
+	// 26-char label → labelDriven > MIN_LEFT, used where the label-driven path
+	// itself must exceed the floor.
 	const LONG_LABEL = "Verbose Descriptive Option";
 
-	it("short labels (compact-content guard) → no donation, MD at MIN_LEFT-based offset", () => {
-		// npm/yarn-style: 1-char labels signal compact UI. Even with a tiny preview that
-		// could donate huge slack, the compact guard returns labelDriven=MIN_LEFT(30).
+	it("short labels donate slack and move the preview to the right", () => {
 		const compactQ: QuestionData = {
 			question: "pick",
 			header: "pick",
@@ -501,14 +507,12 @@ describe("PreviewPane — slack donation to left column", () => {
 		pane.setGlobalLeftWidth((w) => crossTabLeftWidthWithDonation(tabs, itemsByTab, questions, w));
 		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
 
-		const result = crossTabLeftWidthWithDonation(tabs, itemsByTab, questions, 200);
-		expect(result).toBe(MIN_LEFT);
+		const donatedLeft = crossTabLeftWidthWithDonation(tabs, itemsByTab, questions, 200);
+		expect(donatedLeft).toBe(Math.floor(200 * MAX_LEFT_RATIO));
 
 		const lines = pane.render(200);
-		const mdLine = lines.find((l) => /MD\[\d+\]:/.test(l));
-		expect(mdLine).toBeDefined();
-		// MD starts at: MIN_LEFT(30) + gap(2) + pad(1) + border(1) + innerPad(1) = 35.
-		expect(mdLine!.indexOf("MD[")).toBe(MIN_LEFT + PREVIEW_COLUMN_GAP + 1 + 2);
+		const previewTop = lines.find((line) => line.includes("┌"));
+		expect(visibleWidth(previewTop!)).toBe(200);
 	});
 
 	it("long labels + narrow previews → donation engaged, MD at wider offset", () => {
@@ -533,14 +537,12 @@ describe("PreviewPane — slack donation to left column", () => {
 		const lines = pane.render(120);
 		const mdLine = lines.find((l) => /MD\[\d+\]:/.test(l));
 		expect(mdLine).toBeDefined();
-		// At width 120, donation widens left column to the ceiling:
-		//   previewBudget = 45 (MIN_PREVIEW_WIDTH floor), slackDonation = 120 − 2 − 45 = 73
-		//   labelDriven = 33 (26 + 5 + 2), result = min(max(33, 73), 73) = 73
-		// Expected MD offset: left(73) + gap(2) + pad(1) + "│"(1) + " "(1) = 78.
+		// Donation wants 73 columns, but the 50% ratio caps the options column at 60.
+		// The narrow preview is then right-aligned inside the remaining column.
 		const donatedLeft = crossTabLeftWidthWithDonation(tabs, itemsByTab, questions, 120);
-		expect(donatedLeft).toBe(73);
-		const expectedIdx = 73 + PREVIEW_COLUMN_GAP + 1 + 2;
-		expect(mdLine!.indexOf("MD[")).toBe(expectedIdx);
+		expect(donatedLeft).toBe(Math.floor(120 * MAX_LEFT_RATIO));
+		const previewTop = lines.find((line) => line.includes("┌"));
+		expect(visibleWidth(previewTop!)).toBe(120);
 	});
 
 	it("long labels + wide previews → donation suppressed, MD at label-driven offset", () => {
@@ -665,7 +667,7 @@ describe("PreviewPane — notes affordance row (Slice 4 height-stable affordance
 	it("renders 'Notes: press n to add notes' below preview when focused on preview-bearing option", () => {
 		const { pane, optionListView } = makePane(question, () => 120);
 		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true });
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true, inputMode: false });
 		const lines = pane.render(120);
 		expect(lines.some((l) => l.includes(NOTES_AFFORDANCE_TEXT))).toBe(true);
 	});
@@ -673,11 +675,11 @@ describe("PreviewPane — notes affordance row (Slice 4 height-stable affordance
 	it("hides notes affordance text when option lacks preview (height contract preserved)", () => {
 		const { pane, optionListView } = makePane(question, () => 120);
 		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true });
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true, inputMode: false });
 		const linesA = pane.render(120);
 		expect(linesA.some((l) => l.includes(NOTES_AFFORDANCE_TEXT))).toBe(true);
 		optionListView.setProps({ selectedIndex: 1, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: true });
+		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: true, inputMode: false });
 		const linesB = pane.render(120);
 		expect(linesB.some((l) => l.includes(NOTES_AFFORDANCE_TEXT))).toBe(false);
 		expect(linesA.length).toBe(linesB.length);
@@ -686,7 +688,7 @@ describe("PreviewPane — notes affordance row (Slice 4 height-stable affordance
 	it("hides notes affordance when notesVisible (notes mode active)", () => {
 		const { pane, optionListView } = makePane(question, () => 120);
 		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: true, selectedIndex: 0, focused: true });
+		pane.setProps({ notesVisible: true, selectedIndex: 0, focused: true, inputMode: false });
 		const lines = pane.render(120);
 		expect(lines.some((l) => l.includes(NOTES_AFFORDANCE_TEXT))).toBe(false);
 	});
@@ -694,12 +696,28 @@ describe("PreviewPane — notes affordance row (Slice 4 height-stable affordance
 	it("does not render the affordance text when MAX_PREVIEW_HEIGHT_SIDE_BY_SIDE is reached but option lacks preview", () => {
 		const { pane, optionListView } = makePane(question, () => 120);
 		optionListView.setProps({ selectedIndex: 1, focused: true, inputBuffer: "" });
-		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: true });
+		pane.setProps({ notesVisible: false, selectedIndex: 1, focused: true, inputMode: false });
 		const lines = pane.render(120);
 		// Side-by-side path: preview pane still renders (option A has preview), but affordance hidden.
 		expect(lines.some((l) => l.includes(NOTES_AFFORDANCE_TEXT))).toBe(false);
 		// Sanity: cap value is referenced so the import isn't tree-shaken in CI.
 		expect(MAX_PREVIEW_HEIGHT_SIDE_BY_SIDE).toBe(20);
+	});
+
+	it("an affordance wider than the preview box slides left instead of clipping (long-locale headroom)", () => {
+		// 65 visible cols — wider than the 44-col box floor (BOX_MIN_CONTENT_WIDTH + 4).
+		// The real FR string sits at exactly 44, so growth past the box must not clip.
+		const LONG_AFFORDANCE = "Notes : appuyez longuement sur la touche n pour ajouter des notes";
+		registerStrings(I18N_NAMESPACE, { fr: { "preview.notes_affordance": LONG_AFFORDANCE } });
+		applyLocale("fr");
+		const { pane, optionListView } = makePane(question, () => 120);
+		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true, inputMode: false });
+		const lines = pane.render(120);
+		const affordanceLine = lines.find((l) => l.includes("Notes :"));
+		expect(affordanceLine).toBeDefined();
+		expect(affordanceLine).toContain(LONG_AFFORDANCE);
+		expect(visibleWidth(affordanceLine!)).toBeLessThanOrEqual(120);
 	});
 });
 
@@ -756,7 +774,7 @@ describe("PreviewPane composes OptionListView state into render output", () => {
 			previewBlock,
 		});
 		pane.setGlobalLeftWidth((w) => adaptiveLeftWidth(items, items.length, w));
-		pane.setProps({ notesVisible: false, selectedIndex: 2, focused: true });
+		pane.setProps({ notesVisible: false, selectedIndex: 2, focused: true, inputMode: false });
 		optionListView.setProps({ selectedIndex: 2, focused: true, inputBuffer: "Hello" });
 		const lines = pane.render(120);
 		expect(lines.some((l) => l.includes("Hello"))).toBe(true);
@@ -856,5 +874,97 @@ describe("PreviewPane — adaptive left column width", () => {
 			optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
 			expect(pane.naturalHeight(w)).toBe(pane.render(w).length);
 		}
+	});
+});
+
+describe("PreviewPane — inputMode (custom-answer full-width while typing)", () => {
+	// Single-select question WITH previews — without inputMode the pane renders side-by-side.
+	// With inputMode: true (focus on the "other" custom-answer row), the pane collapses to a
+	// single full-width option-list column: no side-by-side split, no preview block.
+	const previewQuestion: QuestionData = {
+		question: "pick",
+		header: "pick",
+		options: [
+			{ label: "A", description: "", preview: "alpha body" },
+			{ label: "B", description: "", preview: "beta body" },
+		],
+	};
+
+	function makePreviewPaneWithOther(getWidth: () => number = () => 120) {
+		const items: WrappingSelectItem[] = [
+			...previewQuestion.options.map((o) => ({
+				kind: "option" as const,
+				label: o.label,
+				description: o.description,
+			})),
+			{ kind: "other", label: "Type something." },
+		];
+		const optionListView = new OptionListView({ items, theme: selectTheme });
+		const previewBlock = new PreviewBlockRenderer({ question: previewQuestion, theme, markdownTheme });
+		const pane = new PreviewPane({
+			question: previewQuestion,
+			getTerminalWidth: getWidth,
+			optionListView,
+			previewBlock,
+		});
+		pane.setGlobalLeftWidth((w) => adaptiveLeftWidth(items, items.length, w));
+		return { pane, optionListView, items };
+	}
+
+	it("inputMode: true → render is a single full-width option list (no side-by-side split, no preview border)", () => {
+		const { pane, optionListView } = makePreviewPaneWithOther();
+		// Focus on the "other" row (index 2 = options.length) with a typed buffer.
+		pane.setProps({ notesVisible: false, selectedIndex: 2, focused: true, inputMode: true });
+		optionListView.setProps({ selectedIndex: 2, focused: true, inputBuffer: "custom text" });
+		const lines = pane.render(120);
+		// No preview markdown lines, no bordered-box top border.
+		expect(lines.some((l) => /MD\[\d+\]:/.test(l))).toBe(false);
+		expect(lines.some((l) => /┌─+┐/.test(l))).toBe(false);
+		// Byte-identical to the option list rendered at full width.
+		expect(lines).toEqual(optionListView.render(120));
+	});
+
+	it("inputMode: false → side-by-side layout renders as before (MD + border present; inputMode branch skipped)", () => {
+		const { pane, optionListView } = makePreviewPaneWithOther();
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true, inputMode: false });
+		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
+		const lines = pane.render(120);
+		expect(lines.some((l) => /MD\[\d+\]:/.test(l))).toBe(true);
+		expect(lines.some((l) => /┌─+┐/.test(l))).toBe(true);
+	});
+
+	it("inputMode: true → naturalHeight(w) === render(w).length and maxNaturalHeight(w) === render(w).length", () => {
+		const { pane, optionListView } = makePreviewPaneWithOther();
+		pane.setProps({ notesVisible: false, selectedIndex: 2, focused: true, inputMode: true });
+		optionListView.setProps({ selectedIndex: 2, focused: true, inputBuffer: "x".repeat(200) });
+		for (const w of [100, 120, 160]) {
+			expect(pane.naturalHeight(w)).toBe(pane.render(w).length);
+			expect(pane.maxNaturalHeight(w)).toBe(pane.render(w).length);
+			// Full-width option-list height, not a side-by-side max-of-column.
+			expect(pane.maxNaturalHeight(w)).toBe(optionListView.render(w).length);
+		}
+	});
+
+	it("inputMode: true → focusedItemRowRange computed at FULL width (matches the full-width option list)", () => {
+		const { pane, optionListView } = makePreviewPaneWithOther();
+		pane.setProps({ notesVisible: false, selectedIndex: 2, focused: true, inputMode: true });
+		optionListView.setProps({ selectedIndex: 2, focused: true, inputBuffer: "" });
+		const width = 120;
+		expect(pane.focusedItemRowRange(width)).toEqual(optionListView.focusedItemRowRange(width));
+	});
+
+	it("preview layout restored on nav-away (inputMode clears → side-by-side returns)", () => {
+		const { pane, optionListView } = makePreviewPaneWithOther();
+		// Typing on "other": full-width option list, no preview.
+		pane.setProps({ notesVisible: false, selectedIndex: 2, focused: true, inputMode: true });
+		optionListView.setProps({ selectedIndex: 2, focused: true, inputBuffer: "half-typed" });
+		const typingLines = pane.render(120);
+		expect(typingLines.some((l) => /MD\[\d+\]:/.test(l))).toBe(false);
+		// Navigate back to an option row: inputMode clears, side-by-side preview returns.
+		pane.setProps({ notesVisible: false, selectedIndex: 0, focused: true, inputMode: false });
+		optionListView.setProps({ selectedIndex: 0, focused: true, inputBuffer: "" });
+		const restoredLines = pane.render(120);
+		expect(restoredLines.some((l) => /MD\[\d+\]:/.test(l))).toBe(true);
+		expect(restoredLines.some((l) => /┌─+┐/.test(l))).toBe(true);
 	});
 });

@@ -1,7 +1,7 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { createMockPi, createMockUI } from "@juicesharp/rpiv-test-utils";
+import { createMockCtx, createMockPi, createMockUI } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __resetState, registerTodoTool } from "./todo.js";
+import { __resetState, registerTodoTool, setActiveRenderSession } from "./todo.js";
 import { TodoOverlay } from "./todo-overlay.js";
 
 const WIDGET_KEY = "rpiv-todos";
@@ -18,9 +18,11 @@ const identityTheme = {
 async function seed(captured: ReturnType<typeof createMockPi>["captured"], actions: unknown[]) {
 	const tool = captured.tools.get("todo");
 	if (!tool) throw new Error("todo tool not registered");
+	const ctx = createMockCtx();
 	for (const p of actions) {
-		await tool.execute?.("tc", p as never, undefined as never, undefined as never, {} as never);
+		await tool.execute?.("tc", p as never, undefined as never, undefined as never, ctx as never);
 	}
+	setActiveRenderSession("test-session");
 	return tool;
 }
 
@@ -99,7 +101,13 @@ describe("TodoOverlay — lifecycle", () => {
 		overlay.update();
 		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
 		// Delete → then hard-remove via "clear" to leave visibility list empty.
-		await tool.execute?.("tc", { action: "clear" } as never, undefined as never, undefined as never, {} as never);
+		await tool.execute?.(
+			"tc",
+			{ action: "clear" } as never,
+			undefined as never,
+			undefined as never,
+			createMockCtx() as never,
+		);
 		overlay.update();
 		expect(setWidget).toHaveBeenCalledTimes(2);
 		expect(setWidget.mock.calls[1]).toEqual([WIDGET_KEY, undefined]);
@@ -112,14 +120,20 @@ describe("TodoOverlay — lifecycle", () => {
 		const ui = makeCtx();
 		overlay.setUICtx(ui);
 		overlay.update();
-		await tool.execute?.("tc", { action: "clear" } as never, undefined as never, undefined as never, {} as never);
+		await tool.execute?.(
+			"tc",
+			{ action: "clear" } as never,
+			undefined as never,
+			undefined as never,
+			createMockCtx() as never,
+		);
 		overlay.update();
 		await tool.execute?.(
 			"tc",
 			{ action: "create", subject: "b" } as never,
 			undefined as never,
 			undefined as never,
-			{} as never,
+			createMockCtx() as never,
 		);
 		overlay.update();
 		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
@@ -171,11 +185,18 @@ describe("TodoOverlay — lifecycle", () => {
 		expect(setWidget).toHaveBeenCalledTimes(2);
 	});
 
-	it("factory invalidate() forces re-registration on next update()", async () => {
+	it("uses the current UI theme after invalidation without re-registering", async () => {
 		const { captured } = registerTool();
 		await seed(captured, [{ action: "create", subject: "a" }]);
 		const overlay = new TodoOverlay();
-		const ui = makeCtx();
+		const colorTheme = (label: string) => ({
+			...identityTheme,
+			fg: (color: string, text: string) => `<${label}:${color}>${text}</${label}:${color}>`,
+		});
+		const initialTheme = colorTheme("initial");
+		const factoryTheme = colorTheme("factory");
+		const switchedTheme = colorTheme("switched");
+		const ui = createMockUI({ theme: initialTheme }) as unknown as ExtensionUIContext;
 		overlay.setUICtx(ui);
 		overlay.update();
 		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
@@ -183,11 +204,20 @@ describe("TodoOverlay — lifecycle", () => {
 			tui: { requestRender: () => void },
 			theme: typeof identityTheme,
 		) => { render: (w: number) => string[]; invalidate: () => void };
-		const widget = factory({ requestRender: vi.fn() }, identityTheme);
+		const requestRender = vi.fn();
+		const widget = factory({ requestRender }, factoryTheme);
+
+		expect(widget.render(200).join("\n")).toContain("<initial:accent>");
+		expect(widget.render(200).join("\n")).not.toContain("<factory:");
+
+		Object.assign(ui, { theme: switchedTheme });
 		widget.invalidate();
+		expect(widget.render(200).join("\n")).toContain("<switched:accent>");
+		expect(overlay.isRegistered()).toBe(true);
+
 		overlay.update();
-		expect(setWidget).toHaveBeenCalledTimes(2);
-		expect(typeof setWidget.mock.calls[1][1]).toBe("function");
+		expect(setWidget).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	it("resetCompletedDisplayState() lets replayed completed tasks be shown once again", async () => {
@@ -226,12 +256,80 @@ describe("TodoOverlay — lifecycle", () => {
 			{ action: "update", id: 1, status: "deleted" } as never,
 			undefined as never,
 			undefined as never,
-			{} as never,
+			createMockCtx() as never,
 		);
 		const overlay = new TodoOverlay();
 		const ui = makeCtx();
 		overlay.setUICtx(ui);
 		overlay.update();
 		expect(ui.setWidget as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+	});
+});
+
+describe("TodoOverlay — collapse/expand state", () => {
+	async function setupRegistered() {
+		const { captured } = registerTool();
+		await seed(captured, [
+			{ action: "create", subject: "a" },
+			{ action: "create", subject: "b" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		const overlay = new TodoOverlay();
+		const ui = makeCtx();
+		overlay.setUICtx(ui);
+		overlay.update();
+		const setWidget = ui.setWidget as ReturnType<typeof vi.fn>;
+		const factory = setWidget.mock.calls[0][1] as (
+			tui: { requestRender: (...args: unknown[]) => void },
+			theme: typeof identityTheme,
+		) => { render: (w: number) => string[]; invalidate: () => void };
+		const requestRender = vi.fn();
+		const widget = factory({ requestRender }, identityTheme);
+		return { overlay, widget, requestRender, tool: captured.tools.get("todo")! };
+	}
+
+	it("a new TodoOverlay starts with collapsed = false (renders the full view, not the 3-line collapsed shape)", async () => {
+		const { widget } = await setupRegistered();
+		// Full render: heading + 1 remaining task + trailing spacer = 3 visible-ish
+		// rows — but crucially NOT the collapsed "└─ ctrl+shift+t to expand" hint.
+		const out = widget.render(200).join("\n");
+		expect(out).not.toContain("ctrl+shift+t to expand");
+	});
+
+	it("toggleCollapse() flips collapsed and calls requestRender(true) (forced, distinct from the non-forced requestRender())", async () => {
+		const { overlay, widget, requestRender } = await setupRegistered();
+		// Collapse → toggles to collapsed and forces a redraw.
+		overlay.toggleCollapse();
+		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(widget.render(200).some((l) => l.includes("ctrl+shift+t to expand"))).toBe(true);
+
+		requestRender.mockClear();
+		// Expand → toggles back to expanded and forces a redraw again.
+		overlay.toggleCollapse();
+		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(widget.render(200).some((l) => l.includes("ctrl+shift+t to expand"))).toBe(false);
+	});
+
+	it("isRegistered() reflects the widget registration state", async () => {
+		const overlay = new TodoOverlay();
+		expect(overlay.isRegistered()).toBe(false);
+		const { captured } = registerTool();
+		await seed(captured, [{ action: "create", subject: "a" }]);
+		const ui = makeCtx();
+		overlay.setUICtx(ui);
+		overlay.update();
+		expect(overlay.isRegistered()).toBe(true);
+		overlay.dispose();
+		expect(overlay.isRegistered()).toBe(false);
+	});
+
+	it("resetCompletedDisplayState() does NOT reset collapsed", async () => {
+		const { overlay, widget } = await setupRegistered();
+		overlay.toggleCollapse(); // collapsed = true
+		expect(widget.render(200).some((l) => l.includes("ctrl+shift+t to expand"))).toBe(true);
+		// resetCompletedDisplayState clears the completed-display bookkeeping but
+		// must leave the ephemeral `collapsed` flag alone (the "respect collapsed" seam).
+		overlay.resetCompletedDisplayState();
+		expect(widget.render(200).some((l) => l.includes("ctrl+shift+t to expand"))).toBe(true);
 	});
 });

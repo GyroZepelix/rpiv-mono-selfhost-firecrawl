@@ -7,6 +7,79 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- Package card cover on pi.dev: `package.json` now declares `pi.image` pointing at the package's `docs/cover.png`.
+
+### Changed
+
+- `readConfig` now degrades per field on a schema violation instead of returning an empty config: only the offending paths are dropped (schema-driven via `Value.Errors`), so one wrong-typed leaf — e.g. `guidance.web_search.description` after its enrollment in the shared `GuidanceFieldsSchema` — no longer wipes provider, API keys, base URLs, interceptors and guidance for the session (or on disk via the next `/web-tools` save). An empty config remains the floor when nothing salvageable is left; unknown-key pass-through is unchanged.
+
+## [2.6.0] - 2026-08-15
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+## [2.1.0] - 2026-07-23
+
+### Changed
+- README rewritten to follow the documentation standard shared across all packages.
+- npm tarball now includes the versioned `docs/` reference and no longer ships cover or screenshot art.
+
+## [2.0.0] - 2026-07-21
+
+### Added
+- Add optional `provider` parameter to `web_search` to target a different search backend for a single call without changing the saved provider.
+- Add `WEB_SEARCH_PROVIDER` environment variable to pin the active search provider; a per-call override still takes precedence, and unknown names fail only when a search actually runs.
+- Read configuration from `XDG_CONFIG_HOME` when set, falling back to the legacy `~/.config` location only when no config file exists at the new path.
+
+### Fixed
+- Raise the Exa fetch character limit to match the live API, so `web_fetch` now detects truncation and saves the full content to a recoverable temp file.
+- Register tools correctly under installers that do not materialize peer dependencies.
+- Exclude test files from the published package so standalone installs no longer fail on a missing private test dependency.
+
+## [1.20.0] - 2026-06-15
+
+### Fixed
+- Jina search now handles the Search API returning `data` as a direct array (not just a `{ data: [...] }` envelope), so `web_search` no longer yields zero results against that response shape (#73).
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
 ### Changed
 - Drop Notes column from the providers table in the README.
 

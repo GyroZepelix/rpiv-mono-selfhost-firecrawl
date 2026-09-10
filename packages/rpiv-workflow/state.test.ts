@@ -3,18 +3,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	appendHeader,
+	appendLoopCap,
+	appendRoutingDecision,
 	appendStage,
 	generateRunId,
+	type LoopCapRow,
 	listArtifacts,
 	listRuns,
+	type RunRecap,
 	readAllStages,
+	readAllStagesForResume,
 	readHeader,
 	readLastStage,
+	readLoopCaps,
 	runsDir,
 	stateFilePath,
+	summarizeRun,
 	type WorkflowHeader,
 	type WorkflowStage,
-	writeHeader,
 } from "./state/index.js";
 
 let tmpDir: string;
@@ -63,7 +70,7 @@ describe("runsDir / stateFilePath", () => {
 	});
 });
 
-describe("writeHeader + readAllStages + readLastStage", () => {
+describe("appendHeader + readAllStages + readLastStage", () => {
 	it("writes header and reads it back as not-a-stage", () => {
 		const header: WorkflowHeader = {
 			runId: "2026-05-20_15-30-45",
@@ -71,14 +78,14 @@ describe("writeHeader + readAllStages + readLastStage", () => {
 			input: "Add dark mode",
 			ts: "2026-05-20T15:30:45-0400",
 		};
-		writeHeader(tmpDir, header);
+		appendHeader(tmpDir, header);
 		expect(readAllStages(tmpDir, header.runId)).toEqual([]);
 		expect(readLastStage(tmpDir, header.runId)).toBeUndefined();
 	});
 
 	it("appends stages and reads them back", () => {
 		const runId = "2026-05-20_15-30-45";
-		writeHeader(tmpDir, {
+		appendHeader(tmpDir, {
 			runId,
 			workflow: "mid",
 			input: "test",
@@ -86,6 +93,7 @@ describe("writeHeader + readAllStages + readLastStage", () => {
 		});
 
 		const stage1: WorkflowStage = {
+			session: null,
 			stageNumber: 1,
 			stage: "discover",
 			skill: "discover",
@@ -93,6 +101,7 @@ describe("writeHeader + readAllStages + readLastStage", () => {
 			ts: "2026-05-20T15:31:00-0400",
 		};
 		const stage2: WorkflowStage = {
+			session: null,
 			stageNumber: 2,
 			stage: "research",
 			skill: "research",
@@ -113,7 +122,7 @@ describe("writeHeader + readAllStages + readLastStage", () => {
 
 	it("records failed stage with no artifact", () => {
 		const runId = "2026-05-20_15-30-45";
-		writeHeader(tmpDir, {
+		appendHeader(tmpDir, {
 			runId,
 			workflow: "mid",
 			input: "test",
@@ -121,6 +130,7 @@ describe("writeHeader + readAllStages + readLastStage", () => {
 		});
 
 		const failed: WorkflowStage = {
+			session: null,
 			stageNumber: 3,
 			stage: "design",
 			skill: "design",
@@ -135,6 +145,80 @@ describe("writeHeader + readAllStages + readLastStage", () => {
 	});
 });
 
+describe("loop-cap rows + unit-identity fields", () => {
+	it("round-trips a loop-cap row via appendLoopCap → readLoopCaps", () => {
+		const runId = "2026-05-20_15-30-45";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		const row: LoopCapRow = { type: "loop-cap", stage: "breakdown", count: 5, max: 5, ts: "2026" };
+		expect(appendLoopCap(tmpDir, runId, row)).toBe(true);
+		expect(readLoopCaps(tmpDir, runId)).toEqual([row]);
+	});
+
+	it("stage readers skip loop-cap rows (shape-discriminated, not positional)", () => {
+		const runId = "skip-loop-cap";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		const stage: WorkflowStage = {
+			session: null,
+			stageNumber: 1,
+			stage: "breakdown",
+			skill: "breakdown",
+			status: "completed",
+			ts: "2026",
+		};
+		appendStage(tmpDir, runId, stage);
+		appendLoopCap(tmpDir, runId, { type: "loop-cap", stage: "breakdown", count: 8, max: 8, ts: "2026" });
+
+		// readAllStages / readLastStage skip the loop-cap row untouched.
+		expect(readAllStages(tmpDir, runId)).toEqual([stage]);
+		expect(readLastStage(tmpDir, runId)).toEqual(stage);
+		// readLoopCaps only sees the cap row, never the stage row.
+		expect(readLoopCaps(tmpDir, runId)).toEqual([
+			{ type: "loop-cap", stage: "breakdown", count: 8, max: 8, ts: "2026" },
+		]);
+	});
+
+	it("rows carrying the four unit-identity fields round-trip through readAllStages", () => {
+		const runId = "unit-fields";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		const unitRow: WorkflowStage = {
+			session: null,
+			stageNumber: 4,
+			stage: "implement (phase-2)",
+			skill: "implement",
+			status: "completed",
+			ts: "2026",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-2",
+			unitIndex: 1,
+		};
+		appendStage(tmpDir, runId, unitRow);
+		// isWorkflowStage filters on stageNumber + stage only, so the unit row passes
+		// through unchanged with all four structured fields intact.
+		expect(readAllStages(tmpDir, runId)).toEqual([unitRow]);
+	});
+
+	it("preserves unit-identity fields on a failure row", () => {
+		const runId = "unit-failure";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		const failed: WorkflowStage = {
+			session: null,
+			stageNumber: 2,
+			stage: "implement (phase-3)",
+			skill: "implement",
+			status: "failed",
+			ts: "2026",
+			errMsg: "implement failed",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-3",
+			unitIndex: 2,
+		};
+		appendStage(tmpDir, runId, failed);
+		expect(readLastStage(tmpDir, runId)).toEqual(failed);
+	});
+});
+
 describe("fail-soft I/O", () => {
 	it("readLastStage returns undefined for missing file", () => {
 		expect(readLastStage(tmpDir, "nonexistent")).toBeUndefined();
@@ -144,9 +228,9 @@ describe("fail-soft I/O", () => {
 		expect(readAllStages(tmpDir, "nonexistent")).toEqual([]);
 	});
 
-	it("writeHeader does not throw on impossible path", () => {
+	it("appendHeader does not throw on impossible path", () => {
 		expect(() =>
-			writeHeader("/dev/null/impossible", {
+			appendHeader("/dev/null/impossible", {
 				runId: "test",
 				workflow: "mid",
 				input: "x",
@@ -158,6 +242,7 @@ describe("fail-soft I/O", () => {
 	it("appendStage does not throw on impossible path", () => {
 		expect(() =>
 			appendStage("/dev/null/impossible", "test", {
+				session: null,
 				stageNumber: 1,
 				stage: "discover",
 				skill: "discover",
@@ -172,6 +257,7 @@ describe("fail-soft I/O", () => {
 		try {
 			expect(
 				appendStage("/dev/null/impossible", "test", {
+					session: null,
 					stageNumber: 1,
 					stage: "discover",
 					skill: "discover",
@@ -181,6 +267,7 @@ describe("fail-soft I/O", () => {
 			).toBe(false);
 			expect(
 				appendStage(tmpDir, "ok-run", {
+					session: null,
 					stageNumber: 1,
 					stage: "discover",
 					skill: "discover",
@@ -195,7 +282,7 @@ describe("fail-soft I/O", () => {
 
 	it("readLastStage logs warning on corrupted file", () => {
 		const runId = "corrupt-test";
-		writeHeader(tmpDir, { runId, workflow: "mid", input: "test", ts: "2026" });
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "test", ts: "2026" });
 		appendFileSync(stateFilePath(tmpDir, runId), "NOT-JSON\n", "utf-8");
 
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -208,21 +295,29 @@ describe("fail-soft I/O", () => {
 	});
 
 	it("a corrupt trailing line does NOT erase prior rows (per-line resilience)", () => {
-		// Closes I1: pre-fix, a single malformed line at the tail (truncated
+		// Previously, a single malformed line at the tail (truncated
 		// `appendFileSync`, ENOSPC, network FS hiccup) made readJsonlRows
 		// swallow the entire parse error in its outer try/catch and return
 		// []. Every successfully-written prior row vanished from the reader's
 		// view. Now each line parses in its own try/catch.
 		const runId = "partial-write";
-		writeHeader(tmpDir, { runId, workflow: "mid", input: "test", ts: "2026" });
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "test", ts: "2026" });
 		appendStage(tmpDir, runId, {
+			session: null,
 			stageNumber: 1,
 			stage: "research",
 			skill: "research",
 			status: "completed",
 			ts: "2026",
 		});
-		appendStage(tmpDir, runId, { stageNumber: 2, stage: "design", skill: "design", status: "completed", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "design",
+			skill: "design",
+			status: "completed",
+			ts: "2026",
+		});
 		// Simulate a truncated trailing line (e.g. process killed mid-append).
 		appendFileSync(stateFilePath(tmpDir, runId), '{"stageNumber":3,"skill":"impl', "utf-8");
 
@@ -245,7 +340,7 @@ describe("readHeader", () => {
 	it("returns the header for a run whose JSONL file exists", () => {
 		const runId = "header-roundtrip";
 		const header: WorkflowHeader = { runId, workflow: "mid", input: "x", ts: "2026-05-25T10:00:00Z" };
-		writeHeader(tmpDir, header);
+		appendHeader(tmpDir, header);
 		expect(readHeader(tmpDir, runId)).toEqual(header);
 	});
 
@@ -279,7 +374,7 @@ describe("readHeader", () => {
 			},
 		];
 		for (const header of cases) {
-			writeHeader(tmpDir, header);
+			appendHeader(tmpDir, header);
 			expect(readHeader(tmpDir, header.runId)).toEqual(header);
 		}
 	});
@@ -304,8 +399,9 @@ describe("readHeader", () => {
 
 	it("returns undefined when the first line is not a valid header", () => {
 		const runId = "bad-first-line";
-		// Skip writeHeader — append a stage row first so the first line lacks header fields.
+		// Skip appendHeader — append a stage row first so the first line lacks header fields.
 		appendStage(tmpDir, runId, {
+			session: null,
 			stageNumber: 1,
 			stage: "research",
 			skill: "research",
@@ -332,8 +428,8 @@ describe("listRuns", () => {
 			input: "second",
 			ts: "2026-05-25T11:00:00Z",
 		};
-		writeHeader(tmpDir, headerA);
-		writeHeader(tmpDir, headerB);
+		appendHeader(tmpDir, headerA);
+		appendHeader(tmpDir, headerB);
 
 		const runs = listRuns(tmpDir);
 		const byId = Object.fromEntries(runs.map((r) => [r.runId, r]));
@@ -347,7 +443,7 @@ describe("listRuns", () => {
 	});
 
 	it("silently skips files whose first line is not a valid header", () => {
-		writeHeader(tmpDir, { runId: "good", workflow: "mid", input: "ok", ts: "2026" });
+		appendHeader(tmpDir, { runId: "good", workflow: "mid", input: "ok", ts: "2026" });
 		// Manually write a malformed run file alongside the good one.
 		appendFileSync(stateFilePath(tmpDir, "bad"), "NOT-JSON\n", "utf-8");
 		const runs = listRuns(tmpDir);
@@ -355,21 +451,21 @@ describe("listRuns", () => {
 	});
 
 	it("ignores non-.jsonl entries in the workflows directory", () => {
-		writeHeader(tmpDir, { runId: "good", workflow: "mid", input: "ok", ts: "2026" });
+		appendHeader(tmpDir, { runId: "good", workflow: "mid", input: "ok", ts: "2026" });
 		appendFileSync(join(runsDir(tmpDir), "stray.txt"), "ignore me\n", "utf-8");
 		const runs = listRuns(tmpDir);
 		expect(runs.map((r) => r.runId)).toEqual(["good"]);
 	});
 
 	it("projects trigger from header to RunSummary", () => {
-		writeHeader(tmpDir, {
+		appendHeader(tmpDir, {
 			runId: "with-trigger",
 			workflow: "mid",
 			input: "x",
 			ts: "2026",
 			trigger: { kind: "external", source: "cron", ref: "0 9 * * *" },
 		});
-		writeHeader(tmpDir, { runId: "without-trigger", workflow: "mid", input: "x", ts: "2026" });
+		appendHeader(tmpDir, { runId: "without-trigger", workflow: "mid", input: "x", ts: "2026" });
 		const byId = Object.fromEntries(listRuns(tmpDir).map((r) => [r.runId, r]));
 		expect(byId["with-trigger"]?.trigger).toEqual({ kind: "external", source: "cron", ref: "0 9 * * *" });
 		expect(byId["without-trigger"]?.trigger).toBeUndefined();
@@ -386,8 +482,9 @@ describe("listArtifacts", () => {
 
 	it("projects every artifact across stage rows (one entry per artifact, in stage order)", () => {
 		const runId = "artifacts-run";
-		writeHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
 		appendStage(tmpDir, runId, {
+			session: null,
 			stageNumber: 1,
 			stage: "research",
 			skill: "research",
@@ -396,8 +493,16 @@ describe("listArtifacts", () => {
 			output: mkOutput([{ kind: "fs", path: ".rpiv/artifacts/research/r.md" }]),
 		});
 		// Stage without artifacts — should NOT appear in the list.
-		appendStage(tmpDir, runId, { stageNumber: 2, stage: "commit", skill: "commit", status: "completed", ts: "2026" });
 		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "commit",
+			skill: "commit",
+			status: "completed",
+			ts: "2026",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
 			stageNumber: 3,
 			stage: "design",
 			skill: "design",
@@ -422,8 +527,781 @@ describe("listArtifacts", () => {
 
 	it("returns an empty array when no stage row carries an artifact", () => {
 		const runId = "no-artifacts";
-		writeHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
-		appendStage(tmpDir, runId, { stageNumber: 1, stage: "commit", skill: "commit", status: "completed", ts: "2026" });
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "commit",
+			skill: "commit",
+			status: "completed",
+			ts: "2026",
+		});
 		expect(listArtifacts(tmpDir, runId)).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Deep stage guard + resume-grade strict reader
+// ---------------------------------------------------------------------------
+
+describe("deep stage guard + readAllStagesForResume", () => {
+	const runId = "t9-run";
+	const seed = () => {
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "plan",
+			skill: "plan",
+			status: "completed",
+			ts: "t1",
+		});
+	};
+	const appendRaw = (row: Record<string, unknown>) =>
+		appendFileSync(stateFilePath(tmpDir, runId), `${JSON.stringify(row)}\n`, "utf-8");
+
+	it("readAllStages SKIPS a row whose status is outside the enum; the strict reader REFUSES", () => {
+		seed();
+		appendRaw({ stageNumber: 2, stage: "build", skill: "build", status: "exploded", ts: "t2" });
+
+		expect(readAllStages(tmpDir, runId).map((s) => s.stage)).toEqual(["plan"]);
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(false);
+		if (strict.ok) return;
+		expect(strict.detail).toContain('stage row 2 ("build")');
+	});
+
+	it("refuses a row whose output lacks an artifacts array (downstream indexes it)", () => {
+		seed();
+		appendRaw({ stageNumber: 2, stage: "build", status: "completed", ts: "t2", output: "oops" });
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(false);
+	});
+
+	it("refuses a unit row (parent set) missing its numeric unitIndex (the drift guard compares it)", () => {
+		seed();
+		appendRaw({ stageNumber: 2, stage: "build (u1)", status: "completed", ts: "t2", parent: "build" });
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(false);
+	});
+
+	it("non-stage rows (header / routing / loop-cap) never trip the strict reader", () => {
+		seed();
+		appendRaw({ type: "routing", fromStageIndex: 1, fromStage: "plan", decision: "build", ts: "t2" });
+		appendRaw({ type: "loop-cap", stage: "build", count: 3, max: 3, ts: "t3" });
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(true);
+		if (!strict.ok) return;
+		expect(strict.rows.map((s) => s.stage)).toEqual(["plan"]);
+		// A non-stop routing row is pure telemetry — never a separator.
+		expect(strict.stopBefore.size).toBe(0);
+	});
+
+	it("stopBefore maps a routed stop to the FOLLOWING stage row's index; a trailing stop stays unmapped", () => {
+		seed();
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 1,
+			fromStage: "plan",
+			decision: "stop",
+			note: "gate failed",
+			ts: "t2",
+		});
+		// The halt row a gate stop appends behind its routing row (rows[1]).
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "plan",
+			status: "failed",
+			ts: "t3",
+			errMsg: "gate failed",
+		});
+		// A trailing stop with no stage row behind it (the noteless-stop
+		// completion) must NOT be recorded — the finished-run resume stays a no-op.
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 2,
+			fromStage: "plan",
+			decision: "stop",
+			ts: "t4",
+		});
+
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(true);
+		if (!strict.ok) return;
+		expect(strict.rows).toHaveLength(2);
+		expect([...strict.stopBefore.keys()]).toEqual([1]);
+		expect(strict.stopBefore.get(1)?.note).toBe("gate failed");
+	});
+
+	it("REFUSES a pre-feature row missing the session key; readAllStages stays lenient", () => {
+		seed();
+		// A row written before session provenance existed — no `session` key.
+		appendRaw({ stageNumber: 2, stage: "build", skill: "build", status: "completed", ts: "t2" });
+
+		// Display reader keeps rendering the row (shape-filter on stageNumber).
+		expect(readAllStages(tmpDir, runId).map((s) => s.stage)).toEqual(["plan", "build"]);
+		// Resume reader refuses — the fold must not replay provenance-less rows.
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(false);
+		if (strict.ok) return;
+		expect(strict.detail).toContain('stage row 2 ("build")');
+	});
+
+	it("refuses a session object missing its id; accepts null and { id }", () => {
+		seed();
+		appendStage(tmpDir, runId, {
+			stageNumber: 2,
+			stage: "build",
+			skill: "build",
+			status: "completed",
+			ts: "t2",
+			session: { id: "sess-1", file: "/tmp/x.jsonl", branchOffset: 4 },
+		});
+		expect(readAllStagesForResume(tmpDir, runId).ok).toBe(true);
+
+		// An orphan file/branchOffset without an id is malformed.
+		appendRaw({ stageNumber: 3, stage: "deploy", status: "completed", ts: "t3", session: { file: "/tmp/x.jsonl" } });
+		expect(readAllStagesForResume(tmpDir, runId).ok).toBe(false);
+	});
+
+	it("round-trips the SessionRef value verbatim (wire shape = domain shape)", () => {
+		seed();
+		const ref = { id: "sess-1", file: "/tmp/sessions/a_sess-1.jsonl", branchOffset: 7 };
+		appendStage(tmpDir, runId, {
+			stageNumber: 2,
+			stage: "build",
+			skill: "build",
+			status: "completed",
+			ts: "t2",
+			session: ref,
+		});
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(true);
+		if (!strict.ok) return;
+		expect(strict.rows[1]?.session).toEqual(ref);
+		expect(strict.rows[0]?.session).toBeNull();
+	});
+
+	it("a clean trail round-trips identically through both readers", () => {
+		seed();
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "build (u1)",
+			skill: "build",
+			status: "failed",
+			ts: "t2",
+			errMsg: "boom",
+			parent: "build",
+			role: "produce",
+			unitId: "u1",
+			unitIndex: 0,
+		});
+		const strict = readAllStagesForResume(tmpDir, runId);
+		expect(strict.ok).toBe(true);
+		if (!strict.ok) return;
+		expect(strict.rows).toEqual(readAllStages(tmpDir, runId));
+		expect(strict.rows).toHaveLength(2);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// summarizeRun — terminal-state projection (post-mortem recap)
+// ---------------------------------------------------------------------------
+
+describe("summarizeRun", () => {
+	const mkOutput = (artifacts: Array<{ kind: "fs"; path: string }>) => ({
+		kind: "artifact-md",
+		artifacts: artifacts.map((handle) => ({ handle })),
+		data: {},
+		meta: { stage: "x", skill: "x", stageNumber: 1, ts: "2026", runId: "x" },
+	});
+
+	it("returns undefined for a missing run file (no stage row ⇒ outcome unrecoverable)", () => {
+		expect(summarizeRun(tmpDir, "nonexistent")).toBeUndefined();
+	});
+
+	it("returns undefined for a header-only trail (no stage rows)", () => {
+		const runId = "header-only";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		expect(summarizeRun(tmpDir, runId)).toBeUndefined();
+	});
+
+	it("returns undefined for an empty trail", () => {
+		const runId = "empty-trail";
+		mkdirSync(runsDir(tmpDir), { recursive: true });
+		appendFileSync(stateFilePath(tmpDir, runId), "", "utf-8");
+		expect(summarizeRun(tmpDir, runId)).toBeUndefined();
+	});
+
+	it("projects a completed run: outcome completed, no failureReason, workflow from header", () => {
+		const runId = "completed-run";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "plan",
+			skill: "plan",
+			status: "completed",
+			ts: "t1",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "completed",
+			artifacts: [],
+			workflow: "mid",
+		} satisfies RunRecap);
+	});
+
+	it("refines a trail ending in a routed stop to outcome 'stopped' with the routing note as failureReason", () => {
+		// The stop-on-fail shape: the gate's stage row completes, the edge routes
+		// "stop", and the routing row is the trail's LAST row — the runner reports
+		// "completed", but the recap must not read as a success.
+		const runId = "routed-stop-note";
+		appendHeader(tmpDir, { runId, workflow: "ship", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 5,
+			stage: "grade (plans-dim-completeness)",
+			skill: "grade",
+			status: "completed",
+			ts: "t1",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 5,
+			fromStage: "grade",
+			decision: "stop",
+			note: "completeness failed (medium)",
+			ts: "t2",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "stopped",
+			artifacts: [],
+			workflow: "ship",
+			failureReason: "stopped at grade: completeness failed (medium)",
+		} satisfies RunRecap);
+	});
+
+	it("routed stop without a note still names the stopping stage", () => {
+		const runId = "routed-stop-bare";
+		appendHeader(tmpDir, { runId, workflow: "ship", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 4,
+			stage: "plan-cite-check",
+			status: "completed",
+			ts: "t1",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 4,
+			fromStage: "plan-cite-check",
+			decision: "stop",
+			ts: "t2",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "stopped",
+			artifacts: [],
+			workflow: "ship",
+			failureReason: "stopped at plan-cite-check",
+		} satisfies RunRecap);
+	});
+
+	it("intermediate routing rows do NOT refine a naturally-completed run", () => {
+		// A pass-through decision ("grade") mid-trail, then the terminal stage row
+		// — the routing row is not the tail, so the outcome stays "completed".
+		const runId = "routing-mid-trail";
+		appendHeader(tmpDir, { runId, workflow: "ship", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 4,
+			stage: "plan-cite-check",
+			status: "completed",
+			ts: "t1",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 4,
+			fromStage: "plan-cite-check",
+			decision: "grade",
+			ts: "t2",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 5,
+			stage: "commit",
+			skill: "commit",
+			status: "completed",
+			ts: "t3",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "completed",
+			artifacts: [],
+			workflow: "ship",
+		} satisfies RunRecap);
+	});
+
+	it("projects note-bearing FORWARD routing rows onto routingNotes in trail order", () => {
+		// Two gates explained themselves mid-run (the pass-through floors); both
+		// notes ride the recap verbatim, in the order they were decided — on EVERY
+		// outcome (completed here; a failed tail would keep them too).
+		const runId = "routing-notes-forward";
+		appendHeader(tmpDir, { runId, workflow: "build", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 4,
+			stage: "implement-scope-check",
+			status: "completed",
+			ts: "t1",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 4,
+			fromStage: "implement-scope-check",
+			decision: "reconcile",
+			note: "pass-through: implement-scope-check defers to validate",
+			ts: "t2",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 5,
+			stage: "validate",
+			skill: "validate",
+			status: "completed",
+			ts: "t3",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 5,
+			fromStage: "validate",
+			decision: "commit",
+			note: "second hop note",
+			ts: "t4",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 6,
+			stage: "commit",
+			skill: "commit",
+			status: "completed",
+			ts: "t5",
+		});
+		expect(summarizeRun(tmpDir, runId)?.routingNotes).toEqual([
+			"pass-through: implement-scope-check defers to validate",
+			"second hop note",
+		]);
+	});
+
+	it("excludes the stop row's note from routingNotes (the stopped refinement owns its single rendering)", () => {
+		// A forward note-bearing row PLUS a trailing stop row: routingNotes carries
+		// ONLY the forward note — the stop's note renders once, as failureReason.
+		const runId = "routing-notes-stop-excluded";
+		appendHeader(tmpDir, { runId, workflow: "build", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 4,
+			stage: "implement-scope-check",
+			status: "completed",
+			ts: "t1",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 4,
+			fromStage: "implement-scope-check",
+			decision: "reconcile",
+			note: "pass-through: implement-scope-check defers to validate",
+			ts: "t2",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 5,
+			stage: "grade (plans-dim-completeness)",
+			skill: "grade",
+			status: "completed",
+			ts: "t3",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 5,
+			fromStage: "grade",
+			decision: "stop",
+			note: "completeness failed (medium)",
+			ts: "t4",
+		});
+		const recap = summarizeRun(tmpDir, runId);
+		expect(recap?.outcome).toBe("stopped");
+		expect(recap?.failureReason).toBe("stopped at grade: completeness failed (medium)");
+		expect(recap?.routingNotes).toEqual(["pass-through: implement-scope-check defers to validate"]);
+	});
+
+	it("routingNotes is absent (never []) when no forward row carries a note", () => {
+		// A note-less forward row contributes nothing — the projected recap stays
+		// byte-identical to the pre-§1.5 shape (no routingNotes key at all).
+		const runId = "routing-notes-none";
+		appendHeader(tmpDir, { runId, workflow: "ship", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 4,
+			stage: "plan-cite-check",
+			status: "completed",
+			ts: "t1",
+		});
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 4,
+			fromStage: "plan-cite-check",
+			decision: "grade",
+			ts: "t2",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 5,
+			stage: "commit",
+			skill: "commit",
+			status: "completed",
+			ts: "t3",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "completed",
+			artifacts: [],
+			workflow: "ship",
+		} satisfies RunRecap);
+	});
+
+	it("a failed stage row after routing rows keeps outcome 'failed' (refinement never touches a non-completed tail)", () => {
+		const runId = "failed-after-routing";
+		appendHeader(tmpDir, { runId, workflow: "ship", input: "x", ts: "2026" });
+		appendRoutingDecision(tmpDir, runId, {
+			type: "routing",
+			fromStageIndex: 4,
+			fromStage: "plan-cite-check",
+			decision: "grade",
+			ts: "t1",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 5,
+			stage: "grade",
+			skill: "grade",
+			status: "failed",
+			ts: "t2",
+			errMsg: "grade exploded",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "failed",
+			artifacts: [],
+			workflow: "ship",
+			failureReason: "grade exploded",
+		} satisfies RunRecap);
+	});
+
+	it("translates on-disk status 'skipped' to recap outcome 'cancelled' with its errMsg as failureReason", () => {
+		const runId = "cancelled-run";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "plan",
+			skill: "plan",
+			status: "skipped",
+			ts: "t1",
+			errMsg: "cancelled by user",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "cancelled",
+			artifacts: [],
+			workflow: "mid",
+			failureReason: "cancelled by user",
+		} satisfies RunRecap);
+	});
+
+	it("projects a failed run: outcome failed with the last row's errMsg as failureReason", () => {
+		const runId = "failed-run";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "plan",
+			skill: "plan",
+			status: "completed",
+			ts: "t1",
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "build",
+			skill: "build",
+			status: "failed",
+			ts: "t2",
+			errMsg: "build exploded",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "failed",
+			artifacts: [],
+			workflow: "mid",
+			failureReason: "build exploded",
+		} satisfies RunRecap);
+	});
+
+	it("projects an aborted run: outcome aborted with the last row's errMsg as failureReason", () => {
+		const runId = "aborted-run";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "build",
+			skill: "build",
+			status: "aborted",
+			ts: "t1",
+			errMsg: "aborted: watchdog",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "aborted",
+			artifacts: [],
+			workflow: "mid",
+			failureReason: "aborted: watchdog",
+		} satisfies RunRecap);
+	});
+
+	it("projects artifacts in trail order including artifacts from stages that completed before a later failure", () => {
+		const runId = "artifacts-trail";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "research",
+			skill: "research",
+			status: "completed",
+			ts: "t1",
+			output: mkOutput([{ kind: "fs", path: ".rpiv/artifacts/research/r.md" }]),
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "design",
+			skill: "design",
+			status: "completed",
+			ts: "t2",
+			output: mkOutput([
+				{ kind: "fs", path: ".rpiv/artifacts/design/d1.md" },
+				{ kind: "fs", path: ".rpiv/artifacts/design/d2.md" },
+			]),
+		});
+		// A later failure — the prior stages' artifacts are still surfaced
+		// (listArtifacts does not filter on status === "completed").
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 3,
+			stage: "build",
+			skill: "build",
+			status: "failed",
+			ts: "t3",
+			errMsg: "build failed",
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "failed",
+			artifacts: [".rpiv/artifacts/research/r.md", ".rpiv/artifacts/design/d1.md", ".rpiv/artifacts/design/d2.md"],
+			workflow: "mid",
+			failureReason: "build failed",
+		} satisfies RunRecap);
+	});
+
+	it("reads a collected:true halt as completed with no failureReason (non-terminal collect-all)", () => {
+		const runId = "collected-halt";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		// An earlier completed unit carrying an artifact — still surfaced in the recap.
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "implement (phase-1)",
+			skill: "implement",
+			status: "completed",
+			ts: "t1",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-1",
+			unitIndex: 0,
+			output: mkOutput([{ kind: "fs", path: ".rpiv/artifacts/implement/p1.md" }]),
+		});
+		// The LAST row is a collected:true halt — byte-identical to a hard
+		// recordFatalFailure row except for the marker. The run survived the
+		// halted unit, so the recap reads "completed" and carries NO
+		// failureReason despite the halt row's errMsg.
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "implement (phase-2)",
+			skill: "implement",
+			status: "failed",
+			ts: "t2",
+			errMsg: "unit halted: collect-all soft-stop",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-2",
+			unitIndex: 1,
+			collected: true,
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "completed",
+			artifacts: [".rpiv/artifacts/implement/p1.md"],
+			workflow: "mid",
+		} satisfies RunRecap);
+	});
+
+	it("reads multiple trailing collected halts as completed", () => {
+		const runId = "multi-collected-halt";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "implement (phase-1)",
+			skill: "implement",
+			status: "completed",
+			ts: "t1",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-1",
+			unitIndex: 0,
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "implement (phase-2)",
+			skill: "implement",
+			status: "failed",
+			ts: "t2",
+			errMsg: "halted",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-2",
+			unitIndex: 1,
+			collected: true,
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 3,
+			stage: "implement (phase-3)",
+			skill: "implement",
+			status: "failed",
+			ts: "t3",
+			errMsg: "halted",
+			parent: "implement",
+			role: "produce",
+			unitId: "phase-3",
+			unitIndex: 2,
+			collected: true,
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "completed",
+			artifacts: [],
+			workflow: "mid",
+		} satisfies RunRecap);
+	});
+
+	it("reads a trailing PARENT-attributed failed row (no collected) as failed with its failureReason (the haltWhenAllFailed halt shape)", () => {
+		const runId = "halt-when-all-failed";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		// Earlier collected soft-halt unit rows — non-terminal; the run survived them.
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "design (slice-1)",
+			skill: "design",
+			status: "failed",
+			ts: "t1",
+			errMsg: "unit halted: collect-all soft-stop",
+			parent: "design",
+			role: "produce",
+			unitId: "slice-1",
+			unitIndex: 0,
+			collected: true,
+		});
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 2,
+			stage: "design (slice-2)",
+			skill: "design",
+			status: "failed",
+			ts: "t2",
+			errMsg: "unit halted: collect-all soft-stop",
+			parent: "design",
+			role: "produce",
+			unitId: "slice-2",
+			unitIndex: 1,
+			collected: true,
+		});
+		// The LAST row is the generation-close halt — parent-attributed, sessionless,
+		// no `collected` marker, no unit fields (the recordFatalFailure shape the
+		// haltLoopWhenAllFailed engine writes). CONTRAST with the collected-halt pins
+		// above: this row IS terminal, so the recap reads "failed" and the halt's
+		// errMsg becomes the failureReason (recapOutcomeOf's fall-through arm).
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 3,
+			stage: "design",
+			skill: "design",
+			status: "failed",
+			ts: "t3",
+			errMsg: 'Fanout all-failed at stage "design" (2/2 units failed)',
+		});
+		expect(summarizeRun(tmpDir, runId)).toEqual({
+			outcome: "failed",
+			artifacts: [],
+			workflow: "mid",
+			failureReason: 'Fanout all-failed at stage "design" (2/2 units failed)',
+		} satisfies RunRecap);
+	});
+
+	it("projects an empty artifacts array when no stage carried artifacts", () => {
+		const runId = "no-artifacts-recap";
+		appendHeader(tmpDir, { runId, workflow: "mid", input: "x", ts: "2026" });
+		appendStage(tmpDir, runId, {
+			session: null,
+			stageNumber: 1,
+			stage: "commit",
+			skill: "commit",
+			status: "completed",
+			ts: "t1",
+		});
+		expect(summarizeRun(tmpDir, runId)?.artifacts).toEqual([]);
+	});
+
+	it("returns a degraded recap with workflow undefined when the header row is missing but stage rows exist", () => {
+		const runId = "degraded-trail";
+		// Skip appendHeader — write a stage row first so the first line is not a
+		// header (a malformed/missing-header trail with surviving stage rows).
+		mkdirSync(runsDir(tmpDir), { recursive: true });
+		appendFileSync(
+			stateFilePath(tmpDir, runId),
+			`${JSON.stringify({
+				session: null,
+				stageNumber: 1,
+				stage: "plan",
+				skill: "plan",
+				status: "completed",
+				ts: "t1",
+			})}\n`,
+			"utf-8",
+		);
+		const recap = summarizeRun(tmpDir, runId);
+		expect(recap).toEqual({
+			outcome: "completed",
+			artifacts: [],
+			workflow: undefined,
+		} satisfies RunRecap);
+	});
+
+	it("never throws on a malformed JSONL file", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const runId = "malformed-file";
+			mkdirSync(runsDir(tmpDir), { recursive: true });
+			appendFileSync(stateFilePath(tmpDir, runId), "NOT-JSON\n", "utf-8");
+			expect(() => summarizeRun(tmpDir, runId)).not.toThrow();
+			expect(summarizeRun(tmpDir, runId)).toBeUndefined();
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 });

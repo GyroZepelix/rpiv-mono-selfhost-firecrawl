@@ -2,18 +2,14 @@
  * Session lifecycle wiring for rpiv-core.
  *
  * Each handler body is a named helper; pi.on(...) lines are pure wiring.
- * Ordering and invariants preserved verbatim from the pre-refactor index.ts.
+ * Handler order is deliberate — preserve it.
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import {
-	type AgentEndEvent,
 	type BeforeAgentStartEvent,
 	type ExtensionAPI,
 	type ExtensionContext,
 	isToolCallEventType,
-	parseSkillBlock,
 	type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -23,56 +19,62 @@ import {
 	summarizeCleanupSkips,
 	syncBundledAgents,
 } from "./agents.js";
-import { FLAG_DEBUG, MSG_TYPE_GIT_CONTEXT } from "./constants.js";
+import { renderBanner } from "./banner.js";
+import { FLAG_DEBUG, MSG_TYPE_GIT_CONTEXT, MSG_TYPE_POST_COMPACT_CONTEXT } from "./constants.js";
 import {
 	clearGitContextCache,
 	isGitMutatingCommand,
+	refreshGitContextForInjection,
 	resetInjectedMarker,
 	takeGitContextIfChanged,
 } from "./git-context.js";
-import { ARTIFACTS_SUBDIR, clearInjectionState, handleToolCallGuidance, injectRootGuidance } from "./guidance.js";
+import { clearInjectionState, handleToolCallGuidance, injectRootGuidance, takeRootGuidance } from "./guidance.js";
 import { findMissingSiblings } from "./package-checks.js";
-import { BUNDLED_SKILL_NAMES } from "./paths.js";
+import { injectPipelinePointer, PIPELINE_POINTER } from "./pipeline-pointer.js";
 import { isStaleCtxError } from "./utils.js";
 
 /**
- * Module-local "already announced" latch for the startup banner block
- * (cleanup / agent-sync drift / missing-siblings warning). Pi fires
- * `session_start` for every session including programmatic spawns
- * (workflow stages, batch ops, any extension's `newSession` call).
- * Filesystem work runs every fire — the banner notifications should NOT,
- * or `/wf <large>` re-emits the entire startup splash 10 times.
+ * Module-local latch for the startup-maintenance block (per-cwd agent cleanup,
+ * bundled-agent sync, and the banner). Pi fires `session_start` for every
+ * session including programmatic spawns (workflow stages, batch ops), but this
+ * work must run ONCE per process load, not per fire: the banner would otherwise
+ * reprint on every `/wf` stage, and `syncBundledAgents` targets the global
+ * `~/.pi/agent/agents/` dir whose source can't change mid-process (upgrades need
+ * a restart or `/reload`) — so re-running just recomputes identical hashes.
+ * `/rpiv-update-agents` and `/reload` remain the explicit re-sync paths.
  *
- * Latches on the first banner emission. Reset on `/reload` (module
- * reload) and on process restart. Test-resettable via
- * `__resetSessionHooksAnnounced()`.
- *
- * Replaces an earlier coupling to rpiv-workflow's child-session Symbol —
- * "have I announced yet" is a per-extension concern, not a per-spawner
- * one. No other package needs to know whether session_start came from
- * the user or from a programmatic spawner.
+ * Latches on first `session_start`; reset on `/reload` + restart. Test-resettable.
  */
-let bannerAnnounced = false;
+let startupMaintenanceDone = false;
+
+/**
+ * Sessions whose compacted-away RPIV context must be restored on their next
+ * real user turn. Keying by SessionManager identity prevents a detached child
+ * compaction from arming the root launcher (or another concurrent child).
+ */
+let postCompactSessions = new WeakSet<object>();
 
 /** Test reset — wired into test/setup.ts `beforeEach`. */
 export function __resetSessionHooksAnnounced(): void {
-	bannerAnnounced = false;
+	startupMaintenanceDone = false;
+	postCompactSessions = new WeakSet<object>();
 }
 
 const msgAgentsAdded = (n: number) => `Copied ${n} rpiv-pi agent(s) to ~/.pi/agent/agents/`;
 const msgAgentsHealed = (parts: string[]) => `Synced bundled agent(s): ${parts.join(", ")}.`;
-const msgAgentsDrift = (parts: string[]) => `${parts.join(", ")} agent(s). Run /rpiv-update-agents to sync.`;
+const msgAgentsDrift = (parts: string[]) =>
+	renderBanner("rpiv-pi: bundled agents need attention", [
+		...parts.map((p) => `• ${p}`),
+		"",
+		"Run /rpiv-update-agents to sync.",
+	]);
 const msgAgentsErrors = (n: number) => `Agent sync reported ${n} error(s). Run /rpiv-update-agents for details.`;
-function msgMissingSiblings(pkgs: string[]): string {
-	const n = pkgs.length;
-	const title = `rpiv-pi: ${n} sibling extension${n === 1 ? "" : "s"} missing`;
-	const body = [...pkgs.map((p) => `• ${p}`), "", "Run /rpiv-setup to install them."];
-	const total = Math.max(title.length + 6, ...body.map((l) => l.length + 4));
-	const top = `╭─ ${title} ${"─".repeat(total - title.length - 5)}╮`;
-	const middle = body.map((l) => `│  ${l.padEnd(total - 4)}│`).join("\n");
-	const bottom = `╰${"─".repeat(total - 2)}╯`;
-	return `${top}\n${middle}\n${bottom}`;
-}
+const msgMissingSiblings = (pkgs: string[]) =>
+	renderBanner(`rpiv-pi: ${pkgs.length} sibling extension${pkgs.length === 1 ? "" : "s"} missing`, [
+		...pkgs.map((p) => `• ${p}`),
+		"",
+		"Run /rpiv-setup to install them.",
+	]);
 
 type UI = { notify: (msg: string, sev: "info" | "warning" | "error") => void };
 
@@ -82,6 +84,20 @@ type UI = { notify: (msg: string, sev: "info" | "warning" | "error") => void };
 
 function buildGitContextMessage(pi: ExtensionAPI, content: string) {
 	return { customType: MSG_TYPE_GIT_CONTEXT, content, display: !!pi.getFlag(FLAG_DEBUG) };
+}
+
+function buildPostCompactContextMessage(pi: ExtensionAPI, rootGuidance: string | null, gitContext: string | null) {
+	const parts = [
+		"[rpiv post-compaction context — reference material, NOT a task. Do not acknowledge this block. Answer the user's current request; when it says to continue, resume from the compaction summary and authoritative artifacts.]",
+		PIPELINE_POINTER,
+		rootGuidance,
+		gitContext,
+	].filter((part): part is string => part !== null);
+	return {
+		customType: MSG_TYPE_POST_COMPACT_CONTEXT,
+		content: parts.join("\n\n---\n\n"),
+		display: !!pi.getFlag(FLAG_DEBUG),
+	};
 }
 
 function sendGitContextMessage(pi: ExtensionAPI, content: string) {
@@ -94,11 +110,10 @@ function sendGitContextMessage(pi: ExtensionAPI, content: string) {
 
 export function registerSessionHooks(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => onSessionStart(_event, ctx, pi));
-	pi.on("session_compact", async (_event, ctx) => onSessionCompact(_event, ctx, pi));
+	pi.on("session_compact", async (_event, ctx) => onSessionCompact(_event, ctx));
 	pi.on("session_shutdown", async () => onSessionShutdown());
 	pi.on("tool_call", async (event, ctx) => onToolCall(event, ctx, pi));
 	pi.on("before_agent_start", async (event, ctx) => onBeforeAgentStart(event, ctx, pi));
-	pi.on("agent_end", async (_event, ctx) => onAgentEnd(_event, ctx));
 }
 
 // ---------------------------------------------------------------------------
@@ -107,41 +122,49 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
 
 async function onSessionStart(
 	_event: unknown,
-	ctx: { cwd: string; hasUI: boolean; ui: UI },
+	ctx: { cwd: string; hasUI: boolean; ui: UI; sessionManager: object },
 	pi: ExtensionAPI,
 ): Promise<void> {
+	postCompactSessions.delete(ctx.sessionManager);
 	resetInjectionState();
 	injectRootGuidance(ctx.cwd, pi);
-	migrateThoughtsToArtifacts(ctx.cwd);
+	injectPipelinePointer(pi);
 	await injectGitContext(pi, (msg) => sendGitContextMessage(pi, msg));
+
+	// Injections above run every fire (each stage needs its own guidance + git
+	// context); startup maintenance below runs once per process load — see the
+	// `startupMaintenanceDone` doc-block.
+	if (startupMaintenanceDone) return;
+	startupMaintenanceDone = true;
+
 	const cleanup = cleanupPerCwdAgents(ctx.cwd);
 	const agents = syncBundledAgents(false);
-	// Banner emits once per module load (process start or /reload). Programmatic
-	// session spawns (workflow stages, any other extension's newSession) inherit
-	// the latched state and stay silent. Filesystem work above always runs.
-	if (ctx.hasUI && !bannerAnnounced) {
+	// Banner only when a UI is bound; the filesystem work above runs regardless,
+	// so a headless first session still installs agents.
+	if (ctx.hasUI) {
 		notifyCleanup(ctx.ui, cleanup);
 		notifyAgentSyncDrift(ctx.ui, agents);
 		warnMissingSiblings(ctx.ui);
-		bannerAnnounced = true;
 	}
 }
 
-async function onSessionCompact(_event: unknown, ctx: { cwd: string }, pi: ExtensionAPI): Promise<void> {
+async function onSessionCompact(_event: unknown, ctx: { sessionManager: object }): Promise<void> {
 	resetInjectionState();
 	clearGitContextCache();
 	resetInjectedMarker();
-	// Auto-compaction races session disposal: pi-core's AgentSession.dispose()
-	// invalidates the extension runner while _runAutoCompaction is still emitting
-	// session_compact, so both `ctx` and `pi` become dead proxies whose
-	// getters/methods throw the stale error. Guessing a cwd buys nothing — the
-	// very next pi.sendMessage throws the same way — and the compacting session
-	// is being discarded anyway: the replacement session's session_start re-runs
-	// all of this. So on a stale ctx, bail. Any other error is a real bug in
-	// guidance/git injection and must propagate.
+	// NEVER call pi.sendMessage here. Auto-compaction runs before overflow retry
+	// settles, so injected messages become steering queue items. With Pi's default
+	// one-at-a-time delivery each item can consume its own assistant turn and
+	// displace the interrupted task. Mark this exact session instead; its next
+	// user-authored turn receives one merged context block from before_agent_start.
+	// Overflow retry itself proceeds from the compaction summary with no synthetic
+	// last message competing for the model's attention.
+	//
+	// Auto-compaction can also race session disposal. In that path ctx is a stale
+	// proxy and the replacement session's session_start performs normal injection,
+	// so swallowing only the canonical stale error remains correct.
 	try {
-		injectRootGuidance(ctx.cwd, pi);
-		await injectGitContext(pi, (msg) => sendGitContextMessage(pi, msg));
+		postCompactSessions.add(ctx.sessionManager);
 	} catch (e) {
 		if (!isStaleCtxError(e)) throw e;
 	}
@@ -165,78 +188,35 @@ async function onToolCall(event: ToolCallEvent, ctx: ExtensionContext, pi: Exten
 	}
 }
 
-// Runs every fire — `rpiv: <skill>` is a per-stage display string (each
-// stage owns the status line during its run), and the git-context injection
-// is keyed off `takeGitContextIfChanged` which is its own dedup layer.
+// Runs every fire — the git-context injection is keyed off
+// `takeGitContextIfChanged` which is its own dedup layer.
 async function onBeforeAgentStart(
-	event: BeforeAgentStartEvent,
+	_event: BeforeAgentStartEvent,
 	ctx: ExtensionContext,
 	pi: ExtensionAPI,
-): Promise<{ message: ReturnType<typeof buildGitContextMessage> } | undefined> {
-	const parsed = parseSkillBlock(event.prompt);
-	if (parsed && isOwnedSkill(parsed.name)) ctx.ui.setStatus("rpiv-skill", `rpiv: ${parsed.name}`);
+): Promise<
+	| { message: ReturnType<typeof buildGitContextMessage> }
+	| { message: ReturnType<typeof buildPostCompactContextMessage> }
+	| undefined
+> {
+	if (postCompactSessions.has(ctx.sessionManager)) {
+		postCompactSessions.delete(ctx.sessionManager);
+		const rootGuidance = takeRootGuidance(ctx.cwd, "restored on the first user turn after compaction", true);
+		const gitContext = await refreshGitContextForInjection(pi);
+		return { message: buildPostCompactContextMessage(pi, rootGuidance, gitContext) };
+	}
+
 	const content = await takeGitContextIfChanged(pi);
 	if (!content) return undefined;
 	return { message: buildGitContextMessage(pi, content) };
-}
-
-async function onAgentEnd(_event: AgentEndEvent, ctx: ExtensionContext): Promise<void> {
-	ctx.ui.setStatus("rpiv-skill", undefined);
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Allowlist of rpiv-pi's own skill names, sourced from the shared
-// `BUNDLED_SKILL_NAMES` constant. Prevents the status bar from claiming
-// `rpiv:` ownership of user-supplied or third-party skills. The set is
-// computed once at module load in paths.ts.
-function isOwnedSkill(name: string): boolean {
-	return BUNDLED_SKILL_NAMES.has(name);
-}
-
 function resetInjectionState(): void {
 	clearInjectionState();
-}
-
-function migrateThoughtsToArtifacts(cwd: string): void {
-	const oldShared = join(cwd, "thoughts", "shared");
-	if (!existsSync(oldShared)) return;
-
-	try {
-		const entries = readdirSync(oldShared, { withFileTypes: true });
-		if (entries.length === 0) return; // empty source — nothing to copy, leave on disk
-
-		const newArtifacts = join(cwd, ".rpiv", ARTIFACTS_SUBDIR);
-		mkdirSync(newArtifacts, { recursive: true });
-
-		for (const entry of entries) {
-			const src = join(oldShared, entry.name);
-			const dest = join(newArtifacts, entry.name);
-			cpSync(src, dest, { recursive: true, errorOnExist: false, force: true });
-			if (!existsSync(dest)) {
-				console.warn(`[rpiv-pi] migration: failed to copy ${src} → ${dest}`);
-				return; // abort — don't delete source if copy failed
-			}
-		}
-
-		// All copies verified — safe to remove source
-		rmSync(oldShared, { recursive: true, force: true });
-
-		// Remove thoughts/ root only if empty (preserves thoughts/me/ etc.)
-		const thoughtsRoot = join(cwd, "thoughts");
-		try {
-			if (readdirSync(thoughtsRoot).length === 0) {
-				rmSync(thoughtsRoot, { recursive: true, force: true });
-			}
-		} catch {
-			// thoughts/ already gone or unreadable — not an error
-		}
-	} catch (e) {
-		console.warn(`[rpiv-pi] migration: ${e instanceof Error ? e.message : String(e)}`);
-		// Never crash session_start — migration is best-effort
-	}
 }
 
 async function injectGitContext(pi: ExtensionAPI, send: (msg: string) => void): Promise<void> {
@@ -248,8 +228,8 @@ function notifyAgentSyncDrift(ui: UI, result: SyncResult): void {
 	if (result.added.length > 0) {
 		ui.notify(msgAgentsAdded(result.added.length), "info");
 	}
-	// Self-healing events on session_start: legacy-migration overwrites + smart-gate
-	// auto-removes. Surface these explicitly so the user knows local files were touched.
+	// Self-healing events on session_start: smart-gate auto-updates and auto-removes.
+	// Surface these explicitly so the user knows local files were touched.
 	const healed: string[] = [];
 	if (result.updated.length > 0) healed.push(`${result.updated.length} updated`);
 	if (result.removed.length > 0) healed.push(`${result.removed.length} removed`);
@@ -260,7 +240,7 @@ function notifyAgentSyncDrift(ui: UI, result: SyncResult): void {
 	if (result.pendingUpdate.length > 0) drift.push(`${result.pendingUpdate.length} outdated`);
 	if (result.pendingRemove.length > 0) drift.push(`${result.pendingRemove.length} removed from bundle`);
 	if (drift.length > 0) {
-		ui.notify(msgAgentsDrift(drift), "info");
+		ui.notify(`\n${msgAgentsDrift(drift)}`, "info");
 	}
 	if (result.errors.length > 0) {
 		ui.notify(msgAgentsErrors(result.errors.length), "warning");

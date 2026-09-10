@@ -10,21 +10,33 @@ vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@earendil-works/pi-ai")>();
 	return {
 		...actual,
-		completeSimple: vi.fn(),
 		getSupportedThinkingLevels: vi.fn(() => ["off", "minimal", "low", "medium", "high"]),
 	};
 });
 
-import { completeSimple } from "@earendil-works/pi-ai";
+// completeSimple lives on /compat since pi 0.80 (see test/setup.ts).
+vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@earendil-works/pi-ai/compat")>();
+	return {
+		...actual,
+		completeSimple: vi.fn(),
+	};
+});
+
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { BTW_COMMAND_NAME, BTW_STATE_KEY, registerBtwCommand } from "./btw.js";
 import { showBtwOverlay } from "./btw-ui.js";
 
 const model = { provider: "a", id: "m" } as unknown as Model<Api>;
 
-type OverlayCtl = { setAnswer: ReturnType<typeof vi.fn>; setError: ReturnType<typeof vi.fn> };
+type OverlayCtl = {
+	setAnswer: ReturnType<typeof vi.fn>;
+	setError: ReturnType<typeof vi.fn>;
+	setTrimmed: ReturnType<typeof vi.fn>;
+};
 
 function stubOverlay(): OverlayCtl {
-	const ctl: OverlayCtl = { setAnswer: vi.fn(), setError: vi.fn() };
+	const ctl: OverlayCtl = { setAnswer: vi.fn(), setError: vi.fn(), setTrimmed: vi.fn() };
 	vi.mocked(showBtwOverlay).mockReturnValueOnce({
 		overlayPromise: Promise.resolve(),
 		controllerReady: Promise.resolve(ctl as never),
@@ -95,6 +107,7 @@ describe("/btw — happy path", () => {
 		expect(params.history).toEqual([]);
 		expect(ctl.setAnswer).toHaveBeenCalledWith("42");
 		expect(ctl.setError).not.toHaveBeenCalled();
+		expect(ctl.setTrimmed).not.toHaveBeenCalled();
 	});
 });
 

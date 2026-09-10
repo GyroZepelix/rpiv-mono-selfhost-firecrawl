@@ -4,16 +4,40 @@ import { join } from "node:path";
 import { createMockPi, createMockSessionChain, mockAssistantMessage } from "@juicesharp/rpiv-test-utils";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EdgeTarget, FanoutFn, ScriptContext, StageDef, StageKind, StageSchema, Workflow } from "./api.js";
-import { defineRoute, defineWorkflow, gate, produces, terminal } from "./api.js";
+import type {
+	EdgeTarget,
+	FanoutFn,
+	ProgressValue,
+	ScriptContext,
+	StageDef,
+	StageKind,
+	StageSchema,
+	Workflow,
+} from "./api.js";
+import { defineRoute, defineWorkflow, gate, match, produces, setRouteNote, terminal } from "./api.js";
 import { registerBuiltIns } from "./built-ins.js";
+import { LifecycleDispatcher } from "./events.js";
 import { fs as fsHandle } from "./handle.js";
-import type { OutputSpec } from "./output.js";
+import { fanout } from "./loop-constructors.js";
+import type { Outcome } from "./output-spec.js";
 import { eq, gt } from "./predicates.js";
+import { evaluateBackwardJumpGuard } from "./runner/chain-advance.js";
 import { runWorkflow, runWorkflowByName } from "./runner/index.js";
-import { appendRoutingDecision, readRoutingDecisions } from "./state/index.js";
+import type { CompositionComparator } from "./skill-contract.js";
+import { registerCompositionComparator, registerSkillContracts } from "./skill-contracts/index.js";
+import {
+	appendHeader,
+	appendRoutingDecision,
+	readHeader,
+	readNamesIndex,
+	readRoutingDecisions,
+} from "./state/index.js";
+// Deep import: addNameToIndex is deliberately NOT on the state barrels
+// (production code goes through claimName); tests seed collisions directly.
+import { addNameToIndex } from "./state/names.js";
 import { hasAssistantMessage, lastAssistantStopReason } from "./transcript.js";
 import { typeboxSchema } from "./typebox-adapter.js";
+import type { RunContext, RunState } from "./types.js";
 
 // Note: transcript-path scanning moved to rpiv-pi (`rpivArtifactCollector`)
 // since the `.rpiv/artifacts/<bucket>/<file>.md` layout is an rpiv
@@ -52,7 +76,9 @@ const phaseHeadingsFanout: FanoutFn = ({ artifact, cwd }) => {
 // built by `wf()` below.
 // ---------------------------------------------------------------------------
 
-const RPIV_ARTIFACT_PATTERN = /\.rpiv\/artifacts\/[\w.-]+\/[\w.-]+\.md/g;
+// Tempered in lockstep with rpiv-pi's production pattern (2136ef72): the class
+// refuses ".." in any segment so a prose-ellipsis path never collects.
+const RPIV_ARTIFACT_PATTERN = /\.rpiv\/artifacts\/(?:(?!\.\.)[\w.-])+\/(?:(?!\.\.)[\w.-])+\.md/g;
 
 /** Minimal YAML-frontmatter parser for tests: `key: value` lines between `---` fences, scalar values only. */
 const parseFmTestOnly = (content: string): Record<string, unknown> => {
@@ -70,7 +96,7 @@ const parseFmTestOnly = (content: string): Record<string, unknown> => {
 	return fm;
 };
 
-const transcriptArtifactMdOutcome: OutputSpec<unknown, "artifact-md", Record<string, unknown>> = {
+const transcriptArtifactMdOutcome: Outcome<unknown, "artifact-md", Record<string, unknown>> = {
 	collector: {
 		collect: (ctx) => {
 			let lastMatch: string | undefined;
@@ -147,7 +173,7 @@ describe("runWorkflow", () => {
 	 *
 	 *   wf("tiny", ["research"])
 	 *   wf("rev", ["research", "code-review", "revise", "commit"], {}, {
-	 *     "code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+	 *     "code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 	 *   })
 	 */
 	const wf = (
@@ -168,7 +194,7 @@ describe("runWorkflow", () => {
 				kind: defaultStrategy,
 				sessionPolicy: "fresh",
 			};
-			const merged: StageDef = { ...base, ...(stageOverrides[id] ?? {}) };
+			const merged = { ...base, ...(stageOverrides[id] ?? {}) } as StageDef;
 			// produces stages get a test-local transcript-scan outcome (the
 			// framework no longer ships a default). Decide based on the FINAL
 			// strategy after overrides — if a test overrides to side-effect, we
@@ -206,7 +232,7 @@ describe("runWorkflow", () => {
 		// The post-format-change equivalent of "unknown preset": the caller
 		// (command.ts) resolves names to Workflow objects; runWorkflow only
 		// sees the object. A workflow with start ∉ stages is the proximal
-		// invalid-input case — it short-circuits BEFORE writeHeader so a
+		// invalid-input case — it short-circuits BEFORE appendHeader so a
 		// typo doesn't pollute the audit trail.
 		const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
 		const result = await runWorkflow(chain.ctx, {
@@ -217,8 +243,65 @@ describe("runWorkflow", () => {
 		expect(result.success).toBe(false);
 		expect(result.stagesCompleted).toBe(0);
 		expect(result.error).toMatch(/start stage "ghost" is not declared/);
-		expect(chain.ctx.newSession).not.toHaveBeenCalled();
+		expect(chain.ctx.spawnChild).not.toHaveBeenCalled();
 		expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
+	});
+
+	it("rejects an invalid --name before writing any JSONL (defense-in-depth for programmatic callers)", async () => {
+		const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+		const result = await runWorkflow(chain.ctx, {
+			workflow: wf("tiny", ["research"]),
+			input: "x",
+			name: "1-bad-start",
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.error).toMatch(/invalid name/);
+		expect(chain.ctx.spawnChild).not.toHaveBeenCalled();
+		expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
+	});
+
+	it("rejects a name already claimed in the index, without starting a session", async () => {
+		// The holder must exist on disk — claimName treats an entry whose run
+		// file is gone as stale (re-claimable), not as a collision.
+		appendHeader(tmpDir, {
+			runId: "prior-run",
+			workflow: "tiny",
+			input: "x",
+			ts: "2026-06-11T00:00:00Z",
+			name: "auth",
+		});
+		addNameToIndex(tmpDir, "auth", "prior-run");
+		const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+		const result = await runWorkflow(chain.ctx, {
+			workflow: wf("tiny", ["research"]),
+			input: "x",
+			name: "auth",
+		});
+
+		expect(result.success).toBe(false);
+		expect(result.error).toMatch(/already used by run prior-run/);
+		expect(chain.ctx.spawnChild).not.toHaveBeenCalled();
+	});
+
+	it("claims the name in the index and stamps it on the header on a successful run", async () => {
+		writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] }],
+		});
+
+		const result = await runWorkflow(chain.ctx, {
+			workflow: wf("tiny", ["research"]),
+			input: "add dark mode",
+			name: "auth",
+		});
+
+		expect(result.success).toBe(true);
+		// `readState` asserts a single file in runs/ — the named run also drops
+		// names.json there, so read the header directly by runId instead.
+		expect(readHeader(tmpDir, result.runId!)?.name).toBe("auth");
+		expect(readNamesIndex(tmpDir)).toEqual({ auth: result.runId });
 	});
 
 	it("completes a single-step workflow on success and records header + completed step", async () => {
@@ -239,8 +322,9 @@ describe("runWorkflow", () => {
 			stagesCompleted: 1,
 			lastArtifact: ".rpiv/artifacts/research/r.md",
 			error: undefined,
+			termination: { status: "completed" },
 		});
-		expect(chain.ctx.newSession).toHaveBeenCalledTimes(1);
+		expect(chain.ctx.spawnChild).toHaveBeenCalledTimes(1);
 		expect(chain.sentMessages).toEqual(["/skill:research add dark mode"]);
 
 		const { header, stages } = readState(tmpDir);
@@ -252,16 +336,15 @@ describe("runWorkflow", () => {
 			skill: "research",
 			status: "completed",
 		});
-		expect((stages[0]?.output as { artifacts: Array<{ handle: { path: string } }> }).artifacts[0]?.handle.path).toBe(
+		expect((stages[0]!.output as { artifacts: Array<{ handle: { path: string } }> }).artifacts[0]?.handle.path).toBe(
 			".rpiv/artifacts/research/r.md",
 		);
 	});
 
-	it("chains the second step on freshCtx — outer.newSession is called exactly once", async () => {
-		// The runner contract: every newSession after the first MUST be invoked
-		// on the freshCtx handed to the previous withSession callback. If the
-		// runner ever regressed to capturing the outer ctx, this assertion
-		// would fire (outer.newSession.calls would be 2).
+	it("chains the second step by spawning a fresh child — the parent ctx is reused, never swapped", async () => {
+		// The runner contract: each fresh stage spawns one child off the SAME
+		// parent ctx (no swap, no re-derivation). Two fresh stages ⇒ two
+		// spawnChild calls on the parent.
 		writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
 		writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
 		const chain = createMockSessionChain({
@@ -280,7 +363,7 @@ describe("runWorkflow", () => {
 		expect(result.success).toBe(true);
 		expect(result.stagesCompleted).toBe(2);
 		expect(result.lastArtifact).toBe(".rpiv/artifacts/designs/d.md");
-		expect(chain.ctx.newSession).toHaveBeenCalledTimes(1);
+		expect(chain.ctx.spawnChild).toHaveBeenCalledTimes(2);
 		// Step 2's prompt uses the artifact produced by step 1 — not the
 		// original user input. This is the artifact-handoff invariant.
 		expect(chain.sentMessages).toEqual(["/skill:research x", "/skill:design .rpiv/artifacts/research/r.md"]);
@@ -288,19 +371,9 @@ describe("runWorkflow", () => {
 
 		const { stages } = readState(tmpDir);
 		expect(stages.map((s) => s.status)).toEqual(["completed", "completed"]);
-		expect((stages[1]?.output as { artifacts: Array<{ handle: { path: string } }> }).artifacts[0]?.handle.path).toBe(
+		expect((stages[1]!.output as { artifacts: Array<{ handle: { path: string } }> }).artifacts[0]?.handle.path).toBe(
 			".rpiv/artifacts/designs/d.md",
 		);
-
-		// The persistent status line updates exactly once per stage (in order),
-		// then clears on workflow completion. Pi's `notify` channel gets
-		// repainted by `newSession` transitions; the status line survives them,
-		// which is why we use `setStatus` for "currently running X."
-		expect(chain.statusUpdates).toEqual([
-			{ key: "rpiv-workflow", value: "rpiv: stage 1/2 — research" },
-			{ key: "rpiv-workflow", value: "rpiv: stage 2/2 — design" },
-			{ key: "rpiv-workflow", value: undefined },
-		]);
 	});
 
 	it("stops on step failure, records a failed entry, and never consumes later steps", async () => {
@@ -330,7 +403,11 @@ describe("runWorkflow", () => {
 		expect(stages[0]?.output).toBeUndefined();
 	});
 
-	it("records skipped + emits cancelled notification when outer newSession resolves cancelled", async () => {
+	it("a rejecting spawnChild is recorded as a stage failure — no throw escapes the run", async () => {
+		// The detached replacement for the old `{cancelled}` return: a child that
+		// rejects (e.g. cancelled before any work) propagates to the single catch
+		// site (dispatchStageOrRecordFailure → recordEntryThrow) as a recorded failure
+		// row, never an uncaught throw out of runWorkflow.
 		const chain = createMockSessionChain({
 			cwd: tmpDir,
 			steps: [{ cancelled: true }],
@@ -342,19 +419,12 @@ describe("runWorkflow", () => {
 		});
 
 		expect(result.success).toBe(false);
-		// User-cancelled returns a populated error string — distinguishes from
-		// "workflow never started" (which also has success: false).
-		expect(result.error).toMatch(/cancelled by user/i);
+		expect(result.error).toBeTruthy();
 		expect(result.stagesCompleted).toBe(0);
-		expect(chain.notifications.some((n) => /cancelled/i.test(n.msg))).toBe(true);
 
 		const { stages } = readState(tmpDir);
 		expect(stages).toHaveLength(1);
-		expect(stages[0]).toMatchObject({ skill: "research", status: "skipped" });
-
-		// Status was set on entry and cleared once the user dismissed the
-		// newSession confirm dialog — same teardown contract as abort/failure.
-		expect(chain.statusUpdates.at(-1)).toEqual({ key: "rpiv-workflow", value: undefined });
+		expect(stages[0]).toMatchObject({ skill: "research", status: "failed" });
 	});
 
 	it("expands an implement step into N phases when its plan artifact has ## Phase headings", async () => {
@@ -381,7 +451,7 @@ describe("runWorkflow", () => {
 
 		const result = await runWorkflow(chain.ctx, {
 			workflow: wf("rip", ["research", "implement"], {
-				implement: { fanout: phaseHeadingsFanout },
+				implement: { loop: fanout({ units: phaseHeadingsFanout }) },
 			}),
 			input: "x",
 		});
@@ -390,8 +460,8 @@ describe("runWorkflow", () => {
 		// 1 research + 3 phase rows
 		expect(result.stagesCompleted).toBe(4);
 		expect(chain.remaining()).toBe(0);
-		// Outer ctx still only initiates the very first step
-		expect(chain.ctx.newSession).toHaveBeenCalledTimes(1);
+		// The parent ctx spawns every child (no swap): 1 research + 3 phases.
+		expect(chain.ctx.spawnChild).toHaveBeenCalledTimes(4);
 		// Each phase's prompt suffixes the plan path with "Phase N"
 		expect(chain.sentMessages).toEqual([
 			"/skill:research x",
@@ -412,10 +482,10 @@ describe("runWorkflow", () => {
 		expect(stages.slice(1).every((s) => s.status === "completed")).toBe(true);
 	});
 
-	it("uses FanoutUnit.id in the audit row when set, falling back to label otherwise", async () => {
-		// Mixed-id FanoutFn: phase 1 has an id, phase 2 does not. The audit
-		// row should prefer `id` per-unit so post-hoc tooling joins on a
-		// stable key when one was supplied.
+	it("uses the unit's id in the row's stage decoration when set, falling back to label otherwise", async () => {
+		// Mixed-id units: phase 1 has an id, phase 2 does not. The decorated
+		// `stage` string should prefer `id` per-unit so post-hoc tooling joins
+		// on a stable key when one was supplied.
 		const planRelPath = ".rpiv/artifacts/plans/p.md";
 		mkdirSync(join(tmpDir, ".rpiv", "artifacts", "plans"), { recursive: true });
 		writeFileSync(join(tmpDir, planRelPath), "# Plan\n\n## Phase 1: alpha\n## Phase 2: beta\n");
@@ -436,7 +506,7 @@ describe("runWorkflow", () => {
 
 		const result = await runWorkflow(chain.ctx, {
 			workflow: wf("rip", ["research", "implement"], {
-				implement: { fanout: mixedIdFanout },
+				implement: { loop: fanout({ units: mixedIdFanout }) },
 			}),
 			input: "x",
 		});
@@ -524,13 +594,6 @@ describe("runWorkflow", () => {
 		// A warning-level notification surfaces the abort.
 		const abortNotice = chain.notifications.find((n) => /aborted/i.test(n.msg));
 		expect(abortNotice?.level).toBe("warning");
-
-		// The status line was set when stage 1 began and cleared when the abort
-		// halted the chain — no stale "stage 1/2 — research" left behind.
-		expect(chain.statusUpdates).toEqual([
-			{ key: "rpiv-workflow", value: "rpiv: stage 1/2 — research" },
-			{ key: "rpiv-workflow", value: undefined },
-		]);
 	});
 
 	it("abort mid-chain surfaces partial artifacts produced by earlier stages", async () => {
@@ -650,7 +713,7 @@ describe("runWorkflow", () => {
 
 		const result = await runWorkflow(chain.ctx, {
 			workflow: wf("rip", ["research", "implement"], {
-				implement: { fanout: phaseHeadingsFanout },
+				implement: { loop: fanout({ units: phaseHeadingsFanout }) },
 			}),
 			input: "x",
 		});
@@ -743,7 +806,6 @@ describe("runWorkflow", () => {
 			const upstreamHandle = fsHandle("/tmp/upstream.md");
 			let stage3InputKind: string | undefined;
 			let stage3InputArtifacts: number | undefined;
-			let stage3Primary: unknown;
 
 			const workflow = defineWorkflow({
 				name: "terminal-script-isolation",
@@ -761,7 +823,6 @@ describe("runWorkflow", () => {
 						run: (ctx: ScriptContext) => {
 							stage3InputKind = ctx.input?.kind;
 							stage3InputArtifacts = ctx.input?.artifacts?.length;
-							stage3Primary = ctx.state.primaryArtifact;
 							return { kind: "report", artifacts: [], data: { ok: true } };
 						},
 					}),
@@ -780,9 +841,8 @@ describe("runWorkflow", () => {
 			expect(stage3InputKind).toBe("side-effect");
 			expect(stage3InputArtifacts).toBe(0);
 
-			// The rolling primary-artifact slot was cleared by terminal.script
-			// (`inheritsArtifacts: false`), so stage 3 reads `undefined`.
-			expect(stage3Primary).toBeUndefined();
+			// The cleared primary slot is observable only via `ctx.input` and
+			// `result.lastArtifact` — `RunView` doesn't leak the slot itself.
 
 			// Final run.lastArtifact reflects whatever stage 3 produced (nothing
 			// here) — confirms terminal.script's clear isn't sticky once a
@@ -792,160 +852,96 @@ describe("runWorkflow", () => {
 	});
 
 	describe("sessionPolicy: continue", () => {
-		it("completes a single continue stage via pi.sendUserMessage", async () => {
+		it("chains fresh → continue: continue FORKS the predecessor's persisted session (offset re-derived)", async () => {
+			// Under detachment a `continue` stage forks its predecessor's persisted
+			// child session — carrying the prior transcript as context — instead of
+			// running fresh (the prior-session lineage survives detachment via
+			// SessionManager.forkFrom; OQ1 resolved). Stage 1's recorded
+			// SessionRef.file must point at a REAL file so `locateSessionFile`
+			// resolves it; stage 2 then spawns with `fork:{sessionFile}`, sends its
+			// turn via sendUserMessage (NOT a host prompt replay), and re-derives the
+			// branch offset from the forked branch (never the launcher's).
 			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
+			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
+			const s1File = join(tmpDir, "s1-session.jsonl");
+			writeFileSync(s1File, `${JSON.stringify({ type: "session", id: "s1" })}\n`);
+
+			// Stage 2's forked child starts as the inherited prior transcript; the
+			// continuation turn (carrying the artifact) is appended when the body
+			// sends it — exactly as a real sendUserMessage grows the branch.
+			const forkBranch: unknown[] = [mockAssistantMessage("earlier research discussion")];
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
-				steps: [],
-				pi: createMockPi({ skills: ["research"] }).pi,
-				outerBranch: [],
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")], sessionFile: s1File },
+					{ branch: forkBranch },
+				],
 			});
-
-			// Simulate branch growth: getBranch returns a reference to the
-			// internal array, so pushing makes new entries visible to the runner.
-			const branch = chain.ctx.sessionManager.getBranch() as unknown[];
-			(chain.pi!.sendUserMessage as ReturnType<typeof vi.fn>).mockImplementation((content: unknown) => {
-				chain.sentMessages.push(typeof content === "string" ? content : JSON.stringify(content));
-				branch.push(mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md"));
+			chain.sendUserMessageFn.mockImplementation(async (content: unknown) => {
+				chain.sentMessages.push(String(content));
+				forkBranch.push(mockAssistantMessage("Designed .rpiv/artifacts/designs/d.md"));
 			});
 
 			const result = await runWorkflow(chain.ctx, {
-				workflow: wf("cont", ["research"], { research: { sessionPolicy: "continue" } }),
+				workflow: wf("fc", ["research", "design"], { design: { sessionPolicy: "continue" } }),
 				input: "x",
-				host: chain.pi,
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+			expect(result.lastArtifact).toBe(".rpiv/artifacts/designs/d.md");
+			expect(chain.ctx.spawnChild).toHaveBeenCalledTimes(2);
+
+			// Stage 2 FORKED stage 1's persisted session — not a fresh child, not an
+			// in-place reattach.
+			const secondSpawn = (chain.ctx.spawnChild as ReturnType<typeof vi.fn>).mock.calls[1]![0];
+			expect(secondSpawn.fork).toEqual({ sessionFile: s1File });
+			expect(secondSpawn.reattach).toBeUndefined();
+
+			// Stage 1's prompt was host-sent; stage 2's continuation was body-sent
+			// (sendUserMessage) — yet the handoff arg still consumes stage 1's artifact.
+			expect(chain.sentMessages).toEqual(["/skill:research x", "/skill:design .rpiv/artifacts/research/r.md"]);
+
+			// The continue row records the offset re-derived from the forked branch
+			// (1 inherited prior entry), proving the outcome skipped the prefix.
+			const { stages } = readState(tmpDir);
+			expect(stages[1]).toMatchObject({ skill: "design", status: "completed" });
+			expect((stages[1]!.session as { branchOffset?: number }).branchOffset).toBe(1);
+		});
+
+		it("continue with no prior session degrades to a fresh dispatch with a fallback notice", async () => {
+			// A `continue` stage at the START has no predecessor to fork — it degrades
+			// to a fresh dispatch (no `fork`/`reattach`, host-sent prompt) and emits a
+			// one-line fallback notice rather than refusing.
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] }],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("cstart", ["research"], { research: { sessionPolicy: "continue" } }),
+				input: "x",
 			});
 
 			expect(result.success).toBe(true);
 			expect(result.stagesCompleted).toBe(1);
-			expect(result.lastArtifact).toBe(".rpiv/artifacts/research/r.md");
-			// No newSession called — the continue path reuses the outer session
-			expect(chain.ctx.newSession).not.toHaveBeenCalled();
-			// Message sent via pi.sendUserMessage (sync)
-			expect(chain.pi!.sendUserMessage).toHaveBeenCalledWith("/skill:research x");
-		});
-
-		it("chains fresh → continue with correct branch offset", async () => {
-			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
-			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
-			const priorArtifact = ".rpiv/artifacts/research/r.md";
-			const designArtifact = ".rpiv/artifacts/designs/d.md";
-
-			// Shared mutable branch — the fresh stage reads it as-is; the
-			// continue stage's sendUserMessage appends its entries.
-			const sharedBranch: unknown[] = [mockAssistantMessage(`Wrote ${priorArtifact}`)];
-
-			const chain = createMockSessionChain({
-				cwd: tmpDir,
-				steps: [{ branch: sharedBranch }],
-				pi: createMockPi({ skills: ["research", "design"] }).pi,
-			});
-
-			// Continue stage send goes through the inner ctx (not the captured
-			// host — see `CONTINUE_HANDLER.spawn` precedence), so override the
-			// inner-ctx mock fn to grow the branch. The same vi.fn() backs
-			// both the FRESH and CONTINUE send paths now; gate branch growth
-			// on the design prompt so research's send doesn't double-fire it.
-			chain.sendUserMessageFn.mockImplementation((content: unknown) => {
-				const text = typeof content === "string" ? content : JSON.stringify(content);
-				chain.sentMessages.push(text);
-				if (text.startsWith("/skill:design")) {
-					sharedBranch.push(mockAssistantMessage(`Designed ${designArtifact}`));
-				}
-			});
-
-			const result = await runWorkflow(chain.ctx, {
-				workflow: wf("fc", ["research", "design"], { design: { sessionPolicy: "continue" } }),
-				input: "x",
-				host: chain.pi,
-			});
-
-			expect(result.success).toBe(true);
-			expect(result.stagesCompleted).toBe(2);
-			expect(result.lastArtifact).toBe(designArtifact);
-			// Stage 1 used newSession; stage 2 reused the inner session ctx
-			// via ctx.sendUserMessage (NOT host.sendUserMessage — the host is
-			// the fallback for workflow-start-with-continue only).
-			expect(chain.ctx.newSession).toHaveBeenCalledTimes(1);
-			expect(chain.pi!.sendUserMessage).not.toHaveBeenCalled();
-			expect(chain.sentMessages).toEqual(["/skill:research x", `/skill:design ${priorArtifact}`]);
-		});
-
-		it("continue after fresh routes through live ctx, not the stale host (regression)", async () => {
-			// Regression: pre-fix, CONTINUE_HANDLER unconditionally called
-			// `host.sendUserMessage`. Pi marks the captured host stale after
-			// the first ctx.newSession() — so a continue stage following a
-			// fresh stage would throw "extension ctx is stale". Post-fix,
-			// CONTINUE_HANDLER prefers `ctx.sendUserMessage` (the live inner
-			// ctx delivered to withSession, always valid); the host is only
-			// the fallback for workflow-start-with-continue-first-stage.
-			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
-			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
-			const priorArtifact = ".rpiv/artifacts/research/r.md";
-			const designArtifact = ".rpiv/artifacts/designs/d.md";
-
-			const sharedBranch: unknown[] = [mockAssistantMessage(`Wrote ${priorArtifact}`)];
-			const chain = createMockSessionChain({
-				cwd: tmpDir,
-				steps: [{ branch: sharedBranch }],
-				pi: createMockPi({ skills: ["research", "design"] }).pi,
-			});
-
-			// Simulate Pi's stale-host behavior: any call to host.sendUserMessage
-			// after the first newSession throws. If the runner regresses to
-			// using the host for continue sends, the workflow will fail with
-			// this error in result.error.
-			(chain.pi!.sendUserMessage as ReturnType<typeof vi.fn>).mockImplementation(() => {
-				throw new Error(
-					"This extension ctx is stale after session replacement or reload. " +
-						"Do not use a captured pi or command ctx after ctx.newSession().",
-				);
-			});
-
-			chain.sendUserMessageFn.mockImplementation((content: unknown) => {
-				const text = typeof content === "string" ? content : JSON.stringify(content);
-				chain.sentMessages.push(text);
-				if (text.startsWith("/skill:design")) {
-					sharedBranch.push(mockAssistantMessage(`Designed ${designArtifact}`));
-				}
-			});
-
-			const result = await runWorkflow(chain.ctx, {
-				workflow: wf("fc", ["research", "design"], { design: { sessionPolicy: "continue" } }),
-				input: "x",
-				host: chain.pi,
-			});
-
-			// Both stages completed — the stale-host throw never fired because
-			// CONTINUE_HANDLER took the ctx path.
-			expect(result.success).toBe(true);
-			expect(result.stagesCompleted).toBe(2);
-			expect(result.lastArtifact).toBe(designArtifact);
-			// Load-bearing assertion: host.sendUserMessage was NEVER called.
-			// Pre-fix this would be called once for the design stage and would
-			// throw the stale-ctx error.
-			expect(chain.pi!.sendUserMessage).not.toHaveBeenCalled();
-			// Both prompts landed via the inner ctx.
-			expect(chain.sentMessages).toEqual(["/skill:research x", `/skill:design ${priorArtifact}`]);
+			const spawn = (chain.ctx.spawnChild as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+			expect(spawn.fork).toBeUndefined();
+			expect(spawn.reattach).toBeUndefined();
+			expect(chain.sentMessages).toEqual(["/skill:research x"]); // host-sent (fresh path)
+			expect(chain.notifications.some((n) => /no prior session to continue/.test(n.msg))).toBe(true);
 		});
 
 		it("continue stage abort halts the chain", async () => {
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
-				steps: [],
-				pi: createMockPi({ skills: ["research"] }).pi,
-				outerBranch: [],
-			});
-
-			const branch = chain.ctx.sessionManager.getBranch() as unknown[];
-			(chain.pi!.sendUserMessage as ReturnType<typeof vi.fn>).mockImplementation((content: unknown) => {
-				chain.sentMessages.push(typeof content === "string" ? content : JSON.stringify(content));
-				branch.push(mockAssistantMessage("interrupted", "aborted"));
+				steps: [{ branch: [mockAssistantMessage("interrupted", "aborted")] }],
 			});
 
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("cont", ["research"], { research: { sessionPolicy: "continue" } }),
 				input: "x",
-				host: chain.pi,
 			});
 
 			expect(result.success).toBe(false);
@@ -959,18 +955,12 @@ describe("runWorkflow", () => {
 		it("continue stage with no assistant message fails", async () => {
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
-				steps: [],
-				pi: createMockPi({ skills: ["research"] }).pi,
-				outerBranch: [],
+				steps: [{ branch: [] }],
 			});
-
-			// Don't override sendUserMessage — branch stays empty after the call.
-			// The runner sees branchOffset=0, slice gives [], no assistant message.
 
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("cont", ["research"], { research: { sessionPolicy: "continue" } }),
 				input: "x",
-				host: chain.pi,
 			});
 
 			expect(result.success).toBe(false);
@@ -981,21 +971,12 @@ describe("runWorkflow", () => {
 		it("continue stage with no artifact (requireArtifact) fails", async () => {
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
-				steps: [],
-				pi: createMockPi({ skills: ["research"] }).pi,
-				outerBranch: [],
-			});
-
-			const branch = chain.ctx.sessionManager.getBranch() as unknown[];
-			(chain.pi!.sendUserMessage as ReturnType<typeof vi.fn>).mockImplementation((content: unknown) => {
-				chain.sentMessages.push(typeof content === "string" ? content : JSON.stringify(content));
-				branch.push(mockAssistantMessage("I asked a clarifying question"));
+				steps: [{ branch: [mockAssistantMessage("I asked a clarifying question")] }],
 			});
 
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("cont", ["research"], { research: { sessionPolicy: "continue" } }),
 				input: "x",
-				host: chain.pi,
 			});
 
 			expect(result.success).toBe(false);
@@ -1006,21 +987,12 @@ describe("runWorkflow", () => {
 		it("continue stage with side-effect stop strategy completes without artifact", async () => {
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
-				steps: [],
-				pi: createMockPi({ skills: ["commit"] }).pi,
-				outerBranch: [],
-			});
-
-			const branch = chain.ctx.sessionManager.getBranch() as unknown[];
-			(chain.pi!.sendUserMessage as ReturnType<typeof vi.fn>).mockImplementation((content: unknown) => {
-				chain.sentMessages.push(typeof content === "string" ? content : JSON.stringify(content));
-				branch.push(mockAssistantMessage("Committed 3 files."));
+				steps: [{ branch: [mockAssistantMessage("Committed 3 files.")] }],
 			});
 
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("cont", ["commit"], { commit: { sessionPolicy: "continue" } }),
 				input: "x",
-				host: chain.pi,
 			});
 
 			expect(result.success).toBe(true);
@@ -1030,7 +1002,7 @@ describe("runWorkflow", () => {
 
 		// Invariant throws used to escape runWorkflow uncaught, leaving a
 		// header-only JSONL file invisible to every shape-filtered reader.
-		// runStageOrRecordFailure now translates them into a recorded failure row
+		// dispatchStageOrRecordFailure now translates them into a recorded failure row
 		// + a populated error envelope, so the result describes the failure
 		// rather than the caller having to catch a stack trace.
 		it("records a failure row when fanout node has sessionPolicy continue (no throw escapes)", async () => {
@@ -1042,14 +1014,14 @@ describe("runWorkflow", () => {
 
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("ic", ["implement"], {
-					implement: { sessionPolicy: "continue", fanout: phaseHeadingsFanout },
+					implement: { sessionPolicy: "continue", loop: fanout({ units: phaseHeadingsFanout }) },
 				}),
 				input: "x",
 				host: chain.pi,
 			});
 
 			expect(result.success).toBe(false);
-			expect(result.error).toMatch(/cannot combine fanout with sessionPolicy.*continue/);
+			expect(result.error).toMatch(/cannot combine loop with sessionPolicy.*continue/);
 
 			// JSONL now carries a row attributed to the failing stage —
 			// no orphan header-only file.
@@ -1059,37 +1031,16 @@ describe("runWorkflow", () => {
 			expect(failedRows[0]?.skill).toBe("implement");
 		});
 
-		it("rejects at preflight when continue node runs without pi (no stages execute)", async () => {
-			const chain = createMockSessionChain({
-				cwd: tmpDir,
-				steps: [],
-			});
-
-			const result = await runWorkflow(chain.ctx, {
-				workflow: wf("cont", ["research"], { research: { sessionPolicy: "continue" } }),
-				input: "x",
-				// No host provided — caught by the preflight before any stage runs.
-			});
-
-			expect(result.success).toBe(false);
-			expect(result.error).toBe("workflow contains continue-policy stages which require a workflow host");
-			expect(result.stagesCompleted).toBe(0);
-
-			// Preflight short-circuits before writeHeader / any recordStage call —
-			// no JSONL workflow file is produced at all.
-			expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
-		});
-
 		// -------------------------------------------------------------------
-		// Q12+IB — when a mid-chain stage throws (here: stage 2 hits the
+		// When a mid-chain stage throws (here: stage 2 hits the
 		// continue-without-pi invariant), the recorded failure must be
 		// attributed to the *failing* stage, not to the prior stage whose
-		// success triggered advanceChain. Before runStageOrRecordFailure, the
+		// success triggered advanceChain. Before dispatchStageOrRecordFailure, the
 		// advanceChain catch recorded `skill: currentName` (the prior, already-
 		// completed stage), producing two rows for stage 1 (completed +
 		// failed) and zero rows for stage 2.
 		// -------------------------------------------------------------------
-		it("attributes a mid-chain runStage throw to the failing stage, not to the prior one", async () => {
+		it("attributes a mid-chain dispatchStage throw to the failing stage, not to the prior one", async () => {
 			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
 			const mockPi = createMockPi({ skills: ["research", "implement"] });
 			const chain = createMockSessionChain({
@@ -1100,19 +1051,19 @@ describe("runWorkflow", () => {
 
 			// research succeeds (fresh policy). implement opts into fanout and
 			// uses sessionPolicy: continue — a separate invariant (fanout can't
-			// combine with continue) that throws inside enforceSessionInvariants
+			// combine with continue) that throws inside ensureLoopNotContinue
 			// when stage 2 is invoked. pi is provided so the preflight (which
 			// gates only on missing pi) lets the run reach the mid-chain throw.
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("midthrow", ["research", "implement"], {
-					implement: { sessionPolicy: "continue", fanout: phaseHeadingsFanout },
+					implement: { sessionPolicy: "continue", loop: fanout({ units: phaseHeadingsFanout }) },
 				}),
 				input: "x",
 				host: mockPi.pi,
 			});
 
 			expect(result.success).toBe(false);
-			expect(result.error).toMatch(/cannot combine fanout with sessionPolicy.*continue/);
+			expect(result.error).toMatch(/cannot combine loop with sessionPolicy.*continue/);
 
 			const { stages } = readState(tmpDir);
 			const completedRows = stages.filter((s) => s.status === "completed");
@@ -1126,38 +1077,24 @@ describe("runWorkflow", () => {
 			expect(failedRows[0]?.skill).toBe("implement");
 		});
 
-		it("branch offset prevents false positive from prior stage artifact", async () => {
+		it("a detached continue child sees no prior-stage artifact (no false positive)", async () => {
+			// In the detached model the continue stage runs in its OWN child — its
+			// branch never contains the prior stage's artifact announcement, so a
+			// continue stage that produces no artifact of its own fails cleanly (no
+			// false positive from the fresh stage's prior `.md`).
 			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
-			// Fresh stage produces artifact, continue stage fails to produce its own.
-			// Without offset, extractArtifactPath would return the prior artifact.
-			const priorArtifact = ".rpiv/artifacts/research/r.md";
-
-			// Shared mutable branch: pre-populated with the fresh stage's entry.
-			const sharedBranch: unknown[] = [mockAssistantMessage(`Wrote ${priorArtifact}`)];
 
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
-				steps: [{ branch: sharedBranch }],
-				pi: createMockPi({ skills: ["research", "design"] }).pi,
-			});
-
-			// Continue stage produces a message but no artifact. Continue
-			// sends go through the inner ctx (preferred over the captured
-			// host in CONTINUE_HANDLER.spawn) — override the inner-ctx fn.
-			// Gate branch growth on the design prompt so research's send
-			// doesn't double-fire it.
-			chain.sendUserMessageFn.mockImplementation((content: unknown) => {
-				const text = typeof content === "string" ? content : JSON.stringify(content);
-				chain.sentMessages.push(text);
-				if (text.startsWith("/skill:design")) {
-					sharedBranch.push(mockAssistantMessage("I analyzed the design but didn't write a plan"));
-				}
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("I analyzed the design but didn't write a plan")] },
+				],
 			});
 
 			const result = await runWorkflow(chain.ctx, {
 				workflow: wf("fc", ["research", "design"], { design: { sessionPolicy: "continue" } }),
 				input: "x",
-				host: chain.pi,
 			});
 
 			// Stage 2 failed — no artifact produced by the continue stage
@@ -1175,7 +1112,7 @@ describe("runWorkflow", () => {
 	describe("input validation", () => {
 		it("halts chain when prior output fails consumer's inputSchema", async () => {
 			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
-			// Stage 1 (research) produces an artifact. Stage 2 (design) has an
+			// Stage 1 produces an artifact. Stage 2 has an
 			// inputSchema that rejects the output data from stage 1.
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
@@ -1284,9 +1221,6 @@ describe("runWorkflow", () => {
 			expect(stages).toHaveLength(2);
 			expect(stages[0]).toMatchObject({ skill: "research", status: "completed" });
 			expect(stages[1]).toMatchObject({ skill: "design", status: "failed" });
-
-			// Status line cleared
-			expect(chain.statusUpdates.at(-1)).toEqual({ key: "rpiv-workflow", value: undefined });
 		});
 
 		// inputSchema mirrors outputSchema's async-safety posture: an async
@@ -1321,6 +1255,366 @@ describe("runWorkflow", () => {
 		}, 5_000);
 	});
 
+	describe("contract input validation (ensureContractInputValid)", () => {
+		it("halts chain when upstream output fails declared consumes.data contract", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			// Register a declared contract: design consumes { requiredField: string }
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						consumes: {
+							data: {
+								type: "object",
+								properties: { requiredField: { type: "string" } },
+								required: ["requiredField"],
+							},
+						},
+					},
+				],
+			]);
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] }],
+			});
+
+			// design has NO inputSchema — contract mirror should catch the violation
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"]),
+				input: "x",
+			});
+
+			expect(result.success).toBe(false);
+			expect(result.stagesCompleted).toBe(1); // research completed
+			expect(result.error).toMatch(/input validation failed/i);
+			expect(result.error).toMatch(/design/); // consumer
+
+			const { stages } = readState(tmpDir);
+			expect(stages[0]).toMatchObject({ skill: "research", status: "completed" });
+			expect(stages[1]).toMatchObject({ skill: "design", status: "failed" });
+		});
+
+		it("passes when upstream output satisfies the declared consumes.data contract", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nrequiredField: hello\n---\n\nContent");
+			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						consumes: {
+							data: {
+								type: "object",
+								properties: { requiredField: { type: "string" } },
+								required: ["requiredField"],
+							},
+						},
+					},
+				],
+			]);
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/designs/d.md")] },
+				],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"]),
+				input: "x",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+		});
+
+		it("degrades (no halt) when no declared contract exists", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
+			// No registerSkillContracts — no contract to validate against
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/designs/d.md")] },
+				],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"]),
+				input: "x",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+		});
+
+		it("degrades (no halt) when consumes.data is a non-object (malformed contract)", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						consumes: { data: "not-a-schema" as unknown as Record<string, unknown> },
+					},
+				],
+			]);
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/designs/d.md")] },
+				],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"]),
+				input: "x",
+			});
+
+			// Malformed contract — degrade, not halt
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+		});
+
+		it("skips contract check when stage has its own inputSchema (no double validation)", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			// Register a contract that would fail, but the stage also has an inputSchema
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						consumes: {
+							data: {
+								type: "object",
+								properties: { neverPresent: { type: "string" } },
+								required: ["neverPresent"],
+							},
+						},
+					},
+				],
+			]);
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] }],
+			});
+
+			// inputSchema that also rejects — the inputSchema path (ensureInputValid) should fire,
+			// NOT the contract mirror
+			const schema = typeboxSchema(Type.Object({ mustExist: Type.String() }));
+			await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"], { design: { inputSchema: schema } }),
+				input: "x",
+			});
+
+			const { stages } = readState(tmpDir);
+			expect(stages[1]).toMatchObject({ skill: "design", status: "failed" });
+		});
+
+		it("degrades when no consumes.data on the contract", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			writeArtifact(tmpDir, ".rpiv/artifacts/designs/d.md");
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						// No consumes.data — contract check degrades
+					},
+				],
+			]);
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/designs/d.md")] },
+				],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"]),
+				input: "x",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+		});
+
+		it("skips contract check when stage reads from named channels (reads:)", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						consumes: {
+							data: {
+								type: "object",
+								properties: { neverPresent: { type: "string" } },
+								required: ["neverPresent"],
+							},
+						},
+					},
+				],
+			]);
+
+			// The stage reads from named channels — its input comes from state.named,
+			// NOT the linear output.data, so the contract check must skip.
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] }],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"], {
+					design: { reads: ["priorOutput"] },
+				}),
+				input: "x",
+			});
+
+			// reads: stage should skip the contract check entirely
+			// (it will fail on ensureNamedReads, which is fine — we just need
+			// to verify the contract check didn't halt it)
+			expect(result.success).toBe(false);
+			expect(result.error).not.toMatch(/input validation failed.*consumes\.data/i);
+		});
+
+		it("skips contract check for prompt-dispatch stages", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nfoo: 1\n---\n\nContent");
+			registerSkillContracts([
+				[
+					"design",
+					{
+						source: "declared",
+						consumes: {
+							data: {
+								type: "object",
+								properties: { neverPresent: { type: "string" } },
+								required: ["neverPresent"],
+							},
+						},
+					},
+				],
+			]);
+
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Done")] },
+				],
+			});
+
+			// prompt stage — side-effect kind, no outcome; should skip contract check
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("two", ["research", "design"], {
+					design: { kind: "side-effect", prompt: "Just do it" },
+				}),
+				input: "x",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+		});
+
+		describe("named-channel (reads) compatibility", () => {
+			const kindComparator: CompositionComparator = (produces, consumes, ch) => {
+				const want = (consumes.reads?.[ch]?.meta as { artifactKind?: string } | undefined)?.artifactKind;
+				const got = (produces.meta as { artifactKind?: string } | undefined)?.artifactKind;
+				return !want || !got || want === got ? { ok: true } : { ok: false, reason: "artifactKind mismatch" };
+			};
+			const plansOutcome = { ...transcriptArtifactMdOutcome, name: "plans" };
+			const registerKinds = (producerKind: string, consumerKind: string) =>
+				registerSkillContracts([
+					[
+						"research",
+						{ source: "declared", produces: { kind: "produces", meta: { artifactKind: producerKind } } },
+					],
+					[
+						"revise",
+						{ source: "declared", consumes: { reads: { plans: { meta: { artifactKind: consumerKind } } } } },
+					],
+				]);
+			const readsWf = () =>
+				wf("two", ["research", "revise"], { research: { outcome: plansOutcome }, revise: { reads: ["plans"] } });
+
+			// Reads validity is a complete LOAD-TIME guarantee (`checkReadsChannelCompat`);
+			// the runner does NOT adjudicate reads. This locks that decision: even a
+			// disjoint channel with a registered comparator runs to completion at runtime.
+			it("does NOT halt at runtime on a disjoint reads channel — reads validity is load-time", async () => {
+				writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nstatus: ready\n---\n");
+				writeArtifact(tmpDir, ".rpiv/artifacts/plans/p.md", "---\nstatus: ready\n---\n");
+				registerCompositionComparator("plans", kindComparator);
+				registerKinds("design", "plan"); // disjoint at the channel — yet must not halt the run
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/plans/p.md")] },
+					],
+				});
+				const result = await runWorkflow(chain.ctx, { workflow: readsWf(), input: "x" });
+				expect(result.success).toBe(true);
+				expect(result.stagesCompleted).toBe(2);
+			});
+
+			// Regression for the reads-guard gap in `ensureContractInputValid`: a
+			// `reads:` stage that ALSO declares `consumes.data` must NOT validate the
+			// rolling primary (`output.data`) against that contract — its input comes
+			// from `state.named`, not the primary. The named read here is SATISFIED
+			// (research publishes "plans"), so the run reaches POST_PROMPT_CHECKS;
+			// without the guard, ensureContractInputValid would validate research's
+			// {status:"ready"} against revise's `requiredField`-requiring schema and
+			// HALT. The guard skips it, so the run completes.
+			it("skips consumes.data validation for a reads: stage even when the named read is satisfied", async () => {
+				writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md", "---\nstatus: ready\n---\n");
+				writeArtifact(tmpDir, ".rpiv/artifacts/plans/p.md", "---\nstatus: ready\n---\n");
+				registerSkillContracts([
+					["research", { source: "declared", produces: { kind: "produces", meta: { artifactKind: "plan" } } }],
+					[
+						"revise",
+						{
+							source: "declared",
+							consumes: {
+								reads: { plans: {} },
+								// A linear contract that the rolling primary {status:"ready"} does NOT satisfy —
+								// would HALT if (incorrectly) adjudicated against the primary.
+								data: {
+									type: "object",
+									properties: { requiredField: { type: "string" } },
+									required: ["requiredField"],
+								},
+							},
+						},
+					],
+				]);
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/plans/p.md")] },
+					],
+				});
+				// Without the reads guard this HALTS (success=false) on a consumes.data
+				// mismatch; the guard lets the run complete.
+				const result = await runWorkflow(chain.ctx, { workflow: readsWf(), input: "x" });
+				expect(result.success).toBe(true);
+				expect(result.stagesCompleted).toBe(2);
+			});
+		});
+	});
+
 	describe("predicate routing", () => {
 		it("routes to commit when severeIssueCount is 0 (no severe issues)", async () => {
 			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
@@ -1340,7 +1634,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1376,7 +1670,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1410,7 +1704,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1456,7 +1750,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1495,7 +1789,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1528,7 +1822,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1551,11 +1845,117 @@ describe("runWorkflow", () => {
 				fromStage: "code-review",
 				decision: "commit",
 			});
+			// Matched branch (eq(0) hit) — no fallback, so no note.
+			expect(routingDecisions[0]!.note).toBeUndefined();
+		});
+
+		it("routing row carries gate's fallback note when no branch matched", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
+			// No severeIssueCount in the frontmatter → Number(undefined) = NaN →
+			// no branch matches → gate takes `otherwise` and attaches the note.
+			writeArtifact(tmpDir, ".rpiv/artifacts/code-review/cr.md", "---\ntitle: review\n---\n\nContent");
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/code-review/cr.md")] },
+					{ branch: [mockAssistantMessage("Committed.")] },
+				],
+			});
+
+			const workflow = wf(
+				"flow",
+				["research", "code-review", "revise", "commit"],
+				{},
+				{
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
+				},
+			);
+
+			const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+			expect(result.success).toBe(true);
+
+			const dir = join(tmpDir, ".rpiv", "workflows", "runs");
+			const runId = readdirSync(dir)[0]!.replace(".jsonl", "");
+			const routingDecisions = readRoutingDecisions(tmpDir, runId);
+			expect(routingDecisions).toHaveLength(1);
+			expect(routingDecisions[0]).toMatchObject({ decision: "commit" });
+			expect(routingDecisions[0]!.note).toMatch(/no branch matched value NaN.*"commit"/);
+		});
+
+		it("no-fallback match stop fails the run with a routing row + terminal failure row (not a silent ✓)", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
+			// `verdict: fail` matches no branch of a pass-only gate → match
+			// terminates (STOP) with its no-match note. A live run died exactly
+			// here while its lane showed a completed ✓ — the stop must be a
+			// visible failed termination, not a completion.
+			writeArtifact(tmpDir, ".rpiv/artifacts/code-review/cr.md", "---\nverdict: fail\n---\n\nContent");
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/code-review/cr.md")] },
+				],
+			});
+
+			const workflow = wf(
+				"flow",
+				["research", "code-review", "commit"],
+				{},
+				{
+					"code-review": match("verdict", { commit: "pass" }),
+				},
+			);
+
+			const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+			expect(result.success).toBe(false);
+			expect(result.error).toMatch(/matched no branch/);
+
+			const dir = join(tmpDir, ".rpiv", "workflows", "runs");
+			const runId = readdirSync(dir)[0]!.replace(".jsonl", "");
+			// The stop decision is audited like any forward pick, note included.
+			const routingDecisions = readRoutingDecisions(tmpDir, runId);
+			expect(routingDecisions).toHaveLength(1);
+			expect(routingDecisions[0]).toMatchObject({ fromStage: "code-review", decision: "stop" });
+			expect(routingDecisions[0]!.note).toMatch(/matched no branch — terminated \(no fallback\)/);
+			// The trail ends in a terminal failure row naming the gate's stage —
+			// resume/lane tooling sees a stopped run, not a completed one.
+			const { stages } = readState(tmpDir);
+			const failureRow = stages.find((s) => s.status === "failed");
+			expect(failureRow).toMatchObject({ stage: "code-review", status: "failed" });
+			expect(String(failureRow?.errMsg)).toMatch(/matched no branch/);
+		});
+
+		it("a matched branch reaching the chain's natural end still completes (no spurious failure)", async () => {
+			writeArtifact(tmpDir, ".rpiv/artifacts/research/r.md");
+			writeArtifact(tmpDir, ".rpiv/artifacts/code-review/cr.md", "---\nverdict: pass\n---\n\nContent");
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/research/r.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/code-review/cr.md")] },
+					{ branch: [mockAssistantMessage("Committed.")] },
+				],
+			});
+
+			const workflow = wf(
+				"flow",
+				["research", "code-review", "commit"],
+				{},
+				{
+					"code-review": match("verdict", { commit: "pass" }),
+				},
+			);
+
+			const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+			expect(result.success).toBe(true);
+			const { stages } = readState(tmpDir);
+			expect(stages.some((s) => s.status === "failed")).toBe(false);
 		});
 
 		// -------------------------------------------------------------------
-		// Q7+IH — routing-write failure is fail-soft (run continues) but
-		// MUST be observable: appendRoutingDecision returns false so the
+		// Routing-write failure is fail-soft (run continues) but MUST be
+		// observable: appendRoutingDecision returns false so the
 		// runner can notify + surface a droppedRoutingRows entry in the
 		// envelope. Asymmetric with appendStage (which halts on failure)
 		// because routing rows are pure telemetry — no in-memory state
@@ -1604,6 +2004,8 @@ describe("runWorkflow", () => {
 			writeArtifact(tmpDir, ".rpiv/artifacts/b/b2.md");
 			writeArtifact(tmpDir, ".rpiv/artifacts/a/a3.md");
 			writeArtifact(tmpDir, ".rpiv/artifacts/b/b3.md");
+			writeArtifact(tmpDir, ".rpiv/artifacts/a/a4.md");
+			writeArtifact(tmpDir, ".rpiv/artifacts/b/b4.md");
 
 			const chain = createMockSessionChain({
 				cwd: tmpDir,
@@ -1614,6 +2016,8 @@ describe("runWorkflow", () => {
 					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
 					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a3.md")] },
 					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b3.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a4.md")] },
+					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b4.md")] },
 				],
 			});
 
@@ -1632,23 +2036,23 @@ describe("runWorkflow", () => {
 
 			expect(result.success).toBe(false);
 			expect(result.error).toMatch(/backward-jump limit exceeded/i);
-			expect(result.error).toMatch(/3.*max 2/);
-			// Per-decision counting: each b→a is one decision retry. With cap=2:
+			expect(result.error).toMatch(/4.*max 3/);
+			// Per-decision counting: each b→a is one decision retry. With cap=3:
 			// pass 1 (a→b, no retry yet) → b→a (retry 1) → pass 2 → b→a (retry 2) →
-			// pass 3 → b→a (retry 3 > 2) HALT before re-entering a.
-			// 6 stages completed: a, b, a, b, a, b. Trip fires at b's 3rd
-			// decision attempting to revisit a.
-			expect(result.stagesCompleted).toBe(6);
+			// pass 3 → b→a (retry 3) → pass 4 → b→a (retry 4 > 3) HALT before
+			// re-entering a. 8 stages completed: a, b, a, b, a, b, a, b. Trip
+			// fires at b's 4th decision attempting to revisit a.
+			expect(result.stagesCompleted).toBe(8);
 			expect(chain.remaining()).toBe(0);
 
 			const { stages } = readState(tmpDir);
 			const stageRows = stages.filter((s) => typeof s.stageNumber === "number");
-			// 6 completed + 1 failed row.
-			expect(stageRows).toHaveLength(7);
-			expect(stageRows.filter((s) => s.status === "completed")).toHaveLength(6);
+			// 8 completed + 1 failed row.
+			expect(stageRows).toHaveLength(9);
+			expect(stageRows.filter((s) => s.status === "completed")).toHaveLength(8);
 			expect(stageRows.filter((s) => s.status === "failed")).toHaveLength(1);
 			// Trip attribution: failure row blames `a` (the would-be revisit
-			// target), not `b` (the just-completed stage). Q12-family lesson.
+			// target), not `b` (the just-completed stage).
 			expect(stageRows.filter((s) => s.status === "failed")[0]?.skill).toBe("a");
 
 			const exhaustionNotice = chain.notifications.find((n) => /backward-jump limit exceeded/i.test(n.msg));
@@ -1704,7 +2108,7 @@ describe("runWorkflow", () => {
 				["research", "code-review", "revise", "commit"],
 				{},
 				{
-					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+					"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				},
 			);
 
@@ -1775,30 +2179,6 @@ describe("runWorkflow", () => {
 			expect(result.stagesCompleted).toBe(2);
 		});
 
-		it("clears status line on backward-jump exhaustion", async () => {
-			writeArtifact(tmpDir, ".rpiv/artifacts/a/a1.md");
-			writeArtifact(tmpDir, ".rpiv/artifacts/b/b1.md");
-
-			const chain = createMockSessionChain({
-				cwd: tmpDir,
-				steps: [
-					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
-					{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
-				],
-			});
-
-			const workflow = wf(
-				"cycle",
-				["a", "b", "c"],
-				{},
-				{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
-			);
-
-			await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 0 });
-
-			expect(chain.statusUpdates.at(-1)).toEqual({ key: "rpiv-workflow", value: undefined });
-		});
-
 		it("records a failure row on backward-jump exhaustion (co-extensive with state.termination.error)", async () => {
 			writeArtifact(tmpDir, ".rpiv/artifacts/a/a1.md");
 			writeArtifact(tmpDir, ".rpiv/artifacts/b/b1.md");
@@ -1822,9 +2202,8 @@ describe("runWorkflow", () => {
 
 			// 2 completed stages (a, b) + 1 status:"failed" row marking where the
 			// guard halted the chain. Each row carries its own stageNumber — no
-			// stageNumber is reused (precedent `3a8b07b`), no completed row is
-			// rewritten in place (precedent `1f87ad6`). Filter on `stageNumber`
-			// to skip routing-decision rows.
+			// stageNumber is reused, no completed row is rewritten in place.
+			// Filter on `stageNumber` to skip routing-decision rows.
 			const { stages } = readState(tmpDir);
 			const stageRows = stages.filter((s) => typeof s.stageNumber === "number");
 			expect(stageRows).toHaveLength(3);
@@ -1835,7 +2214,7 @@ describe("runWorkflow", () => {
 		});
 
 		// -------------------------------------------------------------------
-		// Q13+IG — the core fix: an N-node decision-mediated loop must allow
+		// The core fix: an N-node decision-mediated loop must allow
 		// MAX_BACKWARD_JUMPS retry iterations, not trip mid-iteration on the
 		// deterministic hops within the cycle body. Previously a 3-node loop
 		// burned the budget on two deterministic forward hops INSIDE the
@@ -1881,11 +2260,55 @@ describe("runWorkflow", () => {
 			expect(result.stagesCompleted).toBe(6);
 		});
 
-		it("resets the counter when a decision escapes the current loop", async () => {
+		it("counts per destination — a cycle crossing TWO decision edges per iteration keeps the full retry budget", async () => {
+			// The built-in gate shape: check →(decide)→ grade →(decide)→ fix
+			// →(string)→ check. Each fix iteration crosses TWO decision edges
+			// to visited stages. Under a shared-streak counter, the cap halted
+			// at an early grade entry (streak: grade 1, fix 2, grade 3) —
+			// inserting a deterministic-floor edge silently taxed the fix
+			// budget. Per-destination: grade and fix each own a budget of 3
+			// re-entries, so four full fix iterations complete and the guard
+			// trips on grade's 4th RE-ENTRY (its would-be 5th run).
+			for (let i = 1; i <= 5; i++) {
+				writeArtifact(tmpDir, `.rpiv/artifacts/check/k${i}.md`);
+				writeArtifact(tmpDir, `.rpiv/artifacts/grade/g${i}.md`);
+				writeArtifact(tmpDir, `.rpiv/artifacts/fix/f${i}.md`);
+			}
+			const steps: Array<{ branch: ReturnType<typeof mockAssistantMessage>[] }> = [];
+			for (let i = 1; i <= 5; i++) {
+				steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/check/k${i}.md`)] });
+				steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/grade/g${i}.md`)] });
+				steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/fix/f${i}.md`)] });
+			}
+			const chain = createMockSessionChain({ cwd: tmpDir, steps });
+
+			const workflow = wf(
+				"gate-shape",
+				["check", "grade", "fix", "done"],
+				{},
+				{
+					// Both edges always retry — the guard is the only bound.
+					check: defineRoute(["grade", "done"], () => "grade", { readsData: false }),
+					grade: defineRoute(["fix", "done"], () => "fix", { readsData: false }),
+					fix: "check",
+				},
+			);
+
+			const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+
+			expect(result.success).toBe(false);
+			expect(result.error).toMatch(/backward-jump limit exceeded/i);
+			expect(result.error).toMatch(/"grade".*4.*max 3/);
+			// Iterations: (check grade fix) ×4, then check#5 completes and its
+			// decision to grade trips (grade's 4th re-entry > cap 3) = 13 stages.
+			expect(result.stagesCompleted).toBe(13);
+		});
+
+		it("gives unrelated loops independent budgets (per-destination, no shared pool)", async () => {
 			// Two sequential decision loops: A↔B then C↔D, joined by a
-			// decision-edge escape from B → C. Each loop should get its own
-			// retry budget; without the escape-reset, loop 2's first retry
-			// would inherit loop 1's exhausted counter and trip immediately.
+			// decision-edge escape from B → C. Each destination owns its own
+			// re-entry count, so loop 2's first retry cannot inherit loop 1's
+			// exhausted budget
 			writeArtifact(tmpDir, ".rpiv/artifacts/A/A1.md");
 			writeArtifact(tmpDir, ".rpiv/artifacts/B/B1.md");
 			writeArtifact(tmpDir, ".rpiv/artifacts/A/A2.md");
@@ -1921,9 +2344,9 @@ describe("runWorkflow", () => {
 						bDecisionCount++;
 						return bDecisionCount <= 1 ? "A" : "C";
 					}),
-					// D → C twice, then D → stop. With cap=1 and NO reset, this
-					// trips on the first D→C because B's prior retry already
-					// burned the budget.
+					// D → C once, then D → stop. With cap=1 and a SHARED pool, the
+					// first D→C would trip because B's prior retry already burned the
+					// budget; per-destination it is C's first re-entry
 					D: defineRoute(["C", "stop"], () => {
 						dDecisionCount++;
 						return dDecisionCount <= 1 ? "C" : "stop";
@@ -1933,17 +2356,716 @@ describe("runWorkflow", () => {
 
 			const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 1 });
 
-			// Loop 1: A → B (decide A, retry 1) → A → B (decide C, escape — counter resets to 0)
-			// Loop 2: C → D (decide C, retry 1 — counter started at 0, so within cap) → C → D (decide stop)
-			// All 8 stages complete; run succeeds. Without reset, loop 2's
-			// first retry would be retry 2 > cap=1 → trip.
+			// Loop 1: A → B (decide A — A's 1st re-entry) → A → B (decide C, escape)
+			// Loop 2: C → D (decide C — C's 1st re-entry) → C → D (decide stop)
+			// All 8 stages complete; run succeeds. A and C each spend their own
+			// budget; a shared pool would trip C's first retry at count 2 > cap=1.
 			expect(result.success).toBe(true);
 			expect(result.stagesCompleted).toBe(8);
+		});
+
+		// -----------------------------------------------------------------
+		// progress hook: a destination stage's optional `progress` hook votes
+		// per decision-edge re-entry — "improved" waives the re-entry (budget
+		// untouched; telemetry still counts), everything else counts exactly
+		// as a hook-less re-entry does.
+		// -----------------------------------------------------------------
+		describe("progress hook — waiver semantics", () => {
+			it("improved (sync) waives re-entries — improving laps run past maxBackwardJumps", async () => {
+				for (let i = 1; i <= 3; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a3.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b3.md")] },
+						{ branch: [mockAssistantMessage("Done.")] },
+					],
+				});
+				let bPicks = 0;
+				const workflow = wf(
+					"waive-sync",
+					["a", "b", "c"],
+					{ a: { progress: () => "improved" }, c: { kind: "side-effect" } },
+					{ b: defineRoute(["a", "c"], () => (++bPicks <= 2 ? "a" : "c"), { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 1 });
+
+				// cap=1 with two improving re-entries of `a` — both waived, so the run
+				// completes all 7 stages instead of halting at 4 (the hook-less
+				// outcome under the same edge script).
+				expect(result.success).toBe(true);
+				expect(result.stagesCompleted).toBe(7);
+				// Every waived re-entry row carries verdict + budget arithmetic with
+				// an untouched count.
+				const rows = readRoutingDecisions(tmpDir, result.runId!);
+				const waived = rows.filter((r) => /waived/.test(r.note ?? ""));
+				expect(waived).toHaveLength(2);
+				expect(waived[0]?.note).toBe("jump: waived (improved), 0/1, lap 1/8");
+				expect(waived[1]?.note).toBe("jump: waived (improved), 0/1, lap 2/8");
+			});
+
+			it("improved (async hook) waives identically — the guard awaits the verdict", async () => {
+				writeArtifact(tmpDir, ".rpiv/artifacts/a/a1.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/b/b1.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/a/a2.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/b/b2.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/c/c1.md");
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/c/c1.md")] },
+					],
+				});
+				let bPicks = 0;
+				const workflow = wf(
+					"waive-async",
+					["a", "b", "c"],
+					{ a: { progress: async () => "improved" as const } },
+					{ b: defineRoute(["a", "c"], () => (++bPicks <= 1 ? "a" : "c"), { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 0 });
+
+				// cap=0: the improving re-entry is waived and the run escapes to c —
+				// a hook-less run would halt at 2 stages on the same script.
+				expect(result.success).toBe(true);
+				expect(result.stagesCompleted).toBe(5);
+			});
+
+			it.each<[string, NonNullable<StageDef["progress"]> | undefined, string | undefined]>([
+				["an absent hook", undefined, undefined],
+				['a "unchanged" verdict', () => "unchanged", "; last progress: unchanged"],
+				['a "regressed" verdict', () => "regressed", "; last progress: regressed"],
+				['a "unknown" verdict', () => "unknown", "; last progress: unknown"],
+				[
+					'an off-union "better" return (normalized to unknown)',
+					() => "better" as unknown as ProgressValue,
+					"; last progress: unknown",
+				],
+				[
+					"a throwing hook (degrades to unknown)",
+					() => {
+						throw new Error("hook blew up");
+					},
+					"; last progress: unknown",
+				],
+			])("counts %s — halt at max+1 with a failure row", async (_label, progress, clause) => {
+				writeArtifact(tmpDir, ".rpiv/artifacts/a/a1.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/b/b1.md");
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+					],
+				});
+				const workflow = wf(
+					"count-progress",
+					["a", "b", "c"],
+					{ a: { progress } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 0 });
+
+				// cap=0 ⇒ the waive-ineligible re-entry (count 1 = max+1) halts.
+				expect(result.success).toBe(false);
+				expect(result.error).toMatch(/Backward-jump limit exceeded: stage "a" re-entered 1 times \(max 0\)/);
+				if (clause === undefined) {
+					// Absent hook ⇒ no trail entry ⇒ no progress clause at all.
+					expect(result.error).not.toContain("last progress");
+				} else {
+					expect(result.error).toContain(clause);
+				}
+				const { stages } = readState(tmpDir);
+				const stageRows = stages.filter((s) => typeof s.stageNumber === "number");
+				expect(stageRows.filter((s) => s.status === "failed")).toHaveLength(1);
+			});
+
+			it('a throwing hook never halts by itself — its re-entries read "unknown" on the trail', async () => {
+				for (let i = 1; i <= 2; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+					],
+				});
+				const workflow = wf(
+					"throwing-hook",
+					["a", "b", "c"],
+					{
+						a: {
+							progress: () => {
+								throw new Error("boom");
+							},
+						},
+					},
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 1 });
+
+				// Both re-entries degraded to "unknown" and COUNTED: the first
+				// stays under budget (1 ≤ 1 — the throw did not halt it), the
+				// second trips. The ring carries both unknowns in invocation order.
+				expect(result.success).toBe(false);
+				expect(result.stagesCompleted).toBe(4);
+				expect(result.error).toContain("last progress: unknown, unknown");
+			});
+
+			it("hook never invoked on first visit; first-visit routing rows carry no guard note", async () => {
+				for (let i = 1; i <= 2; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const progressA = vi.fn((): ProgressValue => "unchanged");
+				const progressB = vi.fn((): ProgressValue => "unchanged");
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+					],
+				});
+				let aPicks = 0;
+				let bPicks = 0;
+				const workflow = wf(
+					"first-visit-spy",
+					["a", "b"],
+					{ a: { progress: progressA }, b: { progress: progressB } },
+					{
+						a: defineRoute(["b", "stop"], () => (++aPicks <= 2 ? "b" : "stop"), { readsData: false }),
+						b: defineRoute(["a", "stop"], () => (++bPicks <= 1 ? "a" : "stop"), { readsData: false }),
+					},
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+
+				// a(1) →decide b (FIRST VISIT: neither hook runs) → b(2) →decide a
+				// (re-entry: hook a) → a(3) →decide b (re-entry: hook b) → b(4)
+				// →decide stop.
+				expect(result.success).toBe(true);
+				expect(result.stagesCompleted).toBe(4);
+				expect(progressA).toHaveBeenCalledTimes(1);
+				expect(progressB).toHaveBeenCalledTimes(1);
+				const rows = readRoutingDecisions(tmpDir, result.runId!);
+				const firstVisit = rows.find((r) => r.fromStage === "a" && r.decision === "b");
+				expect(firstVisit?.note).toBeUndefined();
+				const reEntries = rows.filter((r) => r.decision !== "stop" && r.note !== undefined);
+				expect(reEntries).toHaveLength(2);
+				expect(reEntries.every((r) => r.note === "jump: counted (unchanged) 1/3, lap 1/8")).toBe(true);
+			});
+
+			it('guard note composes "; "-joined after the edge\'s ROUTE_NOTE on re-entry rows', async () => {
+				writeArtifact(tmpDir, ".rpiv/artifacts/a/a1.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/b/b1.md");
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+					],
+				});
+				const route = defineRoute(
+					["a", "c"],
+					() => {
+						setRouteNote(route, "retry: verdict still blocking");
+						return "a";
+					},
+					{ readsData: false },
+				);
+				const workflow = wf("composed-note", ["a", "b", "c"], { a: { progress: () => "unchanged" } }, { b: route });
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 0 });
+
+				expect(result.success).toBe(false);
+				const rows = readRoutingDecisions(tmpDir, result.runId!);
+				expect(rows.at(-1)?.note).toBe("retry: verdict still blocking; jump: counted (unchanged) 1/0, lap 1/8");
+			});
+
+			it("trip row order: routing row (with note) then failure row, exactly one of each; no onRoute on the trip", async () => {
+				for (let i = 1; i <= 2; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+					],
+				});
+				const onRoute = vi.fn();
+				const workflow = wf(
+					"trip-order",
+					["a", "b", "c"],
+					{ a: { progress: () => "regressed" } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, {
+					workflow,
+					input: "x",
+					maxBackwardJumps: 1,
+					lifecycle: { onRoute },
+				});
+
+				// cap=1: re-entry 1 counts and continues (onRoute fires), re-entry 2
+				// trips. No new JSONL row kind; routing rows carry the guard note.
+				expect(result.success).toBe(false);
+				const { stages } = readState(tmpDir);
+				const routingRows = stages.filter((s) => s.type === "routing");
+				const failedRows = stages.filter((s) => s.status === "failed");
+				expect(routingRows).toHaveLength(2);
+				expect(failedRows).toHaveLength(1);
+				expect(routingRows[0]?.note).toBe("jump: counted (regressed) 1/1, lap 1/8");
+				expect(routingRows[1]?.note).toBe("jump: counted (regressed) 2/1, lap 2/8");
+				// Trip order: the trip's routing row is immediately followed by the
+				// failure row, and the failure row is the trail's last row.
+				const tripIdx = stages.indexOf(routingRows[1]!);
+				const failureIdx = stages.indexOf(failedRows[0]!);
+				expect(tripIdx).toBeGreaterThan(-1);
+				expect(failureIdx).toBe(stages.length - 1);
+				expect(failureIdx).toBe(tripIdx + 1);
+				// onRoute fired for the initial hop, the continued re-entry, and the
+				// deterministic a→b — but NOT for the trip (the halt returns first).
+				expect(onRoute.mock.calls.map((c) => c[1])).toEqual(["b", "a", "b"]);
+			});
+		});
+
+		describe("evaluateBackwardJumpGuard — unit semantics (ledgers, telemetry, ring)", () => {
+			/** Hand-built RunContext with `a` pre-visited — every call is a re-entry. */
+			const guardRun = (
+				opts: { progress?: StageDef["progress"]; maxBackwardJumps?: number; maxLaps?: number } = {},
+			): RunContext => {
+				const workflow: Workflow = {
+					name: "guard-unit",
+					start: "a",
+					stages: { a: { kind: "produces", sessionPolicy: "fresh", progress: opts.progress } },
+					edges: { a: "stop" },
+				};
+				const state: RunState = {
+					originalInput: "x",
+					primaryArtifact: undefined,
+					output: undefined,
+					named: {},
+					stagesCompleted: 1,
+					lastAllocatedStageNumber: 1,
+					telemetry: { backwardJumps: 0, droppedRoutingRows: [], droppedFailureRows: [] },
+					failureMemos: [],
+					lastGatedDispatch: undefined,
+					termination: { status: "running" },
+				};
+				return {
+					cwd: tmpDir,
+					runId: "guard-unit",
+					workflow,
+					totalStages: 1,
+					state,
+					visited: new Set(["a"]),
+					revisits: new Map(),
+					progressTrail: new Map(),
+					laps: new Map(),
+					maxBackwardJumps: opts.maxBackwardJumps ?? 3,
+					maxLaps: opts.maxLaps ?? 8,
+					maxIterations: 1,
+					trigger: { kind: "command", name: "/wf" },
+					lifecycle: new LifecycleDispatcher(undefined),
+				};
+			};
+
+			it("first visit: hook never invoked, nothing mutated", async () => {
+				const progress = vi.fn((): ProgressValue => "improved");
+				const run = guardRun({ progress });
+				run.visited.delete("a");
+
+				const g = await evaluateBackwardJumpGuard(run, "a");
+
+				expect(g).toEqual({ kind: "first-visit" });
+				expect(progress).not.toHaveBeenCalled();
+				expect(run.state.telemetry.backwardJumps).toBe(0);
+				expect(run.revisits.size).toBe(0);
+				expect(run.progressTrail.size).toBe(0);
+			});
+
+			it("improved (sync) waives: budget untouched, telemetry still counts, ring records the verdict", async () => {
+				const run = guardRun({ progress: () => "improved", maxBackwardJumps: 1 });
+
+				const g = await evaluateBackwardJumpGuard(run, "a");
+
+				expect(g).toMatchObject({ kind: "re-entry" });
+				if (g.kind !== "re-entry") return;
+				expect(g.halt).toBeUndefined();
+				expect(g.note).toBe("jump: waived (improved), 0/1, lap 1/8");
+				expect(run.revisits.get("a")).toBeUndefined();
+				// Telemetry increments on WAIVED re-entries too.
+				expect(run.state.telemetry.backwardJumps).toBe(1);
+				expect(run.progressTrail.get("a")).toEqual(["improved"]);
+			});
+
+			it("improved (async) waives identically", async () => {
+				const run = guardRun({ progress: async () => "improved" as const, maxBackwardJumps: 1 });
+
+				const g = await evaluateBackwardJumpGuard(run, "a");
+
+				expect(g).toMatchObject({ kind: "re-entry" });
+				if (g.kind !== "re-entry") return;
+				expect(g.halt).toBeUndefined();
+				expect(run.revisits.get("a")).toBeUndefined();
+				expect(run.state.telemetry.backwardJumps).toBe(1);
+			});
+
+			it.each(["unchanged", "regressed", "unknown"] as const)(
+				"a %s verdict counts like a hook-less re-entry",
+				async (verdict) => {
+					const run = guardRun({ progress: () => verdict, maxBackwardJumps: 1 });
+
+					const g = await evaluateBackwardJumpGuard(run, "a");
+
+					expect(g).toMatchObject({ kind: "re-entry" });
+					if (g.kind !== "re-entry") return;
+					expect(g.halt).toBeUndefined();
+					expect(g.note).toBe(`jump: counted (${verdict}) 1/1, lap 1/8`);
+					expect(run.revisits.get("a")).toBe(1);
+					expect(run.state.telemetry.backwardJumps).toBe(1);
+					expect(run.progressTrail.get("a")).toEqual([verdict]);
+				},
+			);
+
+			it('normalizes an off-union return to "unknown" on the trail', async () => {
+				const run = guardRun({
+					progress: () => "better" as unknown as ProgressValue,
+					maxBackwardJumps: 1,
+				});
+
+				const g = await evaluateBackwardJumpGuard(run, "a");
+
+				expect(g).toMatchObject({ kind: "re-entry" });
+				expect(run.revisits.get("a")).toBe(1);
+				expect(run.progressTrail.get("a")).toEqual(["unknown"]);
+			});
+
+			it('a throwing hook degrades to "unknown" and never halts by itself (under budget)', async () => {
+				const run = guardRun({
+					progress: () => {
+						throw new Error("boom");
+					},
+					maxBackwardJumps: 3,
+				});
+
+				const g = await evaluateBackwardJumpGuard(run, "a");
+
+				expect(g).toMatchObject({ kind: "re-entry" });
+				if (g.kind !== "re-entry") return;
+				expect(g.halt).toBeUndefined();
+				expect(run.revisits.get("a")).toBe(1);
+				expect(run.progressTrail.get("a")).toEqual(["unknown"]);
+			});
+
+			it("halts with the trail ring when the count exceeds the cap", async () => {
+				const run = guardRun({ progress: () => "regressed", maxBackwardJumps: 1 });
+				await evaluateBackwardJumpGuard(run, "a"); // 1 ≤ 1 continue
+
+				const g = await evaluateBackwardJumpGuard(run, "a"); // 2 > 1 halt
+
+				expect(run.revisits.get("a")).toBe(2);
+				expect(g).toMatchObject({ kind: "re-entry" });
+				if (g.kind !== "re-entry") return;
+				expect(g.halt?.error).toContain("Backward-jump limit");
+				expect(g.halt?.error).toContain("last progress: regressed, regressed");
+			});
+
+			it("absent hook: counts with no trail entry and no verdict segment", async () => {
+				const run = guardRun({ maxBackwardJumps: 1 });
+
+				const g = await evaluateBackwardJumpGuard(run, "a");
+
+				expect(g).toMatchObject({ kind: "re-entry" });
+				if (g.kind !== "re-entry") return;
+				expect(g.note).toBe("jump: counted 1/1, lap 1/8");
+				expect(run.revisits.get("a")).toBe(1);
+				expect(run.progressTrail.size).toBe(0);
+			});
+
+			it("waived re-entries still increment telemetry — cumulative across waive+count", async () => {
+				const run = guardRun({ maxBackwardJumps: 0 });
+				let verdict: ProgressValue = "improved";
+				run.workflow.stages.a!.progress = () => verdict;
+
+				await evaluateBackwardJumpGuard(run, "a"); // waived
+				verdict = "unchanged";
+				// cap 0: the single counted re-entry reads 1 > 0 and trips — the
+				// halt this row asserts (at cap 1 it would read 1 ≤ 1 and continue).
+				const g = await evaluateBackwardJumpGuard(run, "a"); // counts → trips
+
+				expect(run.state.telemetry.backwardJumps).toBe(2);
+				expect(run.revisits.get("a")).toBe(1); // only the counted one
+				expect(g).toMatchObject({
+					kind: "re-entry",
+					halt: expect.objectContaining({ toast: expect.any(String) }),
+				});
+			});
+
+			it("ring is per-destination and bounded at 3 — the 4th verdict drops the oldest", async () => {
+				const run = guardRun({ progress: () => "unchanged", maxBackwardJumps: 99 });
+				run.visited.add("b");
+
+				for (let i = 0; i < 4; i++) await evaluateBackwardJumpGuard(run, "a");
+				await evaluateBackwardJumpGuard(run, "b"); // b has no hook → no ring entry
+
+				expect(run.progressTrail.get("a")).toEqual(["unchanged", "unchanged", "unchanged"]);
+				expect(run.progressTrail.has("b")).toBe(false);
+			});
+		});
+
+		describe("maxLaps ceiling — the absolute per-destination re-entry bound", () => {
+			it("all-improved laps still halt at the maxLaps+1-th re-entry — revisits never increments on waived laps", async () => {
+				for (let i = 1; i <= 3; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a3.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b3.md")] },
+					],
+				});
+
+				const workflow = wf(
+					"improved-ceiling",
+					["a", "b", "c"],
+					{ a: { progress: () => "improved" } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				// cap 1 would halt at the 2nd counted re-entry; every lap is
+				// "improved" so the cap is waived — laps 1 and 2 pass under maxLaps 2,
+				// and the 3rd re-entry (laps 3 > 2) halts on the ceiling BEFORE
+				// re-entering a. 6 stages complete; had the waived laps spent the
+				// cap, the run would have halted at 4.
+				const result = await runWorkflow(chain.ctx, {
+					workflow,
+					input: "x",
+					maxBackwardJumps: 1,
+					maxLaps: 2,
+				});
+
+				expect(result.success).toBe(false);
+				expect(result.error).toMatch(/absolute lap ceiling/);
+				expect(result.error).toMatch(/3.*max 2/);
+				expect(result.stagesCompleted).toBe(6);
+			});
+
+			it("maxLaps: 0 halts on the first re-entry even when improved (mirrors maxBackwardJumps: 0)", async () => {
+				writeArtifact(tmpDir, ".rpiv/artifacts/a/a1.md");
+				writeArtifact(tmpDir, ".rpiv/artifacts/b/b1.md");
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+					],
+				});
+
+				const workflow = wf(
+					"zero-laps",
+					["a", "b", "c"],
+					{ a: { progress: () => "improved" } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 5, maxLaps: 0 });
+
+				expect(result.success).toBe(false);
+				expect(result.error).toMatch(/absolute lap ceiling/);
+				expect(result.error).toMatch(/1 times.*max 0/);
+				// a, b — the ceiling refused the first re-entry, verdict-proof.
+				expect(result.stagesCompleted).toBe(2);
+			});
+
+			// `??` passes NaN through; `laps > NaN` is always false, so an
+			// always-"improved" hook (cap waived) under `maxLaps: NaN` would
+			// never halt. Refused pre-flight: no name claim, no header, no rows.
+			it("maxLaps: NaN is refused pre-flight — the ceiling never gets to fail open, nothing is written", async () => {
+				const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+				const workflow = wf(
+					"nan-ceiling",
+					["a", "b", "c"],
+					{ a: { progress: () => "improved" } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, {
+					workflow,
+					input: "x",
+					name: "nan-run",
+					maxBackwardJumps: 1,
+					maxLaps: Number("garbage"),
+				});
+
+				expect(result).toEqual({
+					stagesCompleted: 0,
+					success: false,
+					error: "maxLaps must be a non-negative integer, got NaN",
+				});
+				// Refused before the name claim and the header write.
+				expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
+			});
+
+			it("maxBackwardJumps: -1 and a fractional maxIterations are refused the same way", async () => {
+				const chain = createMockSessionChain({ cwd: tmpDir, steps: [] });
+				const workflow = wf("bad-budgets", ["a"]);
+
+				const negative = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: -1 });
+				expect(negative.success).toBe(false);
+				expect(negative.error).toBe("maxBackwardJumps must be a non-negative integer, got -1");
+
+				const fractional = await runWorkflow(chain.ctx, { workflow, input: "x", maxIterations: 2.5 });
+				expect(fractional.success).toBe(false);
+				expect(fractional.error).toBe("maxIterations must be a non-negative integer, got 2.5");
+				expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
+			});
+
+			it("hook-less defaults: the cap (3) trips before the ceiling (8) — cap arm, never the ceiling arm", async () => {
+				for (let i = 1; i <= 4; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const steps: Array<{ branch: ReturnType<typeof mockAssistantMessage>[] }> = [];
+				for (let i = 1; i <= 4; i++) {
+					steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/a/a${i}.md`)] });
+					steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/b/b${i}.md`)] });
+				}
+				const chain = createMockSessionChain({ cwd: tmpDir, steps });
+
+				const workflow = wf(
+					"hookless-defaults",
+					["a", "b", "c"],
+					{},
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+
+				// Default caps 3/8 on a counted streak: revisits == laps, so the cap
+				// trips at the 4th re-entry (laps 4 ≤ 8 — the ceiling never fires).
+				expect(result.success).toBe(false);
+				expect(result.error).toMatch(/4.*max 3/);
+				expect(result.error).not.toMatch(/ceiling/);
+				expect(result.stagesCompleted).toBe(8);
+			});
+
+			it("both-trip (maxBackwardJumps 10 ≥ maxLaps 8): the ceiling is named, not the cap", async () => {
+				for (let i = 1; i <= 9; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const steps: Array<{ branch: ReturnType<typeof mockAssistantMessage>[] }> = [];
+				for (let i = 1; i <= 9; i++) {
+					steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/a/a${i}.md`)] });
+					steps.push({ branch: [mockAssistantMessage(`Wrote .rpiv/artifacts/b/b${i}.md`)] });
+				}
+				const chain = createMockSessionChain({ cwd: tmpDir, steps });
+
+				const workflow = wf(
+					"both-trip",
+					["a", "b", "c"],
+					{},
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, { workflow, input: "x", maxBackwardJumps: 10, maxLaps: 8 });
+
+				// Hook-less streak: revisits == laps. The 9th re-entry is laps 9 > 8
+				// (ceiling) while revisits 9 ≤ 10 — the ceiling wins the arbitration.
+				expect(result.success).toBe(false);
+				expect(result.error).toMatch(/absolute lap ceiling/);
+				expect(result.error).toMatch(/9.*max 8/);
+				expect(result.stagesCompleted).toBe(18);
+			});
+
+			it("ceiling trip rows: the note names the ceiling + laps arithmetic; trip order is routing-then-failure, one of each", async () => {
+				for (let i = 1; i <= 3; i++) {
+					writeArtifact(tmpDir, `.rpiv/artifacts/a/a${i}.md`);
+					writeArtifact(tmpDir, `.rpiv/artifacts/b/b${i}.md`);
+				}
+				const chain = createMockSessionChain({
+					cwd: tmpDir,
+					steps: [
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b1.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b2.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/a/a3.md")] },
+						{ branch: [mockAssistantMessage("Wrote .rpiv/artifacts/b/b3.md")] },
+					],
+				});
+
+				const workflow = wf(
+					"ceiling-rows",
+					["a", "b", "c"],
+					{ a: { progress: () => "improved" } },
+					{ b: defineRoute(["a", "c"], () => "a", { readsData: false }) },
+				);
+
+				const result = await runWorkflow(chain.ctx, {
+					workflow,
+					input: "x",
+					maxBackwardJumps: 1,
+					maxLaps: 2,
+				});
+
+				expect(result.success).toBe(false);
+				const { stages } = readState(tmpDir);
+				const routingRows = stages.filter((s) => s.type === "routing");
+				const failedRows = stages.filter((s) => s.status === "failed");
+				expect(failedRows).toHaveLength(1);
+				// Every b→a row is a re-entry (first visit decides b itself): each
+				// carries the laps arithmetic; the trip row (the last) names the ceiling.
+				expect(routingRows).toHaveLength(3);
+				for (const row of routingRows) expect(row.note).toMatch(/lap \d+\/2/);
+				const trip = routingRows[routingRows.length - 1]!;
+				expect(trip.note).toMatch(/lap 3\/2/);
+				expect(trip.note).toMatch(/ceiling/);
+				// Trip order: the trip's routing row is immediately followed by the
+				// failure row — exactly one of each, failure last.
+				const tripIdx = stages.indexOf(trip);
+				const failureIdx = stages.indexOf(failedRows[0]!);
+				expect(failureIdx).toBe(stages.length - 1);
+				expect(failureIdx).toBe(tripIdx + 1);
+			});
 		});
 	});
 
 	// -----------------------------------------------------------------------
-	// Q20+ID — workflow runner emits `/skill:<name>` via sendUserMessage, which
+	// The workflow runner emits `/skill:<name>` via sendUserMessage, which
 	// goes through `prompt({expandPromptTemplates: false})` — Pi's built-in
 	// `_expandSkillCommand` is skipped, so `rpiv-args` is the only expander.
 	// If the skill isn't registered, `rpiv-args` returns `{action:"continue"}`
@@ -2018,10 +3140,10 @@ describe("runWorkflow", () => {
 		it("snapshots the skill registry once at workflow start (host.getCommands not called per-stage)", async () => {
 			// Regression: pre-fix, ensureSkillRegistered called host.getCommands()
 			// for every downstream stage's preflight. Pi marks the host handle
-			// stale after the first ctx.newSession(), so the second call threw
+			// stale once the first child session opens, so the second call threw
 			// "extension ctx is stale" — a research → blueprint chain halted on
 			// stage 2 with no toast (the throw was caught by
-			// runStageOrRecordFailure and the user-visible error never surfaced).
+			// dispatchStageOrRecordFailure and the user-visible error never surfaced).
 			//
 			// Post-fix, runWorkflow snapshots the registry ONCE before any
 			// session opens and ensureSkillRegistered consults the snapshot.
@@ -2043,10 +3165,7 @@ describe("runWorkflow", () => {
 			getCommandsSpy.mockImplementation(() => {
 				callCount++;
 				if (callCount === 1) return firstResult;
-				throw new Error(
-					"This extension ctx is stale after session replacement or reload. " +
-						"Do not use a captured pi or command ctx after ctx.newSession().",
-				);
+				throw new Error("This extension ctx is stale after session replacement or reload.");
 			});
 
 			const chain = createMockSessionChain({
@@ -2075,6 +3194,42 @@ describe("runWorkflow", () => {
 			const { stages } = readState(tmpDir);
 			expect(stages.map((s) => s.status)).toEqual(["completed", "completed"]);
 			expect(stages.some((s) => /stale/.test(String(s.errMsg ?? "")))).toBe(false);
+		});
+
+		it("a throwing outcome snapshot warns ONCE per run and the stages still complete", async () => {
+			// Pre-fix the bare `catch {}` silently disabled diffing for the whole
+			// run with zero diagnostics. The stage must still run (snapshot is
+			// best-effort) but the FIRST failure surfaces a warning.
+			const throwingSnapshotOutcome: Outcome = {
+				collector: {
+					snapshot: () => {
+						throw new Error("custom snapshot bug");
+					},
+					collect: () => ({ kind: "ok", artifacts: [{ handle: fsHandle("out.md"), role: "primary" }] }),
+				},
+			};
+			const chain = createMockSessionChain({
+				cwd: tmpDir,
+				steps: [{ branch: [mockAssistantMessage("one")] }, { branch: [mockAssistantMessage("two")] }],
+			});
+
+			const result = await runWorkflow(chain.ctx, {
+				workflow: wf("snap", ["research", "design"], {
+					research: { outcome: throwingSnapshotOutcome },
+					design: { outcome: throwingSnapshotOutcome },
+				}),
+				input: "x",
+			});
+
+			expect(result.success).toBe(true);
+			expect(result.stagesCompleted).toBe(2);
+			const warns = chain.notifications.filter(
+				(n) => n.level === "warning" && /outcome snapshot for research threw/.test(n.msg),
+			);
+			expect(warns).toHaveLength(1);
+			expect(warns[0]?.msg).toContain("custom snapshot bug");
+			// Second stage's identical failure stays silent — one warning per run.
+			expect(chain.notifications.filter((n) => /outcome snapshot/.test(n.msg))).toHaveLength(1);
 		});
 
 		it("skips the check when pi is not provided (no registry to consult)", async () => {
@@ -2117,12 +3272,12 @@ describe("runWorkflow", () => {
 				onStageError: (stage: unknown, error: unknown, ctx: unknown) =>
 					void calls.push(["onStageError", [stage, error, ctx]]),
 				onRoute: (from: unknown, to: unknown, ctx: unknown) => void calls.push(["onRoute", [from, to, ctx]]),
-				onFanoutStart: (stage: unknown, units: unknown, ctx: unknown) =>
-					void calls.push(["onFanoutStart", [stage, units, ctx]]),
-				onFanoutUnitStart: (stage: unknown, unit: unknown, i: unknown, ctx: unknown) =>
-					void calls.push(["onFanoutUnitStart", [stage, unit, i, ctx]]),
-				onFanoutUnitEnd: (stage: unknown, unit: unknown, i: unknown, ctx: unknown) =>
-					void calls.push(["onFanoutUnitEnd", [stage, unit, i, ctx]]),
+				onLoopStart: (stage: unknown, info: unknown, ctx: unknown) =>
+					void calls.push(["onLoopStart", [stage, info, ctx]]),
+				onUnitStart: (stage: unknown, unit: unknown, ctx: unknown) =>
+					void calls.push(["onUnitStart", [stage, unit, ctx]]),
+				onUnitEnd: (stage: unknown, unit: unknown, output: unknown, ctx: unknown) =>
+					void calls.push(["onUnitEnd", [stage, unit, output, ctx]]),
 				onWorkflowEnd: (result: unknown, ctx: unknown) => void calls.push(["onWorkflowEnd", [result, ctx]]),
 			};
 			return { calls, lifecycle };
@@ -2140,7 +3295,12 @@ describe("runWorkflow", () => {
 			expect(result.success).toBe(true);
 			const starts = calls.filter(([n]) => n === "onWorkflowStart");
 			expect(starts).toHaveLength(1);
-			const ctx = starts[0]![1][0] as { cwd: string; runId: string; workflow: string; totalStages: number };
+			const ctx = starts[0]![1][0] as {
+				cwd: string;
+				runId: string;
+				workflow: string;
+				totalStages: number;
+			};
 			expect(ctx.cwd).toBe(tmpDir);
 			expect(ctx.runId).toBe(result.runId);
 			expect(ctx.workflow).toBe("tiny");
@@ -2216,7 +3376,7 @@ describe("runWorkflow", () => {
 			expect(to).toBe("stop");
 		});
 
-		it("onFanoutStart + onFanoutUnitStart/End fire in correct order for a 3-unit fanout", async () => {
+		it("onLoopStart + onUnitStart/End fire in correct order for a 3-unit fanout loop", async () => {
 			const planRel = ".rpiv/artifacts/plans/p.md";
 			writeArtifact(tmpDir, planRel, "# Plan\n## Phase 1:\n## Phase 2:\n## Phase 3:\n");
 			const chain = createMockSessionChain({
@@ -2239,19 +3399,24 @@ describe("runWorkflow", () => {
 			};
 			const { calls, lifecycle } = recorder();
 			await runWorkflow(chain.ctx, {
-				workflow: wf("rip", ["research", "implement"], { implement: { fanout: phaseFanout } }),
+				workflow: wf("rip", ["research", "implement"], { implement: { loop: fanout({ units: phaseFanout }) } }),
 				input: "x",
 				lifecycle,
 			});
-			const fanoutNames = names(calls).filter((n) => n.startsWith("onFanout") || n === "onStageStart");
-			// Expected fanout sequence within the implement stage:
-			//   onStageStart(implement) → onFanoutStart → onFanoutUnitStart x onFanoutUnitEnd interleaved.
-			const impl = fanoutNames.slice(fanoutNames.indexOf("onFanoutStart") - 1);
+			const loopNames = names(calls).filter(
+				(n) => n === "onLoopStart" || n === "onUnitStart" || n === "onUnitEnd" || n === "onStageStart",
+			);
+			// Expected loop sequence within the implement stage:
+			//   onStageStart(implement) → onLoopStart → (onUnitStart → onUnitEnd) × 3.
+			const impl = loopNames.slice(loopNames.indexOf("onLoopStart") - 1);
 			expect(impl[0]).toBe("onStageStart");
-			expect(impl[1]).toBe("onFanoutStart");
-			// Three unit-start + unit-end pairs after fanout start.
-			expect(impl.filter((n) => n === "onFanoutUnitStart")).toHaveLength(3);
-			expect(impl.filter((n) => n === "onFanoutUnitEnd")).toHaveLength(3);
+			expect(impl[1]).toBe("onLoopStart");
+			// Three unit-start + unit-end pairs after loop start.
+			expect(impl.filter((n) => n === "onUnitStart")).toHaveLength(3);
+			expect(impl.filter((n) => n === "onUnitEnd")).toHaveLength(3);
+			// Units pair start-before-end: the first post-loopStart event is a unit start.
+			expect(impl[2]).toBe("onUnitStart");
+			expect(impl[3]).toBe("onUnitEnd");
 		});
 
 		it("onWorkflowEnd fires exactly once as the last event with the result envelope", async () => {
@@ -2352,7 +3517,7 @@ describe("runWorkflow", () => {
 			};
 
 			it("two registered bundles both receive every event in registration order", async () => {
-				const { registerLifecycle } = await import("./lifecycle.js");
+				const { registerLifecycle } = await import("./events.js");
 				const order: string[] = [];
 				const bundleA = { onStageEnd: () => void order.push("A") };
 				const bundleB = { onStageEnd: () => void order.push("B") };
@@ -2369,7 +3534,7 @@ describe("runWorkflow", () => {
 			});
 
 			it("registerLifecycle returns a disposer that removes the bundle", async () => {
-				const { registerLifecycle } = await import("./lifecycle.js");
+				const { registerLifecycle } = await import("./events.js");
 				const seen: string[] = [];
 				const dispose = registerLifecycle({ onStageEnd: () => void seen.push("registered") });
 				dispose();
@@ -2379,7 +3544,7 @@ describe("runWorkflow", () => {
 			});
 
 			it("per-call options.lifecycle fires AFTER globally-registered bundles", async () => {
-				const { registerLifecycle } = await import("./lifecycle.js");
+				const { registerLifecycle } = await import("./events.js");
 				const order: string[] = [];
 				const disposeGlobal = registerLifecycle({ onStageEnd: () => void order.push("global") });
 				try {
@@ -2396,7 +3561,7 @@ describe("runWorkflow", () => {
 			});
 
 			it("a throw in one bundle doesn't stop other bundles or the run", async () => {
-				const { registerLifecycle } = await import("./lifecycle.js");
+				const { registerLifecycle } = await import("./events.js");
 				const seen: string[] = [];
 				const dispose = registerLifecycle({
 					onStageEnd: () => {
@@ -2421,7 +3586,7 @@ describe("runWorkflow", () => {
 			});
 
 			it("registration made mid-run does NOT receive the in-flight event but DOES receive the next", async () => {
-				const { registerLifecycle } = await import("./lifecycle.js");
+				const { registerLifecycle } = await import("./events.js");
 				const seen: string[] = [];
 				let lateDispose: (() => void) | undefined;
 				const dispose = registerLifecycle({
@@ -2449,7 +3614,7 @@ describe("runWorkflow", () => {
 						workflow: wf("two", ["research", "design"]),
 						input: "x",
 					});
-					// Only stage 2 ("design") should appear — stage 1's onStageStart was the in-flight event.
+					// Only stage 2 should appear — stage 1's onStageStart was the in-flight event.
 					expect(seen).toEqual(["late-saw-design"]);
 				} finally {
 					dispose();
@@ -2483,6 +3648,7 @@ describe("runWorkflow", () => {
 				stagesCompleted: 1,
 				lastArtifact: ".rpiv/artifacts/research/r.md",
 				error: undefined,
+				termination: { status: "completed" },
 			});
 			expect(chain.sentMessages).toEqual(["/skill:research add dark mode"]);
 			// A JSONL run file was written under the resolved runId.
@@ -2502,7 +3668,7 @@ describe("runWorkflow", () => {
 			// Surfaces what IS available so the caller can recover.
 			expect(result.error).toContain("present");
 			// Nothing ran: no session opened, no run file written.
-			expect(chain.ctx.newSession).not.toHaveBeenCalled();
+			expect(chain.ctx.spawnChild).not.toHaveBeenCalled();
 			expect(existsSync(join(tmpDir, ".rpiv", "workflows", "runs"))).toBe(false);
 		});
 
@@ -2542,7 +3708,7 @@ describe("runWorkflow", () => {
 			// A JSONL file IS written (header + aborted row), so runId is present —
 			// distinguishing an abort from a pre-flight rejection (no file, no runId).
 			expect(result.runId).toBeTruthy();
-			expect(chain.ctx.newSession).not.toHaveBeenCalled();
+			expect(chain.ctx.spawnChild).not.toHaveBeenCalled();
 
 			const { stages } = readState(tmpDir);
 			expect(stages).toHaveLength(1);
@@ -2575,7 +3741,7 @@ describe("runWorkflow", () => {
 			expect(result.stagesCompleted).toBe(1);
 			expect(result.error).toMatch(/aborted before stage "design"/);
 			// Stage 1 streamed; stage 2 never opened a session.
-			expect(chain.ctx.newSession).toHaveBeenCalledTimes(1);
+			expect(chain.ctx.spawnChild).toHaveBeenCalledTimes(1);
 			expect(chain.remaining()).toBe(0);
 
 			const { stages } = readState(tmpDir);
@@ -2656,10 +3822,22 @@ describe("totalStages denominator (countReachableNodes)", () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	const stageDenominator = (statusUpdates: Array<{ key: string; value: string | undefined }>): number | undefined => {
-		const first = statusUpdates.find((u) => u.value !== undefined);
-		const match = first?.value?.match(/stage \d+\/(\d+)/);
-		return match ? Number(match[1]) : undefined;
+	// The denominator is the `totalStages` the runner computes via
+	// countReachableStages and surfaces on the lifecycle context (it was formerly
+	// read off the now-removed status line).
+	const captureTotalStages = (): {
+		lifecycle: { onWorkflowStart: (ctx: { totalStages: number }) => void };
+		get: () => number | undefined;
+	} => {
+		let total: number | undefined;
+		return {
+			lifecycle: {
+				onWorkflowStart: (ctx) => {
+					total = ctx.totalStages;
+				},
+			},
+			get: () => total,
+		};
 	};
 
 	it("counts every reachable node along a linear chain", async () => {
@@ -2669,6 +3847,7 @@ describe("totalStages denominator (countReachableNodes)", () => {
 			steps: [{ branch: [mockAssistantMessage("done")] }],
 		});
 		// 3-node linear chain — denominator should be 3.
+		const cap = captureTotalStages();
 		await runWorkflow(chain.ctx, {
 			workflow: {
 				name: "linear",
@@ -2681,8 +3860,9 @@ describe("totalStages denominator (countReachableNodes)", () => {
 				edges: { a: "b", b: "c", c: "stop" },
 			},
 			input: "x",
+			lifecycle: cap.lifecycle,
 		});
-		expect(stageDenominator(chain.statusUpdates)).toBe(3);
+		expect(cap.get()).toBe(3);
 	});
 
 	it("counts both branches when an edge is a gate (with .targets)", async () => {
@@ -2690,6 +3870,7 @@ describe("totalStages denominator (countReachableNodes)", () => {
 			cwd: tmpDir,
 			steps: [{ branch: [mockAssistantMessage("done")] }],
 		});
+		const cap = captureTotalStages();
 		await runWorkflow(chain.ctx, {
 			workflow: {
 				name: "branching",
@@ -2700,11 +3881,12 @@ describe("totalStages denominator (countReachableNodes)", () => {
 					c: { kind: "side-effect", sessionPolicy: "fresh" },
 				},
 				// gate attaches .targets = ["b", "c"]; BFS reaches both.
-				edges: { a: gate("count", { b: gt(0), c: eq(0) }), b: "stop", c: "stop" },
+				edges: { a: gate("count", { b: gt(0), c: eq(0) }, "c"), b: "stop", c: "stop" },
 			},
 			input: "x",
+			lifecycle: cap.lifecycle,
 		});
-		expect(stageDenominator(chain.statusUpdates)).toBe(3);
+		expect(cap.get()).toBe(3);
 	});
 
 	it("excludes orphan (unreachable) nodes from the count", async () => {
@@ -2713,6 +3895,7 @@ describe("totalStages denominator (countReachableNodes)", () => {
 			steps: [{ branch: [mockAssistantMessage("done")] }],
 		});
 		// `orphan` is declared but never reachable from start.
+		const cap = captureTotalStages();
 		await runWorkflow(chain.ctx, {
 			workflow: {
 				name: "with-orphan",
@@ -2725,9 +3908,10 @@ describe("totalStages denominator (countReachableNodes)", () => {
 				edges: { a: "b", b: "stop", orphan: "stop" },
 			},
 			input: "x",
+			lifecycle: cap.lifecycle,
 		});
 		// BFS reaches {a, b} — denominator is 2, not 3.
-		expect(stageDenominator(chain.statusUpdates)).toBe(2);
+		expect(cap.get()).toBe(2);
 	});
 
 	it("throws when an EdgeFn has no .targets — validation should have rejected the workflow", async () => {

@@ -7,7 +7,7 @@ order: 0
 
 Five recipes. The smallest that still keeps the driver in the loop where it matters is the one to run.
 
-The pipeline is a menu, not a script. Each skill writes a markdown artifact under `.rpiv/artifacts/<stage>/` that the next skill reads, so you can stop, review, and resume between any two steps. Two inputs decide your chain: scope, and what's already in hand.
+The pipeline is a menu, not a script. Most skills write a markdown artifact into a bucket under `.rpiv/artifacts/` — `discover/`, `research/`, `solutions/`, `slices/`, `designs/`, `plans/`, `reviews/`, `validation/` and friends, each named for the artifact kind rather than the skill that wrote it — and the next skill reads it, so you can stop, review, and resume between any two steps. `implement` and `commit` are the side-effect stages of the chain: they mutate the working tree and the git history rather than emitting an artifact. Two inputs decide your chain: scope, and what's already in hand.
 
 Path choice isn't a one-way door. Pick too big and you pay extra latency on artifacts you didn't need. Pick too small and you'll usually feel it mid-implement; back up a phase, switch to the next path up, keep going. The penalty is time, not damage.
 
@@ -19,21 +19,22 @@ The chain proper starts at `/skill:research`. How you get there depends on what 
 |---|---|
 | A spec, ticket, or sharp description | `/skill:research <free-text>`. No pre-phase needed. |
 | A fuzzy idea | `/skill:discover` first. It interviews you one question at a time and writes a Feature Requirements Document that `/skill:research` then reads. |
-| A clear feature, unsure of the technical approach | `/skill:explore` first. Compares valid technical approaches side-by-side. The solutions document feeds `/skill:design` or `/skill:blueprint` directly, or routes through `/skill:research` first for codebase grounding. |
+| A clear feature, unsure of the technical approach | `/skill:explore` first. Compares valid technical approaches side-by-side. The solutions document feeds `/skill:design` or `/skill:blueprint` directly. For codebase grounding, run `/skill:research` first and hand its output to `/skill:explore`. |
 
 ## Hand-drive, or hand it to `/wf`
 
-The recipes below run the same skills in the same order whether you invoke them yourself or hand them to the workflow runner. `rpiv-workflow` ships five bundled workflows:
+The recipes below run the same skills in the same order whether you invoke them yourself or hand them to the workflow runner. `rpiv-workflow` runs the four pipelines `rpiv-pi` bundles:
 
-- **`/wf ship`** — `blueprint → implement → validate → commit`. Fast path with no research and no review. Suits small+ through midsize features where the approach is already obvious and you don't need a codebase research pass.
-- **`/wf build`** — `research → blueprint → implement → validate → code-review → (revise → implement → loop) → commit`. Research-backed, with a review-and-revise loop bounded by the runner's `maxBackwardJumps` (default 2, so at most 3 review iterations).
-- **`/wf arch`** — `research → design → plan → implement → validate → code-review → (back to design → loop) → commit`. Design-led. The loop returns to `design` directly — there's no `revise` stage in this chain.
-- **`/wf vet`** — `code-review → (blueprint → implement → validate → loop) → commit`. Orthogonal to scope: point it at an existing diff (yours or a teammate's) for a structured review with an optional fix cycle.
-- **`/wf polish`** — `architecture-review → blueprint → implement → validate → code-review → (blueprint loop) → commit`. Off the scope ladder: for a large architecture review whose phases are dependency-ordered, so `blueprint` *iterates* — one plan per review phase, each building on the last — rather than planning everything in one pass. Reach for it when the review itself surfaced the sequence. → [Compose skills as skills](/docs/guides/compose-skills-as-skills).
+- **`/wf build`**: ships a feature from a brief, sliced and gated. `goal → research → acceptance → slice → ⛩ → slice-design ×N → design-review → subplan → plan → ⛩ → code ×phases → code-splice → ⛩ → implement → implement-scope-check → reconcile → validate → commit` (33 stages, abbreviated here — the gate glyphs stand in for their check/grade/fix stages). Two stage keys differ from the skill they dispatch: `slice-design` runs the `design-slice` skill, and `code` runs `elaborate`. Your brief is captured verbatim, an `acceptance` stage derives the executable standard of completion from it before any planning, and the plan and code gates anchor their completeness and correctness dimensions on both — as does `validate`, which executes the inventory's evidence commands. The slice gate is deliberately goal-blind. Slices are designed in parallel. The run pauses once, at a consolidated design review. Three gates each carry a bounded fix loop. → [Run a workflow](/docs/guides/run-a-workflow) for the full anatomy.
+- **`/wf vet`**: `goal → code-review → (blueprint → implement → implement-scope-check → reconcile → validate → loop) → commit`. Orthogonal to scope: point it at an existing diff (yours or a teammate's) for a structured review with an optional fix cycle.
+- **`/wf polish`**: `architecture-review → blueprint → implement → validate → code-review → (blueprint loop) → commit`. Off the scope ladder: for a large architecture review whose phases are dependency-ordered. `blueprint` *iterates*, one plan per review phase, each building on the last, rather than planning everything in one pass. Reach for it when the review itself surfaced the sequence. → [Compose skills as skills](/docs/guides/compose-skills-as-skills).
+- **`/wf ship`**: `goal → research → acceptance → plan → plan-cite-check → grade → implement → implement-scope-check → reconcile → validate → (validate-fix, once) | commit` (12 stages). The lightweight preset: a small, well-understood task in one forward pass — trimmed research, a goal-derived acceptance inventory (the executable standard of completion, frozen before planning; validate executes it), a single unsliced plan from `quick-plan`, one three-dimension grade, stop-on-fail at every gate (hand-repair and resume with `/wf @<run-id>` to re-run the halted gate) except validate's single bounded remediation hop. The opposite end of the spectrum from `build`: no slicing, no parallel design, no confirm panels. → [Run a workflow](/docs/guides/run-a-workflow).
 
-The runner writes artifacts under `.rpiv/artifacts/` exactly as the hand-driven chain does, plus an audited JSONL trail per run under `.rpiv/workflows/runs/<run-id>.jsonl` you can resume from with `/wf @<run-id>`. Routing is typed — `code-review` declares an output schema (`blockers_count` for build/arch, `status` for vet) and the runner picks the next stage from the value, no eyeballing required. Both build and arch fan out `implement` into one Pi session per `## Phase N:` heading in the inherited plan.
+(`/skill:pr-triage` runs standalone for read-only triage of an incoming GitHub PR: disposition plus security tier, nothing checked out. It feeds `/wf vet "<pr-url>"` — the exact command its Review disposition emits — when the PR earns a full pass.)
 
-Hand-drive when you want the pause between every artifact — for exploratory work, mid-flow pivots, or your first pass through a codebase. Use `/wf` once the chain's rhythm is muscle memory. → [Run a workflow](/docs/guides/run-a-workflow).
+The runner writes artifacts under `.rpiv/artifacts/` exactly as the hand-driven chain does, plus an audited JSONL trail per run under `.rpiv/workflows/runs/<run-id>.jsonl` you can resume from with `/wf @<run-id>`. Routing is typed: `vet` and `polish` route on the `blockers_count` field `code-review`'s contract supplies, and `build`'s three gates fold per-dimension grade verdicts. The runner picks the next stage from the value, no eyeballing required. Fanout stages run their units as simultaneous Pi child sessions with a live lane console. `implement` fans out one unit per `## Phase N:` heading in the plan. In `build` and `vet` the units carry `id: phase-<n>` plus `deps` derived from each phase's declared `files:` overlap and any explicit `depends_on`, so independent phases run concurrently in Kahn waves (a phase that declares no `files:` degrades to a full chain). Only `polish` serializes its units (`concurrency: 1`) — it fans one pass over every plan in the blueprint pass, whose units share a working tree with write-sets the scheduler can't derive edges from.
+
+Hand-drive when you want the pause between every artifact: for exploratory work, mid-flow pivots, or your first pass through a codebase. Use `/wf` once the chain's rhythm is muscle memory. → [Run a workflow](/docs/guides/run-a-workflow).
 
 ## Five paths by scope
 
@@ -79,7 +80,7 @@ For small fixes where research is the actual deliverable (the bug-fix and perf f
 [discover?] → blueprint → implement → validate → commit
 ```
 
-The gap between "fix in chat" and a full research-first chain. When the change is bigger than a single diff you'd apply in conversation but the approach is settled — you already know which files, which patterns, which seams — skip `research` entirely and start at `blueprint`. `blueprint` collapses design and planning into one pass; `implement` does the work; `validate` confirms the deliverable; commit.
+The gap between "fix in chat" and a full research-first chain. When the change is bigger than a single diff you'd apply in conversation but the approach is settled (you already know which files, which patterns, which seams), skip `research` entirely and start at `blueprint`. `blueprint` collapses design and planning into one pass; `implement` does the work; `validate` confirms the deliverable; commit.
 
 No `code-review` either. This shape works precisely because there's nothing for review to surface that you wouldn't catch in `validate` or the diff itself.
 
@@ -91,7 +92,7 @@ Good fits:
 - A scheduled job that mirrors an existing one (different cron + different payload, same plumbing)
 - A migration on a model whose shape you understand (add column, backfill, deploy)
 
-**Workflow shortcut:** `/wf ship <input>` runs this chain end-to-end. The hand-driven form earns its keep when you want a checkpoint between `blueprint` and `implement` to sanity-check the phases; the workflow form earns its keep when you've internalized that rhythm and trust the plan to be implement-ready first time.
+**Workflow shortcut: `/wf ship <input>`.** This scope is exactly what the lightweight preset was rebuilt for — one forward pass (`goal → research → acceptance → plan → plan-cite-check → grade → implement → implement-scope-check → reconcile → validate → commit`, plus validate's single bounded `validate-fix` hop) with research trimmed to at most two analyzer dispatches and a single unsliced plan from `quick-plan`. Every gate is stop-on-fail, so the latency is the pass itself, not the machinery around it — and a red gate is a halt, not a restart: hand-repair, then `/wf @<run-id>` re-runs the halted gate with everything upstream intact. Hand-drive `blueprint → implement → validate → commit` when you want the pause between `blueprint` and `implement` to sanity-check the phases — `blueprint` still earns its checkpoint loop on shapes with genuine design forks — or make the change in chat and run `/wf vet staged` afterwards when you want a structured second pass.
 
 ### Mid-size feature
 
@@ -105,7 +106,7 @@ Good fits:
 
 `blueprint` collapses design and planning into one pass via vertical-slice decomposition. You get an implement-ready plan with developer checkpoints between phases.
 
-**Workflow shortcut:** `/wf build <input>` runs this chain end-to-end with the `code-review → revise → implement` loop wired in (bounded at 3 review iterations by the runner's `maxBackwardJumps` guard).
+**Workflow shortcut:** hand-drive the chain above, then `/wf vet main..HEAD` gives you the review-and-fix loop without further machinery. When the feature is big enough that decomposition itself is work, step up to `/wf build <input>` and let the pipeline run the slicing.
 
 Good fits:
 
@@ -132,7 +133,7 @@ Two signals you've outgrown blueprint. **Revision count**: if you find yourself 
 
 Split design and plan when the architecture is the hard part. `design` locks decisions and slices; `plan` sequences them into atomic phases with success criteria. `revise` (see below) is the feedback loop when implement, validate, or code-review surfaces a real flaw.
 
-**Workflow shortcut:** `/wf arch <input>` runs this chain end-to-end. The bundled `arch` workflow has no `revise` stage — when `code-review` reports blockers, the loop returns to `design` directly (bounded at 3 review iterations by `maxBackwardJumps`). If you want `revise` between iterations rather than re-entering design, stay hand-driven or author a custom workflow.
+**Workflow shortcut:** `/wf build <input>` is built for exactly this scope. It runs the decomposition as parallel vertical slices, pauses once at a consolidated design review (accept or adjust the interfaces and data types before synthesis), and gates the plan and the code before a line is implemented. The hand-driven `design` + `plan` split stays the right call when you want a pause at every artifact rather than one design gate.
 
 Good fits:
 

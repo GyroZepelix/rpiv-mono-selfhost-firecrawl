@@ -10,11 +10,32 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Type } from "@sinclair/typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { acts, defineWorkflow, produces as producesRaw, type StageDef, type Workflow } from "./api.js";
-import { __resetBuiltIns, registerBuiltIns } from "./built-ins.js";
+import { __resetBuiltIns, registerBuiltIns, registerBuiltInsProvider } from "./built-ins.js";
 import { loadWorkflows, projectOverlayPaths, userOverlayPaths } from "./load/index.js";
 import { noopCollector } from "./outcomes/index.js";
+import type { SkillContract } from "./skill-contract.js";
+import {
+	__resetSkillContracts,
+	getSkillContracts,
+	registerOutcomeDeriver,
+	registerSkillContracts,
+	registerSkillContractsProvider,
+} from "./skill-contracts/index.js";
+import { typeboxSchema } from "./typebox-adapter.js";
+
+/** Strip symbol keys from an object tree for deep-equal comparison. */
+function stripSymbols(value: unknown): unknown {
+	if (value === null || value === undefined || typeof value !== "object") return value;
+	if (Array.isArray(value)) return value.map(stripSymbols);
+	const out: Record<string, unknown> = {};
+	for (const key of Object.keys(value as Record<string, unknown>)) {
+		out[key] = stripSymbols((value as Record<string, unknown>)[key]);
+	}
+	return out;
+}
 
 // `produces` stages require an outcome (validated at load time). Load
 // tests assert merge / source-layer shape, so we wire a noop collector
@@ -22,7 +43,7 @@ import { noopCollector } from "./outcomes/index.js";
 // minimal scaffolding per fixture.
 const STUB_ARTIFACT_OUTCOME = { collector: noopCollector };
 const produces = (overrides: Partial<StageDef> = {}): StageDef =>
-	producesRaw({ outcome: STUB_ARTIFACT_OUTCOME, ...overrides });
+	producesRaw({ outcome: STUB_ARTIFACT_OUTCOME, ...overrides } as Partial<StageDef>);
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -55,6 +76,7 @@ beforeEach(() => {
 afterEach(() => {
 	rmSync(TEST_TMP, { recursive: true, force: true });
 	rmSync(USER_CONFIG_DIR, { recursive: true, force: true });
+	__resetSkillContracts();
 });
 
 const writeProjectConfig = (cwd: string, body: string): void => {
@@ -869,5 +891,207 @@ export default {
 				(i) => i.kind === "load" && i.severity === "error" && /`workflows` must be a Workflow\[\]/.test(i.message),
 			),
 		).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Skill contracts — declared ⊕ harvested effective registry
+// ---------------------------------------------------------------------------
+
+describe("loadWorkflows — skillContracts", () => {
+	const declaredContract: SkillContract = {
+		source: "declared",
+		produces: { kind: "produces", data: { type: "object", properties: { findings: { type: "string" } } } },
+	};
+
+	it("declared contract overrides harvested for the same skill", async () => {
+		// Register a declared contract for the built-in "small" workflow's implement skill
+		registerSkillContracts([["implement", declaredContract]]);
+
+		const loaded = await loadWorkflows(TEST_TMP);
+		const implementContract = loaded.skillContracts.get("implement");
+		expect(implementContract).toBeDefined();
+		expect(implementContract?.source).toBe("declared");
+		expect(implementContract?.produces?.data).toEqual({
+			type: "object",
+			properties: { findings: { type: "string" } },
+		});
+	});
+
+	it("harvested contract appears for dispatched skills with typebox schemas but no declared contract", async () => {
+		// Register built-in workflows with typebox schemas on their stages
+		__resetBuiltIns();
+		registerBuiltIns([
+			defineWorkflow({
+				name: "harvest-test",
+				start: "a",
+				stages: {
+					a: produces({ outputSchema: typeboxSchema(Type.Object({ result: Type.String() })) }),
+					b: producesRaw({
+						outcome: STUB_ARTIFACT_OUTCOME,
+						inputSchema: typeboxSchema(Type.Object({ result: Type.String() })),
+					}),
+				},
+				edges: { a: "b", b: "stop" },
+			}),
+		]);
+
+		const loaded = await loadWorkflows(TEST_TMP);
+		// Both 'a' and 'b' should have harvested contracts
+		const aContract = loaded.skillContracts.get("a");
+		expect(aContract).toBeDefined();
+		expect(aContract?.source).toBe("harvested");
+		expect(stripSymbols(aContract?.produces?.data)).toEqual({
+			type: "object",
+			properties: { result: { type: "string" } },
+			required: ["result"],
+		});
+
+		const bContract = loaded.skillContracts.get("b");
+		expect(bContract).toBeDefined();
+		expect(bContract?.source).toBe("harvested");
+		expect(stripSymbols(bContract?.consumes?.data)).toEqual({
+			type: "object",
+			properties: { result: { type: "string" } },
+			required: ["result"],
+		});
+	});
+
+	it("produces-stage skills appear in skillContracts with kind but no data schema", async () => {
+		// Built-in 'mid' has a 'x' produces() stage — harvested with kind but no data.
+		const loaded = await loadWorkflows(TEST_TMP);
+		const xContract = loaded.skillContracts.get("x");
+		expect(xContract).toBeDefined();
+		expect(xContract?.source).toBe("harvested");
+		expect(xContract?.produces?.kind).toBe("produces");
+		expect(xContract?.produces?.data).toBeUndefined();
+	});
+
+	it("does not mutate the global registry — skillContracts is a separate map", async () => {
+		registerSkillContracts([["implement", declaredContract]]);
+		const globalBefore = getSkillContracts();
+		const loaded = await loadWorkflows(TEST_TMP);
+		// The loaded skillContracts includes harvested entries NOT in the global
+		expect(loaded.skillContracts.size).toBeGreaterThanOrEqual(globalBefore.size);
+		// The global registry is unchanged
+		expect(globalBefore.size).toBe(getSkillContracts().size);
+	});
+
+	it("surfaces provider failures as warning LoadIssues", async () => {
+		registerSkillContractsProvider(() => {
+			throw new Error("test provider failure");
+		});
+		const loaded = await loadWorkflows(TEST_TMP);
+		const providerIssue = loaded.issues.find(
+			(i) => i.kind === "load" && i.severity === "warning" && /skill-contract provider failed/.test(i.message),
+		);
+		expect(providerIssue).toBeDefined();
+		expect(providerIssue?.message).toContain("test provider failure");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Outcome derivers — per-load stage copies
+// ---------------------------------------------------------------------------
+
+describe("loadWorkflows — outcome derivers", () => {
+	/**
+	 * A representative deriver (rpiv-pi's shape): mutates `stage.outcome` in
+	 * place on produces stages that lack one, keyed off the contract registry.
+	 * The loader must hand it PER-LOAD stage copies — a mutation pinned onto a
+	 * shared built-in would survive the next load, and the idempotency guard
+	 * (`if (stage.outcome) continue`) would then skip re-derivation even after
+	 * the contract changed.
+	 */
+	const kindDeriver: Parameters<typeof registerOutcomeDeriver>[0] = (workflows, contracts) => {
+		for (const w of workflows) {
+			for (const [name, stage] of Object.entries(w.stages)) {
+				if (stage.kind !== "produces" || stage.outcome) continue;
+				const meta = contracts.get(stage.skill ?? name)?.produces?.meta as { artifactKind?: string } | undefined;
+				if (meta?.artifactKind) stage.outcome = { collector: noopCollector, name: `derived-${meta.artifactKind}` };
+			}
+		}
+	};
+
+	const planContract = (artifactKind: string): SkillContract => ({
+		source: "declared",
+		produces: { kind: "produces", meta: { artifactKind } },
+	});
+
+	it("a contract change between loads refreshes the derived outcome; shared built-ins stay pristine", async () => {
+		const bare = defineWorkflow({
+			name: "derived-wf",
+			start: "plan",
+			stages: { plan: producesRaw() }, // no outcome — the deriver supplies it
+			edges: { plan: "stop" },
+		});
+		__resetBuiltIns();
+		registerBuiltIns([bare]);
+		registerOutcomeDeriver(kindDeriver);
+
+		registerSkillContracts([["plan", planContract("plan")]], "test-owner");
+		const first = await loadWorkflows(TEST_TMP);
+		const firstStage = first.workflows.find((w) => w.name === "derived-wf")?.stages.plan;
+		expect(firstStage?.outcome?.name).toBe("derived-plan");
+		// The shared built-in registry object was never mutated.
+		expect(bare.stages.plan?.outcome).toBeUndefined();
+
+		// Contract changes between /reload's — the derived outcome must follow.
+		registerSkillContracts([["plan", planContract("design")]], "test-owner");
+		const second = await loadWorkflows(TEST_TMP);
+		const secondStage = second.workflows.find((w) => w.name === "derived-wf")?.stages.plan;
+		expect(secondStage?.outcome?.name).toBe("derived-design");
+		expect(bare.stages.plan?.outcome).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Built-in providers — record-and-drain failure posture
+// ---------------------------------------------------------------------------
+
+describe("loadWorkflows — built-in providers", () => {
+	it("surfaces built-in provider failures as warning LoadIssues (never throws)", async () => {
+		registerBuiltInsProvider(() => {
+			throw new Error("test built-in provider failure");
+		});
+		// `loadWorkflows` honors its never-throws contract — a throwing provider
+		// degrades to a warning LoadIssue instead of rejecting the call.
+		const loaded = await loadWorkflows(TEST_TMP);
+		const providerIssue = loaded.issues.find(
+			(i) => i.kind === "load" && i.severity === "warning" && /built-in provider failed/.test(i.message),
+		);
+		expect(providerIssue).toBeDefined();
+		expect(providerIssue?.message).toContain("test built-in provider failure");
+	});
+
+	it("surfaces each throwing provider as its own warning Issue (multi-failure visibility)", async () => {
+		registerBuiltInsProvider(() => {
+			throw new Error("first provider failure");
+		});
+		registerBuiltInsProvider(() => {
+			throw new Error("second provider failure");
+		});
+		const loaded = await loadWorkflows(TEST_TMP);
+		const providerIssues = loaded.issues.filter(
+			(i) => i.kind === "load" && i.severity === "warning" && /built-in provider failed/.test(i.message),
+		);
+		expect(providerIssues).toHaveLength(2);
+		expect(providerIssues.some((i) => i.message.includes("first provider failure"))).toBe(true);
+		expect(providerIssues.some((i) => i.message.includes("second provider failure"))).toBe(true);
+	});
+
+	it("does not emit a spurious Issue when a built-in provider succeeds", async () => {
+		const wf = defineWorkflow({
+			name: "provider-supplied-wf",
+			start: "plan",
+			stages: { plan: produces() },
+			edges: { plan: "stop" },
+		});
+		registerBuiltInsProvider(() => {
+			registerBuiltIns([wf]);
+		});
+		const loaded = await loadWorkflows(TEST_TMP);
+		expect(loaded.issues.find((i) => /built-in provider failed/.test(i.message))).toBeUndefined();
+		expect(loaded.workflows.find((w) => w.name === "provider-supplied-wf")).toBeDefined();
 	});
 });

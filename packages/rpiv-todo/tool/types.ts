@@ -74,8 +74,7 @@ export interface TaskMutationParams {
 
 // ---------------------------------------------------------------------------
 // TypeBox parameter schema — every `description` doubles as LLM-facing prompt
-// copy. Field order and wording are pinned by registration tests and the
-// pre-refactor schema at `packages/rpiv-todo/todo.ts:512-573`.
+// copy. Field order and wording are pinned by registration tests.
 // ---------------------------------------------------------------------------
 
 export const TodoParamsSchema = Type.Object({
@@ -89,7 +88,8 @@ export const TodoParamsSchema = Type.Object({
 	),
 	status: Type.Optional(
 		StringEnum(["pending", "in_progress", "completed", "deleted"] as const, {
-			description: "Target status (update) or list filter (list)",
+			description:
+				"Set this task's status (update): one of pending, in_progress, completed, deleted. When action is list, filters returned tasks by this status.",
 		}),
 	),
 	blockedBy: Type.Optional(

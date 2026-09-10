@@ -1,6 +1,6 @@
 {
 	"name": "@juicesharp/rpiv-ask-user-question",
-	"version": "1.17.1",
+	"version": "2.9.0",
 	"description": "Pi extension. A structured questionnaire the model can put to you when it would otherwise guess, with typed options instead of free-form replies.",
 	"keywords": [
 		"pi-package",
@@ -31,13 +31,20 @@
 	},
 	"files": [
 		"ask-user-question.ts",
+		"rpc-fallback.ts",
 		"config.ts",
 		"events.ts",
 		"index.ts",
+		"reconcile.ts",
 		"LICENSE",
 		"locales/",
+		"docs/",
+		"!docs/*.png",
+		"!docs/*.jpg",
+		"!docs/*.svg",
 		"README.md",
 		"state/build-questionnaire.ts",
+		"state/external-editor.ts",
 		"state/i18n-bridge.ts",
 		"state/key-router.ts",
 		"state/questionnaire-session.ts",
@@ -49,11 +56,12 @@
 		"state/state-reducer.ts",
 		"state/state.ts",
 		"tool/format-answer.ts",
+		"tool/normalize-params.ts",
 		"tool/response-envelope.ts",
 		"tool/types.ts",
 		"tool/validate-questionnaire.ts",
 		"view/component-binding.ts",
-		"view/components/chat-row-view.ts",
+		"view/components/inline-input.ts",
 		"view/components/multi-select-view.ts",
 		"view/components/option-list-view.ts",
 		"view/components/preview/markdown-content-cache.ts",
@@ -71,6 +79,7 @@
 		"view/tab-content-strategy.ts"
 	],
 	"pi": {
+		"image": "https://raw.githubusercontent.com/juicesharp/rpiv-mono/main/packages/rpiv-ask-user-question/docs/cover.png",
 		"extensions": [
 			"./index.ts"
 		]
@@ -78,8 +87,7 @@
 	"peerDependencies": {
 		"@juicesharp/rpiv-i18n": "*",
 		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
+		"@earendil-works/pi-tui": "*"
 	},
 	"peerDependenciesMeta": {
 		"@juicesharp/rpiv-i18n": {
@@ -87,6 +95,7 @@
 		}
 	},
 	"dependencies": {
-		"@juicesharp/rpiv-config": "^1.17.1"
+		"@juicesharp/rpiv-config": "^2.9.0",
+		"typebox": "^1.1.24"
 	}
 }

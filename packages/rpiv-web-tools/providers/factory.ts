@@ -16,7 +16,7 @@ export interface ProviderCredentials {
 }
 
 // The return union mirrors the role split: Brave/Serper/SearXNG are search-
-// only (SearchProvider); the other five expose native fetch endpoints too
+// only (SearchProvider); the other six expose native fetch endpoints too
 // (FullProvider). Consumers narrow with `"fetch" in provider` when they need
 // to dispatch on capability.
 export function createSearchProvider(name: string, creds: ProviderCredentials): SearchProvider | FullProvider {

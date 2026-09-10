@@ -8,9 +8,22 @@ const TEST_HOME = mkdtempSync(join(tmpdir(), "rpiv-test-home-"));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
 delete process.env.PI_CODING_AGENT_DIR;
+delete process.env.XDG_CONFIG_HOME;
+delete process.env.WEB_SEARCH_PROVIDER;
 
 vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@earendil-works/pi-ai")>();
+	return {
+		...actual,
+		getSupportedThinkingLevels: vi.fn(() => ["off", "minimal", "low", "medium", "high"]),
+	};
+});
+
+// `completeSimple` lives on the /compat entrypoint since pi 0.80; production
+// code resolves it via loadCompleteSimple(), which prefers /compat, so the
+// stub must be registered there for the shim to pick it up.
+vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@earendil-works/pi-ai/compat")>();
 	return {
 		...actual,
 		completeSimple: vi.fn(),
@@ -46,6 +59,8 @@ const VOICE_SYMBOL = Symbol.for("rpiv-voice");
 // per worker; subsequent tests reuse the module cache and beforeEach is fast.
 beforeEach(async () => {
 	delete process.env.PI_CODING_AGENT_DIR;
+	delete process.env.XDG_CONFIG_HOME;
+	delete process.env.WEB_SEARCH_PROVIDER;
 
 	const todo = await import("../packages/rpiv-todo/todo.js");
 	todo.__resetState();
@@ -63,6 +78,9 @@ beforeEach(async () => {
 	workflowInternal.__resetBuiltIns();
 	workflowInternal.__resetLoadCache();
 	workflowInternal.__resetLifecycleRegistry();
+	workflowInternal.__resetSkillContracts();
+	workflowInternal.__resetStrikeBudgets();
+	workflowInternal.__resetWorkflowExecutionHost();
 
 	const guidance = await import("../packages/rpiv-pi/extensions/rpiv-core/guidance.js");
 	guidance.clearInjectionState();
@@ -71,8 +89,24 @@ beforeEach(async () => {
 	gitContext.resetInjectedMarker();
 	const sessionHooks = await import("../packages/rpiv-pi/extensions/rpiv-core/session-hooks.js");
 	sessionHooks.__resetSessionHooksAnnounced();
-	const modelOverride = await import("../packages/rpiv-pi/extensions/rpiv-core/model-override.js");
-	modelOverride.__resetModelOverrideState();
+	const sessionCapture = await import("../packages/rpiv-pi/extensions/rpiv-core/session-capture.js");
+	sessionCapture.__resetSessionCaptureState();
+	const runLaneRegistry = await import("../packages/rpiv-pi/extensions/rpiv-core/run-lane-registry.js");
+	runLaneRegistry.__resetRunLaneRegistry();
+	const subagentUsage = await import("../packages/rpiv-pi/extensions/rpiv-core/subagent-usage.js");
+	subagentUsage.__resetSubagentUsage();
+	const laneToolDefs = await import("../packages/rpiv-pi/extensions/rpiv-core/lane-tool-defs.js");
+	laneToolDefs.__resetLaneToolDefs();
+	const questionLifecycle = await import("../packages/rpiv-pi/extensions/rpiv-core/question-lifecycle.js");
+	questionLifecycle.__resetQuestionLifecycle();
+	const laneSwitcher = await import("../packages/rpiv-pi/extensions/rpiv-core/lane-switcher.js");
+	laneSwitcher.__resetLaneSwitcher();
+	const laneProgress = await import("../packages/rpiv-pi/extensions/rpiv-core/lane-progress.js");
+	laneProgress.__resetLaneProgress();
+	const workflowQuestionWarpBridge = await import(
+		"../packages/rpiv-pi/extensions/rpiv-core/workflow-question-warp-bridge.js"
+	);
+	workflowQuestionWarpBridge.__resetWorkflowQuestionWarpBridge();
 	const skillBracket = await import("../packages/rpiv-pi/extensions/rpiv-core/skill-bracket.js");
 	skillBracket.__resetSkillBracketState();
 	const modelsConfigModule = await import("../packages/rpiv-pi/extensions/rpiv-core/models-config.js");
@@ -137,7 +171,7 @@ beforeEach(async () => {
 	rmSync(workflowUserRoot, { recursive: true, force: true });
 
 	// Clean global agent dir parent (`~/.pi/agent/`) — not just `~/.pi/agent/agents/` —
-	// so Q18-style tests that place a regular file at `~/.pi/agent` can write into a
+	// so tests that place a regular file at `~/.pi/agent` can write into a
 	// clean slot, and so no test inherits an empty-dir residue from a prior worker run.
 	const globalAgentDir = join(process.env.HOME!, ".pi", "agent");
 	rmSync(globalAgentDir, { recursive: true, force: true });

@@ -1,6 +1,6 @@
-import { createMockCtx, createMockPi } from "@juicesharp/rpiv-test-utils";
+import { createMockCtx, createMockPi, mockStdout } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { registerAskUserQuestionTool } from "./ask-user-question.js";
+import { BEL, registerAskUserQuestionTool } from "./ask-user-question.js";
 import { MAX_QUESTIONS, type QuestionnaireResult } from "./tool/types.js";
 
 type CustomFn = (...args: unknown[]) => Promise<unknown>;
@@ -82,6 +82,119 @@ describe("ask_user_question.execute — early returns", () => {
 	});
 });
 
+describe("ask_user_question.execute — terminal attention", () => {
+	it("writes exactly one BEL after blocked=true and immediately before the TUI wait", async () => {
+		const stdout = mockStdout(true);
+		try {
+			const mockEmit = vi.fn();
+			const { pi, captured } = createMockPi({
+				events: { emit: mockEmit, on: vi.fn(() => () => {}) },
+			});
+			registerAskUserQuestionTool(pi);
+			const tool = captured.tools.get("ask_user_question")!;
+			const custom = vi.fn(async () => ({ answers: [], cancelled: true }));
+			const ctx = createMockCtx({ hasUI: true, ui: { custom } as never });
+
+			await tool.execute?.("tc", BASE_PARAMS as never, undefined as never, undefined as never, ctx as never);
+
+			expect(stdout.stdoutWrite).toHaveBeenCalledTimes(1);
+			expect(stdout.stdoutWrite).toHaveBeenCalledWith(BEL);
+			expect(mockEmit).toHaveBeenNthCalledWith(2, "rpiv:ask-user:blocked", { active: true });
+			expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", { active: false });
+			expect(mockEmit.mock.invocationCallOrder[1]).toBeLessThan(stdout.stdoutWrite.mock.invocationCallOrder[0]);
+			expect(stdout.stdoutWrite.mock.invocationCallOrder[0]).toBeLessThan(custom.mock.invocationCallOrder[0]);
+		} finally {
+			stdout.restore();
+		}
+	});
+
+	it("does not write BEL for non-TTY, no-UI, or invalid requests", async () => {
+		const tool = register();
+		const ttyStdout = mockStdout(true);
+		try {
+			const noUi = createMockCtx({ hasUI: false });
+			await tool.execute?.("tc", BASE_PARAMS as never, undefined as never, undefined as never, noUi as never);
+
+			const invalid = createMockCtx({ hasUI: true, ui: { custom: vi.fn() } as never });
+			await tool.execute?.(
+				"tc",
+				{ questions: [] } as never,
+				undefined as never,
+				undefined as never,
+				invalid as never,
+			);
+
+			expect(ttyStdout.stdoutWrite).not.toHaveBeenCalled();
+		} finally {
+			ttyStdout.restore();
+		}
+
+		const nonTtyStdout = mockStdout(false);
+		try {
+			const custom = vi.fn(async () => ({ answers: [], cancelled: true }));
+			const nonTty = createMockCtx({ hasUI: true, ui: { custom } as never });
+			await tool.execute?.("tc", BASE_PARAMS as never, undefined as never, undefined as never, nonTty as never);
+
+			expect(nonTtyStdout.stdoutWrite).not.toHaveBeenCalled();
+		} finally {
+			nonTtyStdout.restore();
+		}
+	});
+
+	it("swallows a synchronous write failure and still clears blocked state", async () => {
+		const stdout = mockStdout(true);
+		stdout.stdoutWrite.mockImplementation(() => {
+			throw new Error("EPIPE");
+		});
+		try {
+			const mockEmit = vi.fn();
+			const { pi, captured } = createMockPi({
+				events: { emit: mockEmit, on: vi.fn(() => () => {}) },
+			});
+			registerAskUserQuestionTool(pi);
+			const tool = captured.tools.get("ask_user_question")!;
+			const custom = vi.fn(async () => ({
+				cancelled: false,
+				answers: [{ questionIndex: 0, question: "Which?", kind: "option", answer: "A" }],
+			}));
+			const ctx = createMockCtx({ hasUI: true, ui: { custom } as never });
+
+			const result = await tool.execute?.(
+				"tc",
+				BASE_PARAMS as never,
+				undefined as never,
+				undefined as never,
+				ctx as never,
+			);
+
+			expect(result?.details).toMatchObject({ cancelled: false });
+			expect(stdout.stdoutWrite).toHaveBeenCalledWith(BEL);
+			expect(mockEmit).toHaveBeenNthCalledWith(2, "rpiv:ask-user:blocked", { active: true });
+			expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", { active: false });
+		} finally {
+			stdout.restore();
+		}
+	});
+
+	it("swallows a failing TTY lookup and still opens the questionnaire", async () => {
+		const stdout = mockStdout(() => {
+			throw new Error("TTY lookup failed");
+		});
+		try {
+			const tool = register();
+			const custom = vi.fn(async () => ({ answers: [], cancelled: true }));
+			const ctx = createMockCtx({ hasUI: true, ui: { custom } as never });
+
+			await tool.execute?.("tc", BASE_PARAMS as never, undefined as never, undefined as never, ctx as never);
+
+			expect(custom).toHaveBeenCalledOnce();
+			expect(stdout.stdoutWrite).not.toHaveBeenCalled();
+		} finally {
+			stdout.restore();
+		}
+	});
+});
+
 describe("ask_user_question.execute — ctx.ui.custom dispatch", () => {
 	it("User cancels (cancelled: true) → decline envelope", async () => {
 		const tool = register();
@@ -113,19 +226,44 @@ describe("ask_user_question.execute — ctx.ui.custom dispatch", () => {
 		const r = await tool.execute?.("tc", BASE_PARAMS as never, undefined as never, undefined as never, ctx as never);
 		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Which?"="typed"') });
 	});
+
+	it("multi-select free-text yields kind:'custom' (not 'multi')", async () => {
+		// Focusing 'Type something.', typing, Enter on a multi-select question routes through the
+		// inputMode branch → confirm kind:'custom' (unit-pinned in key-router.test.ts). The execute
+		// path surfaces that answer verbatim and discards prior checkbox selections.
+		const tool = register();
+		const ctx = ctxWithCustom({
+			cancelled: false,
+			answers: [{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "typed" }],
+		});
+		const params = {
+			questions: [{ question: "Pick?", header: "H", multiSelect: true, options: [{ label: "A" }, { label: "B" }] }],
+		};
+		const r = await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx as never);
+		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining('"Pick?"="typed"') });
+	});
 });
 
-describe("ask_user_question.execute — undefined result from ctx.ui.custom", () => {
-	it("returns decline envelope when custom resolves to undefined", async () => {
+describe("ask_user_question.execute — undefined result from ctx.ui.custom (RPC/ACP hosts)", () => {
+	// A TUI questionnaire always resolves a result object (cancel included), so
+	// custom() resolving undefined means "host cannot render" (issue #78). With
+	// select/input available the dialog walker takes over (see
+	// rpc-fallback.test.ts); this error is the last resort for hosts with no
+	// usable primitive at all — and it must never read as a user decline.
+	it("returns error: no_custom_ui (not a decline) when custom resolves undefined and no dialog primitives exist", async () => {
 		const tool = register();
 		const custom = vi.fn(async () => undefined) as unknown as CustomFn;
-		const ctx = createMockCtx({ hasUI: true, ui: { custom } as never });
+		const ctx = createMockCtx({
+			hasUI: true,
+			ui: { custom, select: undefined, input: undefined } as never,
+		});
 		const params = {
 			questions: [{ question: "Q?", header: "H", options: [{ label: "A" }, { label: "B" }] }],
 		};
 		const r = await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx as never);
-		expect(r?.details).toMatchObject({ cancelled: true });
-		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("declined") });
+		expect(r?.details).toMatchObject({ answers: [], cancelled: true, error: "no_custom_ui" });
+		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("cannot render the questionnaire") });
+		expect(r?.content[0]).toMatchObject({ text: expect.not.stringContaining("declined") });
 	});
 });
 
@@ -170,7 +308,7 @@ describe("ask_user_question.execute — new runtime guards (CC parity)", () => {
 		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("Option labels must be unique") });
 	});
 
-	it("returns error: reserved_label when an option uses 'Other' / 'Type something.' / 'Chat about this'", async () => {
+	it("returns error: reserved_label when an option uses 'Other' / 'Type something.'", async () => {
 		const tool = register();
 		const ctx = ctxWithCustom(null);
 		const params = {
@@ -261,8 +399,50 @@ describe("ask_user_question.execute — event emission", () => {
 			],
 		});
 
-		// Verify event is emitted BEFORE the dialog is shown
+		expect(mockEmit).toHaveBeenNthCalledWith(2, "rpiv:ask-user:blocked", { active: true });
+		expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", { active: false });
+
+		// Both start events are emitted before the dialog; the clear follows it.
 		expect(mockEmit.mock.invocationCallOrder[0]).toBeLessThan(custom.mock.invocationCallOrder[0]);
+		expect(mockEmit.mock.invocationCallOrder[1]).toBeLessThan(custom.mock.invocationCallOrder[0]);
+		expect(mockEmit.mock.invocationCallOrder[2]).toBeGreaterThan(custom.mock.invocationCallOrder[0]);
+	});
+
+	it("clears ask-user blocked lifecycle after cancellation and UI rejection", async () => {
+		const mockEmit = vi.fn();
+		const { pi, captured } = createMockPi({
+			events: { emit: mockEmit, on: vi.fn(() => () => {}) },
+		});
+		registerAskUserQuestionTool(pi);
+		const tool = captured.tools.get("ask_user_question")!;
+
+		const cancelled = await tool.execute?.(
+			"tc",
+			validParams() as never,
+			undefined as never,
+			undefined as never,
+			ctxWithCustom({ answers: [], cancelled: true }) as never,
+		);
+		expect(cancelled?.details).toMatchObject({ cancelled: true });
+
+		const rejected = createMockCtx({
+			hasUI: true,
+			ui: {
+				custom: vi.fn(async () => {
+					throw new Error("UI failed");
+				}),
+			} as never,
+		});
+		await expect(
+			tool.execute?.("tc", validParams() as never, undefined as never, undefined as never, rejected as never),
+		).rejects.toThrow("UI failed");
+
+		expect(mockEmit.mock.calls.filter(([name]) => name === "rpiv:ask-user:blocked")).toEqual([
+			["rpiv:ask-user:blocked", { active: true }],
+			["rpiv:ask-user:blocked", { active: false }],
+			["rpiv:ask-user:blocked", { active: true }],
+			["rpiv:ask-user:blocked", { active: false }],
+		]);
 	});
 
 	it("does NOT emit event when UI is unavailable", async () => {

@@ -3,6 +3,17 @@ name: discover
 description: Interview the developer one question at a time to extract feature intent and requirements, then synthesize into a Feature Requirements Document at .rpiv/artifacts/discover/. The first question is intent-only and runs before any codebase probe; subsequent questions ground in evidence the probe surfaces. Use as the canonical entry point of the pipeline before research, or to stress-test a feature idea before codebase discovery. The FRD's Decisions block is consumed by `research` and propagates through Developer Context into `design`.
 argument-hint: "[free-text feature description | existing artifact path]"
 shell-timeout: 10
+disable-model-invocation: true
+contract:
+  produces:
+    kind: produces
+    meta:
+      artifactKind: frd
+    data:
+      type: object
+      properties:
+        status:
+          enum: [in-progress, in-review, ready]
 ---
 
 # Discover
@@ -44,7 +55,7 @@ The final artifact is research-compatible — its Decisions block is translated 
 
 2. **Detect input shape** — parse the input:
    - If the argument is an existing file path (resolves to a readable `.md` under `.rpiv/artifacts/`, or any path the user mentions for refinement context), read it FULLY using the Read tool WITHOUT limit/offset. Treat its content as baseline context — the interview surfaces gaps, missing requirements, and unstated assumptions relative to what's already documented.
-   - Otherwise → fresh-feature mode: the entire argument is the free-text feature description.
+   - Plain free-text input → fresh-feature mode: the entire argument is the free-text feature description.
 
 3. **Read any other files mentioned** in the prompt (tickets, docs, related artifacts, explicit `path:line` references) FULLY before proceeding.
 
@@ -60,8 +71,7 @@ Before any codebase probe, ask the foundational intent question. This is purely 
    - Frame: "What problem are you solving and who hits it?" / "What does success look like for the person experiencing this today?" — phrase it for the specific feature.
    - **No `(Recommended)` option.** The developer should generate the framing, not pick from a proposal.
    - **No `file:line` citations** — codebase has nothing to say about intent.
-   - Options should be open shapes (e.g., "End user / maintainer / operator / Other") that route the answer, not solution shapes.
-   - Always offer "Other" so the developer can free-text the real framing.
+   - Options should be open shapes (for example, "End user", "Maintainer", or "Operator") that route the answer, not solution shapes. The automatically appended `Type something.` row lets the developer supply a different framing; do not author an `Other` option.
 
 2. **Capture the answer in the developer's own words.** This text feeds into the FRD's Problem & Intent section verbatim — do not paraphrase into agent prose.
 
@@ -121,7 +131,7 @@ Walk the lazy tree depth-first, parent before child. Expand the next layer (buil
 
 2. **Recommended answer** (`scope` / `shape` / `detail`): derive from intent + Step 3 evidence + project conventions. Every non-intent question carries a recommendation labeled `(Recommended)`.
 
-3. **Ask via `ask_user_question`.** Lead with the recommended option. The "Other" option is automatic and handles open-ended answers.
+3. **Ask via `ask_user_question`.** Lead with the recommended authored option. The automatic `Type something.` custom-answer row handles open-ended answers; do not author an `Other` option.
 
 4. **Critical rules**:
    - Ask ONE question at a time. Wait for the answer before asking the next.
@@ -172,7 +182,7 @@ Compile interview output into the FRD. The interview's logical order (problem �
    - `date:` / `last_updated:` ← `<iso>` (first tab-separated field on line 1 of the Metadata block above, offset verbatim).
    - Interviewer: `author:` from the Metadata block (fallback: `unknown`).
 
-2. **Write the FRD** using the Write tool. Frontmatter `status: complete`. All template sections present and filled. The Write tool creates parent directories automatically — no `mkdir -p` needed in the skill.
+2. **Write the FRD** using the Write tool. Frontmatter `status: ready`. All template sections present and filled. The Write tool creates parent directories automatically — no `mkdir -p` needed in the skill.
 
 3. **Present and chain**:
    ```
@@ -224,5 +234,5 @@ These reinforce the critical rules from the steps above — listed here so they 
   - ALWAYS terminate on depth signal, not bucket-fill (Step 5)
   - ALWAYS synthesize from the interview log, never from memory of the conversation (Step 6)
   - NEVER skip the developer-facing interview — it's the entire point of this skill
-  - NEVER ask a final "looks good / want to adjust" rubber-stamp question (anti-pattern per `a93e591`)
+  - NEVER ask a final "looks good / want to adjust" rubber-stamp question (anti-pattern per prior regressions)
   - NEVER dispatch agents before Step 2's `intent` question is answered

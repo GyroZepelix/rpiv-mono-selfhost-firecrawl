@@ -1,10 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMockCtx, createMockPi, stubGitExec } from "@juicesharp/rpiv-test-utils";
+import { createMockCtx, createMockPi, stubGitExec, writeGuidanceTree } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("./package-checks.js", () => ({ findMissingSiblings: vi.fn(() => []) }));
+vi.mock("./package-checks.js", () => ({
+	findMissingSiblings: vi.fn(() => []),
+	findInstalledSiblings: vi.fn(() => []),
+}));
 vi.mock("./agents.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./agents.js")>();
 	return {
@@ -33,10 +36,8 @@ import { clearInjectionState } from "./guidance.js";
 import { findMissingSiblings } from "./package-checks.js";
 import { __resetSessionHooksAnnounced, registerSessionHooks } from "./session-hooks.js";
 
-// The exact phrase pi-core's ExtensionRunner throws from an invalidated proxy.
-const STALE_CTX_MESSAGE =
-	"This extension ctx is stale after session replacement or reload. " +
-	"Do not use a captured pi or command ctx after ctx.newSession().";
+// Pins the substring `isStaleCtxError` matches in pi-core's invalidated-proxy error.
+const STALE_CTX_MESSAGE = "This extension ctx is stale after session replacement or reload.";
 
 const emptySync: SyncResult = {
 	added: [],
@@ -62,144 +63,11 @@ afterEach(() => {
 });
 
 describe("registerSessionHooks — event wiring", () => {
-	it("registers 6 events", () => {
+	it("registers 5 events", () => {
 		const { pi, captured } = createMockPi();
 		registerSessionHooks(pi);
-		for (const ev of [
-			"session_start",
-			"session_compact",
-			"session_shutdown",
-			"tool_call",
-			"before_agent_start",
-			"agent_end",
-		]) {
+		for (const ev of ["session_start", "session_compact", "session_shutdown", "tool_call", "before_agent_start"]) {
 			expect(captured.events.has(ev)).toBe(true);
-		}
-	});
-});
-
-describe("session_start hook — migration", () => {
-	it("does NOT create .rpiv/artifacts/ on fresh project (no migration source) — issue #31", async () => {
-		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-		registerSessionHooks(pi);
-		const handler = captured.events.get("session_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-		await handler?.({ reason: "startup" } as never, ctx as never);
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts"))).toBe(false);
-	});
-
-	it("migrates thoughts/shared/ to .rpiv/artifacts/ with content preservation", async () => {
-		const oldResearch = join(projectDir, "thoughts", "shared", "research");
-		mkdirSync(oldResearch, { recursive: true });
-		writeFileSync(join(oldResearch, "test.md"), "# Test Research");
-
-		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-		registerSessionHooks(pi);
-		const handler = captured.events.get("session_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-		await handler?.({ reason: "startup" } as never, ctx as never);
-
-		// Content preserved
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts", "research", "test.md"))).toBe(true);
-		// Old dir removed
-		expect(existsSync(join(projectDir, "thoughts", "shared"))).toBe(false);
-		// thoughts/ root removed (was empty after shared/ deleted)
-		expect(existsSync(join(projectDir, "thoughts"))).toBe(false);
-	});
-
-	it("preserves thoughts/ root when non-shared content exists", async () => {
-		const oldResearch = join(projectDir, "thoughts", "shared", "research");
-		mkdirSync(oldResearch, { recursive: true });
-		writeFileSync(join(oldResearch, "test.md"), "content");
-		const meDir = join(projectDir, "thoughts", "me");
-		mkdirSync(meDir, { recursive: true });
-		writeFileSync(join(meDir, "notes.md"), "personal");
-
-		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-		registerSessionHooks(pi);
-		const handler = captured.events.get("session_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-		await handler?.({ reason: "startup" } as never, ctx as never);
-
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts", "research", "test.md"))).toBe(true);
-		expect(existsSync(join(projectDir, "thoughts", "shared"))).toBe(false);
-		expect(existsSync(join(projectDir, "thoughts", "me", "notes.md"))).toBe(true);
-		expect(existsSync(join(projectDir, "thoughts"))).toBe(true);
-	});
-
-	it("does NOT create .rpiv/artifacts/ when thoughts/shared/ exists but is empty", async () => {
-		// Edge case: thoughts/shared/ pre-exists (created by tool, partial migration, etc.) but holds no entries.
-		// Migration must not leak an empty .rpiv/artifacts/ tree, and must not delete the empty source.
-		mkdirSync(join(projectDir, "thoughts", "shared"), { recursive: true });
-
-		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-		registerSessionHooks(pi);
-		const handler = captured.events.get("session_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-		await handler?.({ reason: "startup" } as never, ctx as never);
-
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts"))).toBe(false);
-		expect(existsSync(join(projectDir, "thoughts", "shared"))).toBe(true);
-	});
-
-	it("preserves loose files at thoughts/shared/ root (copies them, not just subdirectories)", async () => {
-		// Regression: prior implementation filtered to directories only, dropping loose .md files
-		// at the shared/ root on rmSync. Now cpSync copies both files and directories.
-		const oldShared = join(projectDir, "thoughts", "shared");
-		mkdirSync(oldShared, { recursive: true });
-		writeFileSync(join(oldShared, "loose.md"), "loose content");
-		const oldResearch = join(oldShared, "research");
-		mkdirSync(oldResearch, { recursive: true });
-		writeFileSync(join(oldResearch, "nested.md"), "nested content");
-
-		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-		registerSessionHooks(pi);
-		const handler = captured.events.get("session_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-		await handler?.({ reason: "startup" } as never, ctx as never);
-
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts", "loose.md"))).toBe(true);
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts", "research", "nested.md"))).toBe(true);
-		expect(existsSync(join(projectDir, "thoughts"))).toBe(false);
-	});
-
-	it("no-ops when thoughts/shared/ does not exist (fresh project)", async () => {
-		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-		registerSessionHooks(pi);
-		const handler = captured.events.get("session_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-		await handler?.({ reason: "startup" } as never, ctx as never);
-
-		// No migration source → no .rpiv/artifacts/ tree, no thoughts/ tree
-		expect(existsSync(join(projectDir, ".rpiv", "artifacts"))).toBe(false);
-		expect(existsSync(join(projectDir, "thoughts"))).toBe(false);
-	});
-
-	it.skipIf(process.platform === "win32")("never crashes session_start even when migration step fails", async () => {
-		// ESM module namespaces are not configurable under this Vitest config
-		// (see agents.test.ts Q7), so induce the failure at the filesystem layer:
-		// chmod 0o000 on thoughts/shared makes the inner readdirSync throw EACCES,
-		// hitting the migration's catch block.
-		const sharedDir = join(projectDir, "thoughts", "shared");
-		const oldResearch = join(sharedDir, "research");
-		mkdirSync(oldResearch, { recursive: true });
-		writeFileSync(join(oldResearch, "test.md"), "content");
-
-		const originalMode = statSync(sharedDir).mode & 0o777;
-		chmodSync(sharedDir, 0o000);
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-		try {
-			const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
-			registerSessionHooks(pi);
-			const handler = captured.events.get("session_start")?.[0];
-			const ctx = createMockCtx({ cwd: projectDir, hasUI: true });
-			// Must not throw — migration is best-effort
-			await expect(handler?.({ reason: "startup" } as never, ctx as never)).resolves.toBeUndefined();
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("migration"));
-		} finally {
-			chmodSync(sharedDir, originalMode);
-			warnSpy.mockRestore();
 		}
 	});
 });
@@ -247,7 +115,7 @@ describe("session_start hook — notifications", () => {
 		await captured.events.get("session_start")?.[0]({ reason: "startup" } as never, ctx as never);
 		const warnCall = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[1] === "warning");
 		expect(warnCall).toBeDefined();
-		expect((warnCall?.[0] as string).startsWith("\n")).toBe(true);
+		expect((warnCall![0] as string).startsWith("\n")).toBe(true);
 		expect(warnCall?.[0]).toContain("rpiv-pi: 2 sibling extensions missing");
 		expect(warnCall?.[0]).toContain("@juicesharp/rpiv-advisor");
 		expect(warnCall?.[0]).toContain("@juicesharp/rpiv-args");
@@ -269,7 +137,7 @@ describe("session_start hook — notifications", () => {
 		expect(ctx.ui.notify).not.toHaveBeenCalled();
 	});
 
-	it("I3: emits a 'Synced bundled agent(s)' info combining updated + removed", async () => {
+	it("emits a 'Synced bundled agent(s)' info combining updated + removed", async () => {
 		vi.mocked(syncBundledAgents).mockReturnValueOnce({
 			...emptySync,
 			updated: ["a.md", "b.md"],
@@ -347,7 +215,7 @@ describe("session_start hook — notifications", () => {
 		expect(warnCall?.[0]).toContain("1 error");
 	});
 
-	it("I3: emits a 'sync errors' warning when result.errors > 0", async () => {
+	it("emits a 'sync errors' warning when result.errors > 0", async () => {
 		vi.mocked(syncBundledAgents).mockReturnValueOnce({
 			...emptySync,
 			errors: [{ op: SYNC_OP.MANIFEST_WRITE, message: "EACCES" }],
@@ -363,13 +231,14 @@ describe("session_start hook — notifications", () => {
 	});
 });
 
-describe("session_start hook — banner notify-once latch", () => {
+describe("session_start hook — startup-maintenance-once latch", () => {
 	// Pi fires session_start for every session including programmatic spawns
-	// (workflow stages, batch ops). Filesystem work (agent sync, cleanup)
-	// runs every fire; the banner notifications latch on the first
-	// announcement and stay quiet for the rest of the module lifetime.
-	// Replaces the older cross-package coupling to rpiv-workflow's
-	// child-session Symbol.
+	// (workflow stages, batch ops). Startup maintenance — agent sync, per-cwd
+	// cleanup, and the banner — latches on the first fire and is skipped for the
+	// rest of the module lifetime: the bundled source is immutable mid-process,
+	// so re-syncing on every stage spawn is pure waste (amplified N× by /wf).
+	// Replaces the older cross-package coupling to rpiv-workflow's child-session
+	// Symbol.
 
 	it("first session_start fires the cleanup/agent-sync/missing-siblings notifies", async () => {
 		vi.mocked(syncBundledAgents).mockReturnValueOnce({
@@ -388,7 +257,7 @@ describe("session_start hook — banner notify-once latch", () => {
 		expect(ctx.ui.notify).toHaveBeenCalled();
 	});
 
-	it("subsequent session_starts (workflow stage spawns) re-run filesystem work but do NOT re-notify", async () => {
+	it("subsequent session_starts (workflow stage spawns) skip filesystem work AND do NOT re-notify", async () => {
 		vi.mocked(syncBundledAgents).mockReturnValue({ ...emptySync, added: ["a.md"] });
 		vi.mocked(cleanupPerCwdAgents).mockReturnValue({ cleanedUp: ["/tmp/old"], skipped: [], errors: [] });
 		vi.mocked(findMissingSiblings).mockReturnValue([]);
@@ -404,9 +273,12 @@ describe("session_start hook — banner notify-once latch", () => {
 		await handler?.({ reason: "startup" } as never, ctx as never);
 		await handler?.({ reason: "startup" } as never, ctx as never);
 
-		// Filesystem work runs every fire (3 session_starts → 3 calls each).
-		expect(vi.mocked(syncBundledAgents)).toHaveBeenCalledTimes(3);
-		expect(vi.mocked(cleanupPerCwdAgents)).toHaveBeenCalledTimes(3);
+		// Startup maintenance runs once per module load: 3 session_starts → 1 call
+		// each. The bundled source is immutable mid-process, so re-syncing on the
+		// stage-spawn fires would only recompute identical hashes (the N× cost the
+		// latch removes).
+		expect(vi.mocked(syncBundledAgents)).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(cleanupPerCwdAgents)).toHaveBeenCalledTimes(1);
 		// First pass emits its notifies; passes 2-3 add ZERO new notifies.
 		expect(firstPassNotifyCount).toBeGreaterThan(0);
 		expect(notify.mock.calls.length).toBe(firstPassNotifyCount);
@@ -455,7 +327,6 @@ describe("G0: session_start → real syncBundledAgents → notifyAgentSyncDrift"
 		const agentsDir = join(homedir(), ".pi", "agent", "agents");
 		expect(existsSync(agentsDir)).toBe(true);
 		expect(existsSync(join(agentsDir, ".rpiv-managed.json"))).toBe(true);
-		expect(existsSync(join(agentsDir, ".rpiv-managed.v2"))).toBe(true);
 
 		const addedCalls = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.filter(
 			(c) => typeof c[0] === "string" && /Copied \d+ rpiv-pi agent/.test(c[0]),
@@ -477,6 +348,11 @@ describe("G0: session_start → real syncBundledAgents → notifyAgentSyncDrift"
 		const ctx1 = createMockCtx({ cwd: projectDir, hasUI: true });
 		await captured.events.get("session_start")?.[0]({ reason: "startup" } as never, ctx1 as never);
 
+		// A second cold-start is a second process. Re-arm the once-per-process
+		// latch (what a fresh module load does) so this fire actually re-runs the
+		// real sync — without the reset it would be skipped and the idempotency
+		// claim below would go unexercised.
+		__resetSessionHooksAnnounced();
 		const ctx2 = createMockCtx({ cwd: projectDir, hasUI: true });
 		await captured.events.get("session_start")?.[0]({ reason: "startup" } as never, ctx2 as never);
 
@@ -487,44 +363,120 @@ describe("G0: session_start → real syncBundledAgents → notifyAgentSyncDrift"
 	});
 });
 
-describe("session_compact hook", () => {
-	it("re-injects guidance + git-context after compaction (clears caches first)", async () => {
-		const exec = stubGitExec({ branch: "main", commit: "abc", user: "alice" });
-		const { pi, captured } = createMockPi({ exec: exec as never });
+describe("pipeline-pointer injection", () => {
+	const pointerCalls = (pi: { sendMessage: unknown }) =>
+		(pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls.filter(
+			([msg]) => (msg as { customType?: string }).customType === "rpiv-pipeline-index",
+		).length;
+
+	it("session_start injects the pipeline pointer", async () => {
+		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
 		registerSessionHooks(pi);
-		// Prime the git-context cache first via session_start so compact's clear has work to do.
 		await captured.events.get("session_start")?.[0](
 			{ reason: "startup" } as never,
 			createMockCtx({ cwd: projectDir, hasUI: false }) as never,
 		);
+		expect(pointerCalls(pi)).toBe(1);
+	});
+
+	it("session_compact queues no pointer turn; the next user turn receives it once", async () => {
+		const { pi, captured } = createMockPi({ exec: stubGitExec({}) as never });
+		registerSessionHooks(pi);
+		const ctx = createMockCtx({ cwd: projectDir, hasUI: false });
+		await captured.events.get("session_start")?.[0]({ reason: "startup" } as never, ctx as never);
+		const sendsBeforeCompact = (pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls.length;
+
+		await captured.events.get("session_compact")?.[0]({ reason: "overflow", willRetry: true } as never, ctx as never);
+		expect((pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls.length).toBe(sendsBeforeCompact);
+		expect(pointerCalls(pi)).toBe(1);
+
+		const result = (await captured.events.get("before_agent_start")?.[0](
+			{ prompt: "continue" } as never,
+			ctx as never,
+		)) as { message: { customType: string; content: string } } | undefined;
+		expect(result?.message.customType).toBe("rpiv-post-compact-context");
+		expect(result?.message.content).toContain("rpiv pipeline index");
+	});
+});
+
+describe("session_compact hook", () => {
+	it("defers root guidance + pointer + git as one next-turn message", async () => {
+		writeGuidanceTree(projectDir, { ".rpiv/guidance/architecture.md": "root-architecture" });
+		const exec = stubGitExec({ branch: "main", commit: "abc", user: "alice" });
+		const { pi, captured } = createMockPi({ exec: exec as never });
+		registerSessionHooks(pi);
+		const ctx = createMockCtx({ cwd: projectDir, hasUI: false });
+		await captured.events.get("session_start")?.[0]({ reason: "startup" } as never, ctx as never);
 		const sendBefore = (pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls.length;
-		await captured.events.get("session_compact")?.[0]({} as never, createMockCtx({ cwd: projectDir }) as never);
-		// After compact, the next pi.sendMessage call (from injectGitContext) should fire because
-		// resetInjectedMarker + clearGitContextCache make takeGitContextIfChanged re-emit.
-		const sendAfter = (pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls.length;
-		expect(sendAfter).toBeGreaterThan(sendBefore);
+
+		await captured.events.get("session_compact")?.[0](
+			{ reason: "threshold", willRetry: false } as never,
+			ctx as never,
+		);
+		expect((pi.sendMessage as ReturnType<typeof vi.fn>).mock.calls.length).toBe(sendBefore);
+
+		const first = (await captured.events.get("before_agent_start")?.[0](
+			{ prompt: "continue" } as never,
+			ctx as never,
+		)) as { message: { customType: string; content: string } } | undefined;
+		expect(first?.message.customType).toBe("rpiv-post-compact-context");
+		expect(first?.message.content).toContain("Do not acknowledge this block");
+		expect(first?.message.content).toContain("root-architecture");
+		expect(first?.message.content).toContain("rpiv pipeline index");
+		expect(first?.message.content).toContain("## Git Context");
+		expect(first?.message.content).toContain("Commit: abc");
+
+		const second = await captured.events.get("before_agent_start")?.[0]({ prompt: "again" } as never, ctx as never);
+		expect(second).toBeUndefined();
+	});
+
+	it("partitions deferred context by session identity despite another session injecting first", async () => {
+		writeGuidanceTree(projectDir, { ".rpiv/guidance/architecture.md": "root-for-compacted" });
+		const { pi, captured } = createMockPi({
+			exec: stubGitExec({ branch: "main", commit: "abc", user: "alice" }) as never,
+		});
+		registerSessionHooks(pi);
+		const compacted = createMockCtx({ cwd: projectDir, sessionId: "compacted" });
+		const other = createMockCtx({ cwd: projectDir, sessionId: "other" });
+		await captured.events.get("session_compact")?.[0]({} as never, compacted as never);
+
+		// A different session consumes the module-global guidance/Git dedup state.
+		// The exact compacted SessionManager must remain armed and force-refresh both.
+		await captured.events.get("session_start")?.[0]({ reason: "startup" } as never, other as never);
+		const otherResult = (await captured.events.get("before_agent_start")?.[0](
+			{ prompt: "other" } as never,
+			other as never,
+		)) as { message: { customType: string } } | undefined;
+		expect(otherResult?.message.customType).not.toBe("rpiv-post-compact-context");
+
+		const compactedResult = (await captured.events.get("before_agent_start")?.[0](
+			{ prompt: "continue" } as never,
+			compacted as never,
+		)) as { message: { customType: string; content: string } } | undefined;
+		expect(compactedResult?.message.customType).toBe("rpiv-post-compact-context");
+		expect(compactedResult?.message.content).toContain("root-for-compacted");
+		expect(compactedResult?.message.content).toContain("Commit: abc");
 	});
 
 	it("swallows a stale-ctx error (compacting session is being replaced)", async () => {
 		const { pi, captured } = createMockPi();
 		registerSessionHooks(pi);
 		const handler = captured.events.get("session_compact")?.[0];
-		// pi-core invalidates the runner mid-compaction; ctx.cwd then throws.
 		const staleCtx = {
-			get cwd(): string {
+			get sessionManager(): object {
 				throw new Error(STALE_CTX_MESSAGE);
 			},
 		};
 		await expect(handler?.({} as never, staleCtx as never)).resolves.toBeUndefined();
 	});
 
-	it("propagates a non-stale error from guidance/git injection", async () => {
+	it("propagates a non-stale context error", async () => {
 		const { pi, captured } = createMockPi();
 		registerSessionHooks(pi);
 		const handler = captured.events.get("session_compact")?.[0];
 		const boomCtx = {
-			get cwd(): string {
-				throw new Error("boom: real bug in guidance injection");
+			get sessionManager(): object {
+				throw new Error("boom: real bug in session identity access");
 			},
 		};
 		await expect(handler?.({} as never, boomCtx as never)).rejects.toThrow("boom");
@@ -582,56 +534,5 @@ describe("before_agent_start hook", () => {
 		await handler?.({ prompt: "" } as never, ctx as never);
 		const second = await handler?.({ prompt: "" } as never, ctx as never);
 		expect(second).toBeUndefined();
-	});
-
-	it("sets status to 'rpiv: <name>' when prompt contains an owned rpiv-pi skill block", async () => {
-		const { pi, captured } = createMockPi({
-			exec: stubGitExec({ branch: "main", commit: "abc", user: "alice" }) as never,
-		});
-		registerSessionHooks(pi);
-		const handler = captured.events.get("before_agent_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir });
-		const skillPrompt = `<skill name="discover" location="/some/path">\nbody\n</skill>`;
-		await handler?.({ prompt: skillPrompt } as never, ctx as never);
-		expect(ctx.ui.setStatus).toHaveBeenCalledWith("rpiv-skill", "rpiv: discover");
-	});
-
-	it("does not set status for a skill block whose name is not bundled with rpiv-pi", async () => {
-		// Foreign / user-supplied skills must not be branded as rpiv: — only names that
-		// match a directory under packages/rpiv-pi/skills/ get the rpiv-skill status.
-		const { pi, captured } = createMockPi({
-			exec: stubGitExec({ branch: "main", commit: "abc", user: "alice" }) as never,
-		});
-		registerSessionHooks(pi);
-		const handler = captured.events.get("before_agent_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir });
-		const skillPrompt = `<skill name="not-an-rpiv-skill" location="/home/u/.pi/skills/not-an-rpiv-skill">\nbody\n</skill>`;
-		await handler?.({ prompt: skillPrompt } as never, ctx as never);
-		const setStatusCalls = (ctx.ui.setStatus as ReturnType<typeof vi.fn>).mock.calls.filter(
-			(c) => c[0] === "rpiv-skill",
-		);
-		expect(setStatusCalls).toHaveLength(0);
-	});
-
-	it("does not set status when prompt has no skill block", async () => {
-		const { pi, captured } = createMockPi({
-			exec: stubGitExec({ branch: "main", commit: "abc", user: "alice" }) as never,
-		});
-		registerSessionHooks(pi);
-		const handler = captured.events.get("before_agent_start")?.[0];
-		const ctx = createMockCtx({ cwd: projectDir });
-		await handler?.({ prompt: "just a normal chat message" } as never, ctx as never);
-		expect(ctx.ui.setStatus).not.toHaveBeenCalled();
-	});
-});
-
-describe("agent_end hook", () => {
-	it("clears the rpiv-skill status", async () => {
-		const { pi, captured } = createMockPi();
-		registerSessionHooks(pi);
-		const handler = captured.events.get("agent_end")?.[0];
-		const ctx = createMockCtx();
-		await handler?.({ messages: [] } as never, ctx as never);
-		expect(ctx.ui.setStatus).toHaveBeenCalledWith("rpiv-skill", undefined);
 	});
 });

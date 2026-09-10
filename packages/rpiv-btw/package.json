@@ -1,6 +1,6 @@
 {
   "name": "@juicesharp/rpiv-btw",
-  "version": "1.17.1",
+  "version": "2.9.0",
   "description": "Pi extension. The /btw slash command, for putting a one-off side question to the same primary model without polluting the main conversation.",
   "keywords": [
     "pi-package",
@@ -31,12 +31,20 @@
   "files": [
     "index.ts",
     "btw.ts",
+    "btw-budget.ts",
+    "btw-messages.ts",
     "btw-ui.ts",
+    "pi-compat.ts",
     "prompts/",
+    "docs/",
+    "!docs/*.png",
+    "!docs/*.jpg",
+    "!docs/*.svg",
     "README.md",
     "LICENSE"
   ],
   "pi": {
+    "image": "https://raw.githubusercontent.com/juicesharp/rpiv-mono/main/packages/rpiv-btw/docs/cover.png",
     "extensions": [
       "./index.ts"
     ]

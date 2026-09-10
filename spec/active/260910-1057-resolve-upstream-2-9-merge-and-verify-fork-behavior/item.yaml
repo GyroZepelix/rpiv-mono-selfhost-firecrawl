@@ -1,0 +1,20 @@
+schema_version: 1
+id: 260910-1057-resolve-upstream-2-9-merge-and-verify-fork-behavior
+title: Resolve upstream 2.9 merge and verify fork behavior
+kind: work-item
+work_type: migration
+parent: null
+route: quick-plan
+status: planned
+created_at: '2026-09-10T10:57:25+02:00'
+updated_at: '2026-09-10T10:57:25+02:00'
+external_refs:
+- system: github
+  type: repository
+  key: upstream
+  url: https://github.com/juicesharp/rpiv-mono
+- system: github
+  type: repository
+  key: fork
+  url: https://github.com/GyroZepelix/rpiv-mono-selfhost-firecrawl
+wiki_refs: []

@@ -1,9 +1,7 @@
 /**
- * rpiv-workflow — Pi extension entry point.
- *
- * Registers the `/wf` slash command and (optionally) exposes the workflow
- * runtime as a programmatic API for sibling packages that want to
- * contribute built-in workflows via `registerBuiltIns(...)`.
+ * rpiv-workflow — public API barrel for embedders. The Pi extension `default`
+ * entry lives in the thin `./extension.ts` (not here); startup-time siblings
+ * should import the runner-free `@juicesharp/rpiv-workflow/registration` entry.
  *
  * Skill-agnostic: the runner sends `/skill:<name>` via Pi's native skill
  * dispatch — workflows can name any skill installed in Pi's search path
@@ -12,87 +10,31 @@
  * like `@juicesharp/rpiv-pi` opt in by calling `registerBuiltIns(...)`
  * from their own extension entry.
  *
- * ─── Public surface, grouped by audience ────────────────────────────────
+ * ─── Audience map ────────────────────────────────────────────────────────
  *
- *   1. Authoring DSL — `./api.js`, `./predicates.js`, `./typebox-adapter.js`
- *      What a `workflows.config.ts` author imports to declare a workflow:
- *      `defineWorkflow`, `produces`, `acts`, `terminal`, `defineRoute`, `gate`,
- *      `STOP` (terminal-edge sentinel; `"stop"` literal also valid),
- *      `Workflow`, `StageDef`, `EdgeFn`, `EdgeTarget`, `EdgeContext`,
- *      `StageSchema`, `StageKind`, `SessionPolicy`, `OutputSpec`,
- *      `READS_DATA`, the runtime-mirror `*_VALUES` arrays, the
- *      `gt`/`gte`/`lt`/`lte`/`eq` predicate helpers, and `typeboxSchema`
- *      (the TypeBox adapter).
+ * `registration.ts` is the SINGLE enumeration of the runner-free public
+ * surface — this header only routes you to the right module. (A previous
+ * symbol-by-symbol catalog here drifted from reality twice; it is gone on
+ * purpose.)
  *
- *   2. Runner (programmatic embedders) — `./runner/index.js`, `./host.js`
- *      Drive a workflow from outside `/wf`: `runWorkflow` (+ the by-name
- *      sugar `runWorkflowByName`) and `resumeWorkflow` (+ the by-run-id
- *      sugar `resumeWorkflowByRunId`), with `RunWorkflowOptions`,
- *      `RunWorkflowByNameOptions`, `ResumeWorkflowOptions`,
- *      `ResumeWorkflowByRunIdOptions`, and the shared `RunWorkflowResult`.
- *      Every options bag accepts an optional `signal: AbortSignal` for
- *      between-stage cooperative cancellation. Embedders type their host
- *      handles against `WorkflowHost` / `WorkflowHostContext` (the host
- *      ports) — Pi's `ExtensionAPI` / `ExtensionCommandContext` /
- *      `ReplacedSessionContext` structurally satisfy them, so the
- *      values pass through without casting.
- *
- *   3. Loader (programmatic embedders) — `./load/index.js`
- *      Materialise the merged workflow registry: `loadWorkflows`,
- *      `LoadedWorkflows`, `Issue`, `LoadIssue`, `ConfigLayer`,
- *      `OverlayPaths`, `projectOverlayPaths`, `userOverlayPaths`,
- *      `aliasSkills`. Siblings can apply the same remap to a built-in
- *      workflow before handing it to `runWorkflow`.
- *
- *   4. Built-in registry (sibling packages) — `./built-ins.js`
- *      Contribute workflows to the lowest config layer:
- *      `registerBuiltIns`. (`getBuiltIns` is test-only and lives on
- *      `@juicesharp/rpiv-workflow/internal`.)
- *
- *   5. Output envelope + bundled outcomes — `./output.js`,
- *      `./outcomes/index.js`, `./handle.js`
- *      Inter-stage data channel (`Output<K, D>`, `OutputMeta`,
- *      `Artifact`, `ArtifactHandle` + constructors `fs`/`url`/
- *      `opaque`/`inline`/`handleToString`) + bundled outcomes
- *      (`sideEffectOutcome`, `gitCommitOutcome`, `GitCommitData`,
- *      `gitHeadSnapshot`, `GitHeadSnapshot`) + the bundled
- *      collector/parser catalog wireable into any custom `OutputSpec`:
- *        - collectors: `transcriptPathCollector` (regex over assistant
- *          text), `toolCallCollector` (universal tool_use observer),
- *          `workspaceDiffCollector` (git status diff pre/post),
- *          `gitCommitCollector` (commit detection), the wrappers
- *          `directoryPathCollector` / `urlCollector`, plus composition
- *          `unionCollectors` and the empty-list primitive `noopCollector`.
- *        - parsers: `jsonBodyParser` (parses primary fs body),
- *          `gitCommitParser`.
- *      The `.rpiv/artifacts/<bucket>/<file>.md` outcome + the
- *      markdown-frontmatter parser live in `@juicesharp/rpiv-pi`
- *      (`rpivArtifactMdOutcome` / `frontmatterParser`) — those are
- *      rpiv conventions, not framework defaults.
- *
- *   6. Custom-outcome authoring surface — `./output.js`
- *      `OutputSpec<Snapshot, Kind, Data>` (collector + optional parser),
- *      `ArtifactCollector`, `ArtifactParser`, `CollectCtx`,
- *      `CollectResult`, `ParseCtx`, `ParseResult`, `SnapshotCtx`,
- *      `SnapshotFn`. Sugar: `defineCollector` / `defineParser`.
- *
- *   7. Validation surfaces — `./validate-workflow.js`,
- *      `./validate-output.js`
- *      `validateWorkflow`, `WorkflowValidationIssue`,
- *      `validateOutputData`, `SchemaValidationFailure`.
- *
- *   8. Persistence (low-level — JSONL inspect) — `./state/index.js`
- *      Read past runs at `<cwd>/.rpiv/workflows/runs/<run-id>.jsonl`:
- *      `listRuns`, `readHeader`, `resolveRun` (run-id → header; today an
- *      alias of `readHeader`), `readLastStage`, `listArtifacts`,
- *      `stateFilePath`, `runsDir`, `RunSummary`,
- *      `WorkflowHeader`, `WorkflowStage`. `recordStage` lives on
- *      `@juicesharp/rpiv-workflow/internal` (test-only — rpiv-pi's
- *      `[I3]` regression test pokes it directly; runner owns row
- *      writes, embedders never need it).
- *
- *   9. Runtime types — `./types.js`
- *      `RunState`.
+ *   - Authoring a workflow (config/pack files) → `./api.js` (DSL barrel:
+ *     `defineWorkflow` + the stage/loop/routing factories),
+ *     `./predicates.js`, `./typebox-adapter.js`.
+ *   - Driving runs programmatically → `./runner/index.js` (`runWorkflow`,
+ *     `resumeWorkflow` + by-name/by-run-id sugar); host ports in `./host.js`.
+ *   - Loading the merged registry → `./load/index.js` (`loadWorkflows`).
+ *   - Contributing built-in workflows (sibling packages) → `./built-ins.js`
+ *     (`registerBuiltIns`).
+ *   - Output envelope + bundled collectors/parsers → `./output.js`,
+ *     `./outcomes/index.js`, `./handle.js`; custom-outcome authoring →
+ *     `./output-spec.js` (`Outcome`, `defineCollector` / `defineParser`).
+ *   - Validation → `./validate-workflow.js`, `./validate-output.js`.
+ *   - Observing runs → `./events.js` (`registerLifecycle`, per-call
+ *     `RunWorkflowOptions.lifecycle`).
+ *   - Inspecting past runs (JSONL) → `./state/index.js` (`listRuns`,
+ *     `readHeader`, `runFileFor`, …). Row WRITES are runner-owned;
+ *     `recordStage` lives on `@juicesharp/rpiv-workflow/internal`
+ *     (test-only).
  *
  * Per-module deep imports (`from "@juicesharp/rpiv-workflow/api.js"`)
  * are NOT supported across the package boundary.
@@ -128,100 +70,22 @@
  * if Pi's types drift below the port's required shape.
  */
 
-import { registerWorkflowCommand } from "./command.js";
-import { type DocsProtocolHost, registerDocsProtocol } from "./docs-protocol.js";
-import type { WorkflowHost } from "./host.js";
+// Runner-free surface (DSL, registrars, loader, outcomes, …) lives in
+// `./registration.js`; startup-time siblings import that to skip the ~530ms
+// engine. This entry layers the runner on top for embedders.
+export * from "./registration.js";
 
+// The execution engine — the only re-export unique to this entry. The budget
+// defaults and `validateRunBudgets` ride along: the runner refuses a malformed
+// `maxBackwardJumps`/`maxLaps`/`maxIterations` pre-flight, so an embedder
+// must be able to pre-validate and read the defaults the refusal math uses.
 export {
-	type ActsScriptFn,
-	acts,
-	type DefineRouteOptions,
-	defineRoute,
-	defineWorkflow,
-	type EdgeContext,
-	type EdgeFn,
-	type EdgeTarget,
-	type FanoutContext,
-	type FanoutFn,
-	type FanoutUnit,
-	gate,
-	type IterateContext,
-	type IterateFn,
-	type IterateUnit,
-	marksReadsData,
-	ON_INVALID_VALUES,
-	type OnInvalid,
-	type ProducesScriptFn,
-	type PromptFn,
-	produces,
-	READS_DATA,
-	type ScriptContext,
-	SESSION_POLICIES,
-	type SessionPolicy,
-	STAGE_KINDS,
-	STOP,
-	type StageDef,
-	type StageKind,
-	type StageSchema,
-	terminal,
-	type Workflow,
-} from "./api.js";
-export { registerBuiltIns } from "./built-ins.js";
-export {
-	type Artifact,
-	type ArtifactHandle,
-	fs,
-	handleToString,
-	inline,
-	opaque,
-	url,
-} from "./handle.js";
-export type { WorkflowHost, WorkflowHostContext, WorkflowSessionContext } from "./host.js";
-export { type LifecycleContext, type LifecycleListeners, registerLifecycle, type StageRef } from "./lifecycle.js";
-export type { ConfigLayer, Issue, LoadedWorkflows, LoadIssue, OverlayPaths } from "./load/index.js";
-export { aliasSkills, loadWorkflows, projectOverlayPaths, userOverlayPaths } from "./load/index.js";
-export {
-	type DirectoryPathCollectorOpts,
-	directoryPathCollector,
-	type GitCommitData,
-	type GitHeadSnapshot,
-	gitCommitCollector,
-	gitCommitOutcome,
-	gitCommitParser,
-	gitHeadSnapshot,
-	jsonBodyParser,
-	noopCollector,
-	sideEffectOutcome,
-	type ToolCall,
-	type ToolCallCollectorOpts,
-	type TranscriptPathCollectorOpts,
-	toolCallCollector,
-	transcriptPathCollector,
-	type UrlCollectorOpts,
-	unionCollectors,
-	urlCollector,
-	type WorkspaceDiffCollectorOpts,
-	type WorkspaceDiffSnapshot,
-	workspaceDiffCollector,
-} from "./outcomes/index.js";
-export type {
-	ArtifactCollector,
-	ArtifactParser,
-	CollectCtx,
-	CollectResult,
-	Output,
-	OutputMeta,
-	OutputSpec,
-	ParseCtx,
-	ParseResult,
-	SnapshotCtx,
-	SnapshotFn,
-} from "./output.js";
-export { defineCollector, defineParser } from "./output-spec.js";
-export { eq, gt, gte, lt, lte, type Predicate } from "./predicates.js";
-export {
+	MAX_BACKWARD_JUMPS,
+	MAX_ITERATIONS,
+	MAX_LAPS,
 	type ResumeWorkflowByRunIdOptions,
 	type ResumeWorkflowOptions,
+	type RunBudgetOptions,
 	type RunWorkflowByNameOptions,
 	type RunWorkflowOptions,
 	type RunWorkflowResult,
@@ -229,36 +93,8 @@ export {
 	resumeWorkflowByRunId,
 	runWorkflow,
 	runWorkflowByName,
+	validateRunBudgets,
 } from "./runner/index.js";
-export {
-	listArtifacts,
-	listRuns,
-	type RunSummary,
-	readHeader,
-	readLastStage,
-	resolveRun,
-	runsDir,
-	stateFilePath,
-	type WorkflowHeader,
-	type WorkflowStage,
-} from "./state/index.js";
-export { DEFAULT_TRIGGER, type RunTrigger } from "./triggers.js";
-export { typeboxSchema } from "./typebox-adapter.js";
-export type { RunState } from "./types.js";
-export { type SchemaValidationFailure, validateOutputData } from "./validate-output.js";
-export { validateWorkflow, type WorkflowValidationIssue } from "./validate-workflow.js";
 
-/**
- * Local intersection of the two host ports this extension's `default`
- * function needs. `WorkflowHost` covers the workflow-command surface;
- * `DocsProtocolHost` covers the `on("before_agent_start", ...)` hook used
- * to prepend the docs-protocol block. Pi's `ExtensionAPI` structurally
- * satisfies both; programmatic embedders keep using the narrower
- * `WorkflowHost` port, so this alias stays local — not re-exported.
- */
-type ExtensionHost = WorkflowHost & DocsProtocolHost;
-
-export default function (host: ExtensionHost): void {
-	registerWorkflowCommand(host);
-	registerDocsProtocol(host);
-}
+// NOTE: the Pi extension `default` entry is `./extension.ts`, not this barrel,
+// so loading the extension doesn't evaluate the runtime re-exports above.

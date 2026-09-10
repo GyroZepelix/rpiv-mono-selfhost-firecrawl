@@ -3,6 +3,14 @@ name: annotate-inline
 description: Generate CLAUDE.md files placed inline next to source code across a project, documenting architecture and patterns for AI assistants. Use when the user wants to onboard Claude to a codebase via inline CLAUDE.md files, generate per-directory guidance, document architecture in-place, or asks to "annotate inline". Prefer this over annotate-guidance when CLAUDE.md should live alongside the code rather than in a shadow tree.
 argument-hint: [target-directory]
 allowed-tools: Agent, Read, Write, Glob, Grep
+contract:
+  produces:
+    kind: side-effect
+    meta:
+      effect: inline-annotation
+  consumes:
+    meta:
+      world: source-tree
 ---
 
 # Annotate Inline
@@ -130,10 +138,8 @@ You are tasked with generating CLAUDE.md files across a brownfield project. You 
 
    **Choosing question format:**
 
-   - **`ask_user_question` tool** — when your question has 2-4 concrete options from code analysis (pattern conflicts, integration choices, scope boundaries, priority overrides). The user can always pick "Other" for free-text. Example: Use the `ask_user_question` tool with the question "Found 2 mapping approaches — which should new code follow?". Options: "Manual mapping (Recommended)" (Used in OrderService (src/services/OrderService.ts:45) — 8 occurrences); "AutoMapper" (Used in UserService (src/services/UserService.ts:12) — 2 occurrences).
+   - **`ask_user_question` tool** — use `ask_user_question` with 2-4 concrete hypotheses. State observed behavior, `file:line` evidence, impact, and the decision; the automatic `Type something.` row accepts unexpected detail.
 
-   - **Free-text with ❓ Question: prefix** — when the question is open-ended and options can't be predicted (discovery, "what am I missing?", corrections). Example:
-     "❓ Question: Integration scanner found no background job registration for this area. Is that expected, or is there async processing I'm not seeing?"
 
    **Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 

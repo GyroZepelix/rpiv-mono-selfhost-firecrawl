@@ -3,6 +3,40 @@ name: blueprint
 description: Plan complex features by decomposing them into vertical slices (one slice equals one phase) with developer micro-checkpoints between phases, producing an implement-ready phased plan in .rpiv/artifacts/plans/. Use for complex multi-component features touching 6+ files across multiple layers when iterative review between slices is valuable. Optionally consumes a research/solutions artifact; can also run standalone with a free-text feature description for small tasks. Prefer blueprint over plan when mid-flight micro-checkpoints matter, and prefer plan when a straightforward phased breakdown is enough.
 argument-hint: "[research artifact path or feature description]"
 shell-timeout: 10
+disable-model-invocation: true
+contract:
+  produces:
+    kind: produces
+    meta:
+      artifactKind: plan
+    data:
+      type: object
+      required: [phases, phase_count]
+      properties:
+        status:
+          enum: [in-progress, in-review, ready]
+        phase_count:
+          type: integer
+          minimum: 1
+          maximum: 32
+        phases:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            required: [n, title]
+            properties:
+              n: { type: integer, minimum: 1 }
+              title: { type: string }
+  consumes:
+    data:
+      type: object
+      properties:
+        status:
+          const: ready
+    meta:
+      artifactKind: [research, solutions]
 ---
 
 # Blueprint
@@ -64,7 +98,7 @@ When this command is invoked:
 
 This is NOT a discovery sweep. Focus on DEPTH (how things work, what patterns to follow) not BREADTH (where things are).
 
-1. **Spawn parallel research agents** using the Agent tool:
+1. **Spawn parallel research agents** using the Agent tool — all in a **single assistant message with multiple Agent calls** (concurrent, synchronous). **Never `run_in_background`**: its completion can't re-drive a workflow session, so the skill ends its turn before writing the plan and the stage fails with no artifact.
 
    - Use **codebase-pattern-finder** to find existing implementations to model after — the primary template for code shape
 
@@ -116,6 +150,7 @@ Use the grounded-questions-one-at-a-time pattern. Use a **❓ Question:** prefix
 - Reference real findings with `file:line` evidence
 - Present concrete options (not abstract choices)
 - Pull a DECISION from the developer, not confirm what you already found
+- Keep `Header` ≤16 characters (`MAX_HEADER_LENGTH = 16` — longer values are rejected).
 
 **Directional confirms first.** Before the one-at-a-time questions, clear every **directional** finding from Step 3 in a single batched `ask_user_question` (up to 15 per call). Do not mark the "follow" option Recommended.
 
@@ -136,14 +171,15 @@ Use the grounded-questions-one-at-a-time pattern. Use a **❓ Question:** prefix
 - Lead with the most architecturally significant ambiguity.
 - Every answer becomes a FIXED decision — no revisiting unless the developer explicitly asks.
 
+- Every ambiguity checkpoint MUST be self-contained: state observed behavior, at least one `file:line` evidence reference, why the decision matters, and 2-4 concrete decision options in the question or option descriptions.
+
 **Choosing question format:**
 
-- **`ask_user_question` tool** — when your question has 2-4 concrete options from code analysis (pattern conflicts, integration choices, scope boundaries, priority overrides). The user can always pick "Other" for free-text. Example:
+- **`ask_user_question` tool** — concrete options include evidence and trade-offs in every description. The user can type a custom answer through the automatically appended `Type something.` row; do not author `Other`. Example:
 
-  > Use the `ask_user_question` tool with the following question: "Found 2 mapping approaches — which should new code follow?". Header: "Pattern". Options: "Manual mapping (Recommended)" (Used in OrderService (src/services/OrderService.ts:45) — 8 occurrences); "AutoMapper" (Used in UserService (src/services/UserService.ts:12) — 2 occurrences).
+  > Use the `ask_user_question` tool with the following question: "Found 2 mapping approaches — which should new code follow?". Header: "Pattern". Options: "Manual mapping (Recommended)" (Used in OrderService (src/services/OrderService.ts:NN) — 8 occurrences); "AutoMapper" (Used in UserService (src/services/UserService.ts:NN) — 2 occurrences).
 
-- **Free-text with ❓ Question: prefix** — when the question is open-ended and options can't be predicted (discovery, "what am I missing?", corrections). Example:
-  "❓ Question: Research's `## Integration Points` shows no background job registration for this area. Is that expected, or is there async processing not surfaced in the inbound/outbound sweep?"
+- **Open-ended** — still use `ask_user_question`; supply 2-4 concrete hypotheses with behavior, `file:line` evidence, impact, and decision context, then let the automatic `Type something.` row capture unanticipated detail.
 
 **Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 
@@ -217,7 +253,7 @@ After the design summary is confirmed, decompose the feature into vertical slice
 
    **Artifact template sections** (all required in skeleton):
 
-   - **Frontmatter**: date, author, commit, branch, repository, topic, tags, `status: in-progress`, parent, phase_count, unresolved_phase_count (initialized to phase_count, decrements as each phase's code is approved in Step 6.4), last_updated, last_updated_by
+   - **Frontmatter**: date, author, commit, branch, repository, topic, tags, `status: in-progress`, parent, phase_count, `phases` (derived from the `## Phase N:` headings — see Step 7.2), unresolved_phase_count (initialized to phase_count, decrements as each phase's code is approved in Step 6.4), last_updated, last_updated_by
    - **# {Feature Name} Implementation Plan**
    - **## Overview**: 2-3 sentences — what we're building and the chosen architectural approach. Settled decision, not a discussion.
    - **## Requirements**: Bullet list from ticket, research, or developer input.
@@ -335,6 +371,11 @@ Use the `ask_user_question` tool to confirm. Question: "Slice {N/M}: {slice name
    - [ ] New widget renders correctly above the editor
    - [ ] Performance acceptable with 1000+ todo items
    ```
+
+   **Write-scope rule (per-phase, mandatory before parallel implement):** every command in a phase's `#### Automated Verification:` block must be **write-scoped to that phase's own `files:` set** — running it must not modify anything outside the phase's `files:`. Phases run concurrently under build's parallel implement lane, so a command that rewrites the wider tree corrupts a sibling phase's in-flight edit; narrow any formatter or auto-fixer to the phase's paths (take the project's command vocabulary from its guidance `# Commands` table — where the table gives only an unscoped form, narrow it to the phase's paths rather than substituting a different tool). Read-only repo-wide commands (a type check, a non-fixing lint, a scoped test selection) are permitted. Whole-repo build/test verification belongs to the plan's final whole-plan block, owned by `validate` — never to a phase.
+
+   **Who runs AV lines:** `implement` runs each phase's own `#### Automated Verification:` commands in its shell and flips the checkboxes; `validate` re-runs them agent-side over the whole finished plan. Both are agents with a real shell and judgment — no deterministic harness re-executes these lines. Still prefer ONE self-contained command per line that exits 0 when the criterion holds, with the target path inside the backtick span; prose around the span is context for the agent, not executed syntax. Remember AV lines are written before sibling phases land: a check asserting another phase's rename target or source may be true at phase time and false on the final tree — scope each line to what YOUR phase owns.
+
 5. Update the Plan History section: `- Phase N: {name} — approved as generated`
 6. Decrement frontmatter `unresolved_phase_count` by 1
 - Proceed to next slice
@@ -357,6 +398,13 @@ The artifact was created as a skeleton in Step 5 and filled progressively in Ste
    - `phase_count` matches the number of `## Phase N` sections
 
    If any check fails, return to Step 6. Do NOT flip status. (7.1 and 7.2 guard the same invariant — empty content ↔ unresolved counter.)
+
+   Then **rebuild the `phases:` frontmatter array from the `## Phase N:` headings** — one `{ n, title, files, depends_on }` entry per section, in body order. Populate `files:` from each phase's `#### N. path/to/file.ext` + `**File**:` entries and `depends_on` (lower `n` only) from the decomposition's `Depends on:` lines:
+   ```yaml
+   phases:
+     - { n: 1, title: Schema layer, files: [src/schema.ts], depends_on: [] }
+     - { n: 2, title: Runtime wiring, files: [src/runtime.ts], depends_on: [1] }
+   ```
 
 3. **Update frontmatter** via Edit: `status: in-progress` → `status: in-review` (Step 9 flips to `ready` after triage — keeps consumers off an artifact still being edited). Leave `last_updated` / `last_updated_by` as-is.
 

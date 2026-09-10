@@ -7,10 +7,13 @@
  * files whose status changed both count. Pure git — no transcript
  * scanning, no tool-use observation, no agent narration involved.
  *
- * Fail-soft: cwd is not a git repo OR git isn't on PATH → snapshot is
- * `undefined`, collector returns `ok` with an empty list (the runner's
- * completion-strategy check then decides whether that's a halt). Same
- * posture as `gitCommitCollector`.
+ * "Nothing found" posture (see `CollectResult`'s convention doc): a snapshot
+ * that found no working git (not a repo, git not on PATH) degrades — the
+ * collector returns `ok []` and the workflow keeps moving (same posture as
+ * `gitCommitCollector`'s `baselineMissing`). But when git WORKED at snapshot
+ * time and fails after the stage, that's an environment break mid-stage —
+ * the collector returns `fatal` with the cause instead of conflating it
+ * with "no changes."
  *
  * Optional `filter(path)` narrows the set — useful for "only `.ts`
  * files," "only files under `src/`," etc. Authors who want more
@@ -19,16 +22,10 @@
  * thin diff primitive.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { type Artifact, fs as fsHandle } from "../../handle.js";
-import type { ArtifactCollector, CollectCtx, SnapshotCtx } from "../../output-spec.js";
+import type { ArtifactCollector, CollectContext, CollectResult, SnapshotContext } from "../../output-spec.js";
 import { defineCollector } from "../../output-spec.js";
-
-const execFileAsync = promisify(execFile);
-
-/** Same budget as gitCommitCollector — generous for local repos, short enough that a hung mount can't pin the stage. */
-const GIT_EXEC_TIMEOUT_MS = 5_000;
+import { execFileAsync, GIT_EXEC_TIMEOUT_MS } from "../exec.js";
 
 export interface WorkspaceDiffSnapshot {
 	/** Post-stage diff compares against this set of (path, statusCode) pairs captured pre-stage. */
@@ -56,21 +53,31 @@ export const workspaceDiffCollector = (
 // Snapshot + diff implementation
 // ---------------------------------------------------------------------------
 
-async function capturePorcelainSnapshot(ctx: SnapshotCtx): Promise<WorkspaceDiffSnapshot | undefined> {
+async function capturePorcelainSnapshot(ctx: SnapshotContext): Promise<WorkspaceDiffSnapshot | undefined> {
 	const status = await runGitStatus(ctx.cwd);
 	if (status === undefined) return undefined;
 	return { statusByPath: parsePorcelain(status) };
 }
 
 async function collectDiffArtifacts(
-	ctx: CollectCtx<WorkspaceDiffSnapshot | undefined>,
+	ctx: CollectContext<WorkspaceDiffSnapshot | undefined>,
 	filter: ((path: string) => boolean) | undefined,
-): Promise<{ kind: "ok"; artifacts: readonly Artifact[] }> {
+): Promise<CollectResult> {
 	const snapshot = ctx.snapshot;
+	// No baseline = the stage ran outside a (working) git repo — documented
+	// degrade, not an error (see the module header).
 	if (!snapshot) return { kind: "ok", artifacts: [] };
 
 	const status = await runGitStatus(ctx.cwd);
-	if (status === undefined) return { kind: "ok", artifacts: [] };
+	if (status === undefined) {
+		// git worked at snapshot time and fails now — an environment break,
+		// not "no changes." `ok []` here would route downstream logic on
+		// fabricated nothing-happened data.
+		return {
+			kind: "fatal",
+			message: `${ctx.skill}: git status worked at snapshot time but failed after the stage — cannot diff the workspace`,
+		};
+	}
 	const post = parsePorcelain(status);
 
 	const artifacts: Artifact[] = [];
@@ -98,6 +105,24 @@ async function runGitStatus(cwd: string): Promise<string | undefined> {
 }
 
 /**
+ * `git status --porcelain` line grammar — one record per line:
+ *
+ *   <XY><space><path>
+ *
+ *   <XY>     — two-character status code (either half may be a space;
+ *              ` M` is a worktree-only modification)
+ *   <space>  — the one-space separator after the status code
+ *   <path>   — cwd-relative path; renames render as `old -> new`; the
+ *              path is double-quote wrapped when git cquote-escapes it
+ */
+const PORCELAIN_STATUS_CODE_WIDTH = 2;
+const PORCELAIN_PATH_OFFSET = PORCELAIN_STATUS_CODE_WIDTH + 1;
+const PORCELAIN_MIN_LINE_WIDTH = PORCELAIN_PATH_OFFSET + 1;
+const PORCELAIN_RENAME_ARROW = " -> ";
+const PORCELAIN_RENAME_ARROW_WIDTH = PORCELAIN_RENAME_ARROW.length;
+const PORCELAIN_QUOTE = '"';
+
+/**
  * Parse `git status --porcelain` output: each line is `XY <path>` where
  * XY is the two-character status code. We key by path and keep the
  * full XY so post-stage diff sees status transitions (e.g. ` M` → `MM`).
@@ -106,17 +131,19 @@ async function runGitStatus(cwd: string): Promise<string | undefined> {
  * downstream collectors / parsers don't usually care about the prior
  * name and including both halves doubles the artifact count.
  */
-function parsePorcelain(out: string): Map<string, string> {
+export function parsePorcelain(out: string): Map<string, string> {
 	const map = new Map<string, string>();
 	for (const line of out.split("\n")) {
-		if (line.length < 4) continue;
-		const code = line.slice(0, 2);
-		let path = line.slice(3).trim();
+		if (line.length < PORCELAIN_MIN_LINE_WIDTH) continue;
+		const code = line.slice(0, PORCELAIN_STATUS_CODE_WIDTH);
+		let path = line.slice(PORCELAIN_PATH_OFFSET).trim();
 		// Rename: `R  old -> new` — take the new name.
-		const arrow = path.indexOf(" -> ");
-		if (arrow !== -1) path = path.slice(arrow + 4);
-		// Strip wrapping quotes (paths with whitespace).
-		if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1);
+		const arrow = path.indexOf(PORCELAIN_RENAME_ARROW);
+		if (arrow !== -1) path = path.slice(arrow + PORCELAIN_RENAME_ARROW_WIDTH);
+		// Strip wrapping quotes (paths git cquote-escapes).
+		if (path.startsWith(PORCELAIN_QUOTE) && path.endsWith(PORCELAIN_QUOTE)) {
+			path = path.slice(PORCELAIN_QUOTE.length, -PORCELAIN_QUOTE.length);
+		}
 		map.set(path, code);
 	}
 	return map;

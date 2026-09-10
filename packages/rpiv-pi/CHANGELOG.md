@@ -7,6 +7,427 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Prior snapshots are written once per fix round.** `plan-snapshot` / `code-snapshot` publish `<plan-basename>.r<N>.md` under `.rpiv/artifacts/priors/` (round N = the snapshot's ordinal on its own channel) and keep writing the basename-keyed copy beside it. The surgical-fix guard reads the round's own bytes through the channel handle, so a resume replaying an earlier round no longer sees a later round's snapshot.
+
+### Breaking / Upgrade Notes
+- Run state trails move to schema v3 — runs recorded by an earlier version refuse to resume, so finish or restart in-flight runs before upgrading.
+
+## [2.9.0] - 2026-09-01
+
+### Fixed
+
+- **The `presets.<workflow>.stages` models-config rung is live on the run path.** `docs/models-config.md` has documented per-preset tiering (`presets[workflow].stages[stage]` as cascade rung 1) since the axis shipped, and `resolveStageModel` implements it — but the execution-host seam handed `resolveModel` only `{ stage, skill }`, so the rung could never match during a run and per-preset entries silently resolved through the flat `stages`/`skills`/`defaults` rungs instead. With rpiv-workflow's seam widened to `{ workflow, stage, skill }` (same lockstep release), the host now threads the workflow name through, making the documented cascade real: a `presets.build.stages.plan-grade` entry tiers build's grade panels without touching ship's, and the confirm-arm design note ("a stronger judge model can be pinned to exactly the verdicts about to block") is finally satisfiable per preset. Measured stakes: a build run dispatches 10–21 grade sessions (in run 2026-08-31_21-12-35-f00e the grading stages consumed more output tokens than implement itself) — the rung this fix un-deadens is the knob that right-sizes them.
+
+### Changed
+
+- **Elaborate's probe verifies at the narrowest scope, and sibling-phase files are stubs, never disk reads.** The code fanout is the pipeline's biggest compute block (run 2026-08-31_15-21-14-57d0: 8 phases × 15–20 min, ~37 min wall), dominated by each unit running the project's whole-tree check repeatedly while up to `maxConcurrency` sibling probes mutate the same working tree — every unit then pays a filtering pass over the cross-file noise the siblings generate. Step 6's verify now takes the project's read-only check in its NARROWEST recorded form covering the write-scope (`tsc -p <package>`, `cargo check -p <crate>`, `go build ./<pkg>/...` — from the guidance `# Commands` table), whole-tree only when no scoped variant is recorded. And sibling-phase files are explicitly never Read, probed, or waited on — run 57d0's phase 7 hit ENOENT on three not-yet-created sibling files at 21:15 and retried the identical reads at 21:26; the interfaces were in the Synthesis Notes all along (Step 3's existing rule), so Step 2 now names the exception and the probe treats a sibling-owned unresolved reference as expected, not fixable. Trade accepted: a cross-package breakage the whole-tree form would have caught at probe time now surfaces at implement's AV commands or validate — the same downstream routing the pipeline already relies on elsewhere. The probe→revert→guard cycle itself is unchanged.
+
+- **Citation prose slims to the happy path — verification duties leave the skills, the free floors keep the job.** Session-data assessment of the two 2026-08-31 build runs: the deterministic cite floors ran in milliseconds with zero findings, zero fix rounds were citation-driven, and the grade sessions' only resolution work was one small verdict read — the expensive citation labor (the pre-0f347218 40–60% correctness-unit tax) was already retired by the `--cite-check` discharge. What remained was prose weight and loop risk, now trimmed: `research` drops its end-of-stage "confirm every file:line resolves" verification duty (cite what you actually read; consumers locate a drifted link by symbol on demand); `slice` drops the floor-threat clause and compresses the re-slice citation-quoting rule to its operative core; `grade` — loaded 10–21× per run — compresses the `--cite-check` contract, the citation-resolution rule, and the mechanics-evidence adjacency rule to a few lines each (same rules, same gates, fewer prompt tokens per judge session); `elaborate` and `synthesize` keep the repo-root-relative citation form and shed the verification/threat language. No machinery changes: `plan-cite-check`/`code-cite-check`, the cite-discharge, and `FILE_LINE_CITATION_RE` demotion all stand exactly as before.
+
+- **Reconcile write authority is plan-derived — the JS/TS-only test-path restriction is retired, and the gate's parser doubles as a pre-flight lint.** The directive eligibility rule was a filename convention (`*.test.{ts,tsx,js,jsx}`), which made the whole reconcile channel inert in a project of any other language (`test_*.py`, `*_test.go`, `*_spec.rb` — all rejected) and left golden masters undeliverable even when a phase declared them. Eligibility now derives from the plan's own contract: a directive may target any file in the declared write-set — the union of every phase's `files:`, twin-expanded (`withTestTwins`) — the SAME authority the scope floor enforces, so reconcile can never write a path the floor would flag, works identically in any language, and a `files:`-less plan rejects every directive fail-closed. Containment stays checked first on the resolved path (the declared-set membership check alone cannot confine the sink). The grammar and apply-classification moved to a loader-free ESM module (`built-ins/reconcile-directives.mjs`, typed via `.d.mts`) that the gate imports — and so does the new `skills/_shared/reconcile-lint.mjs` pre-flight CLI (skill layer depends on the extension module, never the reverse): the implement skill, after recording a directive, runs the gate's exact parser in check-only mode (`--phase <N>` scopes to its own section; grammar, containment, declared-set eligibility via a best-effort frontmatter scan, find-presence with the already-applied/deletion-satisfied tolerances) — every finding caught locally is one `/skill:amend` repair session plus a gate re-entry that never happens (run 2026-08-31_15-21-14-57d0 lost 42 minutes to exactly this class). The implement SKILL.md directive rules are correspondingly lean: copy the `find` bytes from the live file (never from memory), backticks force the fenced form, then lint — nothing added to the no-directive happy path.
+
+- **The default background-lane cap rises from 4 to 6 — the 5-dimension grade panel no longer serializes a second batch on every unconfigured install.** Real-run analysis (build runs 2026-08-31_15-21-14-57d0 and 2026-08-31_21-12-35-f00e) showed the widest built-in fanout — the grade panel's 5 dimensions — split 4+1 under the shipped `DEFAULT_MAX_CONCURRENCY = 4` on all four panel occurrences per run, the tail dimension landing ~1.5 min behind its batch, and elaborate/implement phases queuing behind the same cap (run 57d0's code phases 5–8 started 4–18 min after phases 1–4); neither run recorded a single rate-limit event at 4 lanes. Since `~/.config/rpiv-pi/models.json` is absent on every fresh install, the shipped constant IS the fleet default — 6 clears the panel in one batch with one lane of headroom. A configured `maxConcurrency` still wins, and the fail-soft guard in `resolveMaxConcurrency` is unchanged.
+
+## [2.8.0] - 2026-08-29
+
+### Added
+
+- **A goal-derived executable acceptance inventory joins ship and build — the standard of completion no longer inherits the plan's scope.** Real-run analysis showed the flow's one structural gap against its own goal channel: validate's *executable* checks were entirely plan-authored (`#### Automated Verification:` commands re-run as written), so a plan that narrowed the brief validated green, and both observed completeness catches (runs 2026-08-13_12-45-55-3881 and 2026-08-13_07-57-13-8e8b — a dropped goal ask surfacing only through expensive late grading) were prose-anchored LLM saves rather than measurements. A new `acceptance` skill + stage (the 30th contract-carrying skill; `artifactKind: acceptance` → the `acceptance` bucket) now derives the standard BEFORE planning, between research and slice/plan: ID'd observable outcomes (`a1…`) enumerated from the verbatim goal alone — research grounds only the evidence procedures, never membership, so the grounding pass's routine narrowing cannot rewrite the standard — each item carrying a read-only, future-tense evidence `command` + `expect` where one can be derived, else a `manual` procedure. Threading: `quick-plan` receives `--acceptance` and records a machine-readable per-item `acceptance:` disposition (`implemented` naming the phase, or `deferred` with a reason — silence never defers); every grade panel's completeness unit receives `--acceptance` and walks the items id by id instead of re-deriving the ask list from goal prose (build's plan/code/confirm gates and ship's grade, via the shared fanout factory + ship's bespoke twin); and `validate` receives `--acceptance` and EXECUTES each non-deferred item's command against the finished tree — a failing item forces `verdict: fail` and lands as a structured `blockers:` entry, so it is remediable by the validate-fix arm like any other blocker, and a `manual` item lands in the report's manual-verification section. Build keeps the inventory out of slice/design/synthesize (the bounded-context doctrine that keeps `goal` out of the generative stages); slice's research input now rides an explicit `reads: ["research"]` (`--research <path>`, the flag form of its fresh input) since the acceptance doc holds the rolling primary at that seam.
+
+- **The goal capture halts garbage briefs before the run starts.** A brief of fewer than 12 non-whitespace characters ("do something") can only be placeholder text, yet it flowed verbatim into the goal channel and grounded a full multi-stage run against nothing. `captureGoal` now throws the standard `haltPreflight` (`goal-capture: …`) at the top of the body — before any filesystem side effect (no goal dir, no goal file, no run-start baseline) — with a message telling the user to re-invoke with a fuller brief naming the ask, any constraints, and the observable outcome to expect. The bar is deliberately minimal: short-but-real briefs like "fix the flaky lane-dock resize test" (30 non-whitespace characters) pass untouched, and no other preflight or the baseline snapshot behavior changes. The floor is build/ship-ONLY — vet captures via the new `captureReviewScope` (the same verbatim capture + baseline, no floor), because vet's "brief" is a review-scope token (`/wf vet staged` is 6 non-whitespace characters) the floor would have rejected. Notably, this change was itself implemented by a ship validation run (2026-08-28_17-06-39-18f1) whose acceptance inventory could not have caught the vet regression: the implementing brief never mentioned vet, and a goal-derived standard faithfully inherits its brief's blind spots — the carve-out came from human review of the run's diff.
+
+### Changed
+
+- **Re-grade economics: the fix-loop grading stack sheds its three measured wastes.** Real-run analysis (grading ≈20–25% of tokens and ~25% of clean-run wall time; every observed fix loop re-graded the full 5-dimension roster; confirm arms at ~13:1/~10:1 onward-to-fix vs overturn; the correctness unit at 40–60% of panel cost, dominated by citation re-resolution the deterministic floor already performs). Three coordinated changes: (1) **The surgical-fix guard can now actually fire.** `citedSections` could only ever emit `phase N` keys while the diff's touched-section keys cover every `## ` heading — so any amend touching `## Out of Scope`, `## Risk Flags`, or a whole-plan-verification twin was structurally guaranteed non-surgical, and a risk-ruling-driven fix (no findings) had an empty cite set by construction. A finding's `where` leading segment now cites its section heading (normalized exactly as the diff keys them; repo paths never count), and a failing risk ruling cites `risk flags` plus its authored owner phase. Every guard call also persists a `<plan-basename>.decision.json` beside the prior naming the tripped condition, touched/cited sets, and changed-line count — the instrumentation the always-broad diagnosis lacked (post-hoc replay is impossible: splice/reconcile mutate the plan after the loop). The instrumentation's FIRST live firing (a third-party build run, 2026-08-28_17-03-12-d5a9) immediately earned its keep: it exposed two cite-normalization gaps — a suffixed section where ("Synthesis Notes — 'Adopted rider' bullet") could never match its bare heading key, and a section named only inside a finding's parenthetical ("(missing ## Whole-Plan Verification section)") was never extracted, so the amend CREATING that section counted as an uncited touch. Fixed via `headingCore` normalization + word-boundary prefix coverage (`sectionCovered`; phase keys stay exact-only so `phase 1` never covers `phase 10`) and a `##`-mention sweep across where AND detail; the run's real decision replays to broad for the one legitimate reason (a genuinely uncited phase touch) with both section touches correctly covered. A second live decision record (build validation run 2026-08-28_20-37-01-b307's code-fix) exposed the remaining always-broad driver: `sectionIndexOf` keyed `## ` lines INSIDE fenced code blocks as sections, so a plan phase embedding a CHANGELOG snippet manufactured a phantom `[unreleased]` touched key no finding could ever cite — guaranteed broad for every amend touching an embedded markdown block. The section indexer is now fence-aware (fenced lines attribute to the enclosing section), pinned by an embedded-changelog regression test. (2) **The confirm arm is severity-gated.** A fresh blocker confirms only when the second opinion has real expected value: a HIGH-severity blocker, a risk-ruling blocker (the uphold-or-refute contract is the designed remedy for an un-grounded ruling, and amend legitimately re-emits unchanged for demotions-only verdicts — routing those to the fix would livelock), or a flap (a carried pass regressing to a block — the exact single-judge instability the confirm exists for). A first-time MEDIUM finding-block routes straight to the surgical fix: amend is sub-minute and the now-working delta re-grade keeps the re-judgment narrow. (3) **Citation resolution is a settled fact for the correctness grader.** The deterministic cite floor's verdict now threads as `--cite-check` to every correctness unit — build's plan/code gates and both confirm arms (previously ship-only), and on a CLEAN verdict too (previously findings-only): clean settles resolution so the grader samples citations only for the semantic claim, never to re-check existence; findings remain leads, and unflagged citations are resolution-settled either way (grade SKILL.md contract updated).
+- **Re-grade economics: the fix-loop grading stack sheds its three measured wastes.** Real-run analysis (grading ≈20–25% of tokens and ~25% of clean-run wall time; every observed fix loop re-graded the full 5-dimension roster; confirm arms at ~13:1/~10:1 onward-to-fix vs overturn; the correctness unit at 40–60% of panel cost, dominated by citation re-resolution the deterministic floor already performs). Three coordinated changes: (1) **The surgical-fix guard can now actually fire.** `citedSections` could only ever emit `phase N` keys while the diff's touched-section keys cover every `## ` heading — so any amend touching `## Out of Scope`, `## Risk Flags`, or a whole-plan-verification twin was structurally guaranteed non-surgical, and a risk-ruling-driven fix (no findings) had an empty cite set by construction. A finding's `where` leading segment now cites its section heading (normalized exactly as the diff keys them; repo paths never count), and a failing risk ruling cites `risk flags` plus its authored owner phase. Every guard call also persists a `<plan-basename>.decision.json` beside the prior naming the tripped condition, touched/cited sets, and changed-line count — the instrumentation the always-broad diagnosis lacked (post-hoc replay is impossible: splice/reconcile mutate the plan after the loop). (2) **The confirm arm is severity-gated.** A fresh blocker confirms only when the second opinion has real expected value: a HIGH-severity blocker, a risk-ruling blocker (the uphold-or-refute contract is the designed remedy for an un-grounded ruling, and amend legitimately re-emits unchanged for demotions-only verdicts — routing those to the fix would livelock), or a flap (a carried pass regressing to a block — the exact single-judge instability the confirm exists for). A first-time MEDIUM finding-block routes straight to the surgical fix: amend is sub-minute and the now-working delta re-grade keeps the re-judgment narrow. (3) **Citation resolution is a settled fact for the correctness grader.** The deterministic cite floor's verdict now threads as `--cite-check` to every correctness unit — build's plan/code gates and both confirm arms (previously ship-only), and on a CLEAN verdict too (previously findings-only): clean settles resolution so the grader samples citations only for the semantic claim, never to re-check existence; findings remain leads, and unflagged citations are resolution-settled either way (grade SKILL.md contract updated).
+- **All-failed fanout generations now halt the run at the fanout's own close — the dead design-panel shape is closed.** Observed run shape: four dead design units (every `slice-design` session of the generation failed) still fell through to `design-review`, which dispatched twice over an empty `designs` channel — checkpoint sessions burned against nothing to review. Three wiring sites adopt rpiv-workflow's new `haltWhenAllFailed` fanout knob (same lockstep release): `SLICE_DESIGN_FANOUT` (build's slice-design), the shared `gradePanelFanout` factory (all five build panels — slice-grade, plan-grade, plan-confirm, code-grade, code-confirm — inherit by construction), and ship's bespoke `SHIP_DIMENSION_FANOUT` (the halt moves one hop earlier than `shipGradeGate`). Leak discipline is proven by tests, not promised: the implement/code/subplan fanouts stay flagless (the `FRONTMATTER_PHASE_FANOUT`/`PLANS_PHASE_FANOUT` spread bases in plan-phases stay clean, so vet/ship/polish implement lanes cannot inherit the flag; `SYNTH_CLUSTER_FANOUT` untouched), pinned by an inventory sweep asserting the flagged set is exactly those seven stages — any future flagging must extend it consciously.
+- **Ship's validate gate classifies before it halts — one bounded remediation hop joins the lightweight preset.** Run 2026-08-15_13-47-56-7299: ship ran 52 minutes through a fully-implemented, fully-verified tree ("9 dirty paths map 1:1 to the plan's 9-file write-set"), then validate returned `fail` solely over a docs gap and the pass-only `match` terminated — ~50 minutes of correct implementation stranded uncommitted, salvaged by hand. Ship's validate edge is now build's classifying `validateGate` capped at `maxFixRounds: 1`: a `fail` carrying structured remediable handles (a `pass: false` risk ruling or a `blockers:` entry) buys ONE `validate-fix` (remediate) hop — re-entering at the scope floor so the fix is re-verified end-to-end — and any fail after the spent round, any prose-only fail, and any missing/unexpected verdict still halt with a route note. The cap is deterministic (the `remediation` channel length IS the rounds spent), so the preset's stop-on-fail identity survives as "at most one sanctioned hop", not a loop. `validateGate`/`validateFixGate` became factories (the `scopeFloorGate` precedent — no route-note symbol aliasing between build and ship); build's wiring is behavior-identical (no cap — the runner's backward-jump guard is its budget). Pairs with rpiv-workflow's resume change: every remaining ship halt is now cheap to recover — hand-repair, then `/wf @<runId>` re-runs the halted gate with all upstream artifacts intact. NOTE (review 2026-08-28_12-11-57, I5): both gates fold the `remediation` NAMED channel, which the runner only started writing for acts stages in this same lockstep release (rpiv-workflow's side-effect outcome publishing fix) — without that runner the cap and build's unchanged-tree stop are inert (bounded by the backward-jump guard alone), which was also true of build's stop as originally shipped in 2.7.1.
+- **Ship's research stage right-sizes its grounding to the brief's pre-chewedness — two tiers replace the flat two-dispatch ceiling.** The old `SHIP_RESEARCH_PROMPT` charged every brief the same mapping tax: a brief that already named the root cause, the files to touch, or the fix still paid two `codebase-analyzer` mapping dispatches to re-derive what it carried. The prompt now classifies first and follows ONLY the matching tier: Tier A (pre-chewed) verifies — at most ONE verify-only `codebase-analyzer` dispatch confirming or denying each named anchor against the actual code and reporting drift with the corrected `file:line`, or zero dispatches when the anchors are plain file paths the stage child Reads/Greps itself; Tier B (symptom-only) keeps the lean two-dispatch mapping sentence byte-verbatim, sequential and never `run_in_background` as before. The collector and reader contracts are preserved: the grounding doc still lands under `.rpiv/artifacts/research/` with the prompt naming the directory only (never a full example path — the pre-write path-echo hazard), its path announced in the final message, and it now carries an explicit under-150-lines bound that leaves the two full readers (quick-plan's Step 1 extraction and the grade panel's architecture-fit `--context`) complete headroom — the e8649613 lesson that starving the research artifact breaks the stages that read it.
+
+### Changed
+
+- **Build's validate loop verifies its own progress — three seams close the futile-lap livelock.** Run 2026-08-22_12-14-12-64eb: validate failed on two whole-plan gates recorded only in report prose (all seven risk rulings passed), so the `remediate` arm — contractually restricted to `pass: false` rulings — drift-escaped without an edit, and the unchanged tree re-validated to the identical verdict four times (~27 minutes of full-suite re-runs) until the backward-jump guard halted the run at `reconcile`, misattributed. (1) The validate gate now classifies a fail before routing (`validateGate`, the ship-gate `setRouteNote` pattern): only a fail carrying a remediable handle — a `pass: false` ruling or a structured `blockers:` entry — reaches `validate-fix`; a prose-only fail STOPs at the gate with a note naming why. (2) The validate skill emits whole-plan/automated-command failures it attributes to in-delta files as `blockers: [{ id, command, file, line }]` frontmatter, and remediate's fixable partition accepts them — the failing command is the procedure, same one-fix-attempt discipline — so the loop can now converge on the failure class that livelocked. (3) `validate-fix` carries a `remediationOutcome` (the `commit`/`gitCommitOutcome` shape): a git-only tree digest snapshotted around the stage publishes `{ changed }` on the `remediation` channel, and the arm's edge — now a decision — STOPs on an explicit unchanged tree (re-validating an unchanged tree is provably futile; a missing signal proceeds, the worktree-digest degrade doctrine). The repair-arm authority rule the slice gate learned the same way: a gate may only loop into an arm whose authority covers the failure classes it emits.
+- **Research runs now narrate their progress — a `[Label]:` marker protocol joins the bundled research skill and ship's grounding prompt.** Observed runs aborted inside the research stage's silent agent-batch window with no transcript trace of where they stood: the lane console's live tail goes quiet between the dispatch message and the returns, so a mid-batch death reads as an unexplained stall. The research skill pins four one-line transcript markers — `[Questions]: {N} research questions formulated. Reading shared files and grouping before dispatch.` the moment scope-tracer's questions land at Step 1, `[Dispatched]: {N} analysis agents in one batch{ + precedent sweep}. Waiting for returns.` riding the SAME assistant message as the Agent calls (no extra turn; the one-message parallel dispatch shape is untouched), `[Returned]: {N}/{N} agents returned. Proceeding to synthesis.` after the wait barrier, and `[Synthesizing]: compiling {N} agent reports.` before compiling — and ship's `SHIP_RESEARCH_PROMPT` carries the twin protocol: a `[Classified]:` first line echoing the chosen tier, `[Dispatch N/M]:` / `[Dispatch N/M returned]:` around each grounding dispatch (M = the tier's ceiling: 1 for Tier A, 2 for Tier B), and the `[Dispatch]: none` escape for the zero-dispatch path. Both surfaces carry the same discipline: markers are transcript text only, never artifact content, and never name a `.rpiv/artifacts/` path before the file is written — a marker can never outrank the real artifact announcement in the collector's last-match scan.
+
+## [2.7.0] - 2026-08-21
+
+### Added
+
+- **A deterministic `scope-quarantine` remedy arm joins build and vet.** When every path the lane scope floor flags is a run-created UNTRACKED file (`git status` `??` — provably absent from the run-start baseline, owned by no phase), the floor's verdict tiers to `untracked-only` and routes to the new stage, which MOVES (never deletes) each file under `.rpiv/tmp/scope-quarantine/<path>`, records every move and refusal in a basename-keyed manifest beside the scope verdict — MERGED across fix-loop rounds and written in a `finally` so a mid-loop fs failure still lands completed moves on disk — and re-enters the floor: a plain non-counted hop with guaranteed progress (quarantined paths leave the dirty set), so at most one quarantine round per gate entry. The manifest is the adjudication record: validate checks it unconditionally (the post-quarantine re-check threads a clean `pass` verdict, so the manifest is the only surviving account of what moved), ruling scratch benign and a moved file the deliverable needs a blocking plan deviation. Nothing is lost: a load-bearing file landing there means its phase forgot to declare it in `files:`, validate fails on the missing file, and the manifest names where it went. Motivated by run 2026-08-20_18-10-39-17e7: a validate-fix round left two scratch scripts in an untracked `.tmp/` and the floor's terminal fail killed a functionally green five-hour run — twice, since the resume re-judged the same dirty tree.
+
+### Changed
+
+- **The scope floor no longer halts on its own findings — tracked excess is demoted and adjudicated by validate.** `implement-scope-check`'s verdict is now tiered (`pass` / `untracked-only` / `excess`): tracked excess continues to reconcile/validate with the findings recorded at severity `high`, and build's validate dispatch threads the verdict JSON via a new `--scope` flag (the `--cite-check` pattern — the deterministic floor produces evidence, the LLM judge rules). The validate skill rules on each finding: explained churn (a lockfile or generated artifact a declared phase's own commands produce) is a non-blocking note; an out-of-scope write it cannot explain forces `verdict: fail` into the existing validate-fix loop. A deterministic floor cannot tell a benign lockfile touch from a real cross-phase stomp — the citation-floor overhaul's audit logic applies verbatim. Only a missing/corrupt verdict remains terminal at the gate (the integrity clause every de-halting change has preserved), and ship deliberately keeps its stop-on-fail route (no fix loops is its contract). Vet wires the same tiered route; its review loop sees the whole diff and adjudicates there. Ship's validate dispatch also carries `--scope` (it shares `VALIDATE_GOAL_PROMPT`) — by construction the verdict there is always `pass` when validate runs (a non-pass stops at the gate), so the skill's adjudication step short-circuits on empty findings; consistent evidence plumbing, not a behavior change.
+- **The artifact collector recovers a prefix-mangled announcement via a disk-corroborated basename fallback.** When the full-path transcript scan misses (run 2026-08-21_12-15-19-ec5e: the agent wrote its elaboration to the correct path but announced it as `.elaborations/<file>.md` — directory prefix mangled in prose, stage fataled while a verified-green 38KB artifact sat on disk), the collector now scans the transcript for bare `<file>.md` tokens (tempered — an elided `...__phase-N.md` still never resolves) and accepts a candidate ONLY when it names exactly one existing file under `.rpiv/artifacts/` (the collector's own bucket for the bucket-narrowed form). The agent's announcement still drives collection — disk existence corroborates it, so a stray prose mention or an ambiguous basename never collects; with no unique resolution the original fatal stands.
+- **The artifact collector no longer mistakes a prose ellipsis for an announced path.** `RPIV_ARTIFACT_PATTERN` (and `rpivBucketCollector`'s filename segment) now reject `..` anywhere in a path segment via a tempered class. Regression from the same run: the phase-5 elaborate agent announced its real artifact, then referred to a sibling's as `` `.rpiv/artifacts/elaborations/...__phase-4.md` `` — a valid `[\w.-]+` string, so the last-match scan collected the elided path, fataled on a file that never existed, and silently dropped the real 30KB elaboration from the splice. The elaborate skill additionally pins the announcement contract: the artifact path must be the LAST full `.rpiv/artifacts/...` path in the reply; siblings are referenced by basename only.
+- **Skills that shell out learn the scratch-space contract, and plans stop promising unachievable whole-plan gates.** remediate, implement, and validate now carry the rule the scope floor enforces: repo-located scratch (probe scripts, fixtures, captured payloads) lives under `.rpiv/tmp/` — exempt from the floor — or outside the repo, and is deleted when done; the floor counts untracked files (`-uall`), so scratch anywhere else is an undeclared write. synthesize and plan gain the whole-plan gate achievability rule: repo-wide style gates (lint/format) default to the delta-scoped form over the plan's file union, and an absolute repo-wide "exits 0" is reserved for build/test commands or gates evidenced green at base — run 17e7's plan promised `npm run lint` exits 0 against 95 pre-existing errors in files it never touched, an unpassable criterion that burned all three validate rounds. validate closes the loop from the judging side: a whole-plan command failure attributable ENTIRELY to files outside the run's delta (proven per file with `git diff --quiet <base> -- <file>`) is ruled pre-existing debt — reported, non-blocking — instead of forcing `verdict: fail`.
+- **The validate skill drops its two subagent dispatches; the pattern check runs inline.** Validate no longer spawns `codebase-analyzer` + `codebase-pattern-finder` (`Agent` leaves its `allowed-tools`). A run-history audit of 64 validate runs (127 dispatches, ~4.8M tokens) found 80% pure rubber stamps and only 2 verdict-affecting catches — both stale references and invalidated statements left in comments and docs. That one earning class is now an inline step: compare new files against established siblings for shape, grep for renamed/removed terms lingering in comments, docs, or test descriptions. Generic checks only — the skill ships to every rpiv-pi project.
+
+## [2.6.4] - 2026-08-20
+
+### Changed
+
+- **The citation floor's last blocking citation category is demoted — every citation-resolution finding is now advisory.** 2.6.3 kept a resolves-to-nothing citation `high`/blocking as the one fabrication-shaped category; `verifyCitations` now marks all four finding shapes ADVISORY (`advisory: true` on the finding): unresolved path, ambiguous bare/suffix citation, post-resolution read failure, and line range past end-of-file. An advisory-only structure verdict rates `severity: low` (still `pass: false`, findings persisted), which the gates' `allDimensionsPass` severity floor rides through. Only the `files:` coverage floor (an undeclared write corrupts implement's dependency derivation) still rates `high` and blocks. Forced by the run-history audit: across three months, 71 distinct flagged paths yielded ZERO fabrications — the whole no-match population was resolver gaps, meta-plan fixture prose, and one garbled-but-real path — while blocking on them cost ~8 hours of fix rounds, two dead ship runs, and one four-round identical-findings churn loop. A genuinely wrong path is still caught: the grade correctness unit receives the findings via `--cite-check`, and its citation-resolution rule treats a file that exists nowhere as a real finding.
+- **The citation resolver closes its three worst false-positive gaps.** The suffix walk now carves `.rpiv/guidance` back in (the guidance shadow tree is a routinely-cited and routinely-edited target; skipping it made every suffix-form `architecture.md` citation a false "does not exist") while `.rpiv/artifacts` stays invisible; a no-match citation is rescued by a unique whole-segment suffix match in the plan's own declared `files:` (verified against the file when it exists, skipped as a forward reference when the declaration is a planned CREATE); and the file-existence probes no longer race a concurrent delete into a `FAIL_SCRIPT_THREW` halt.
+- **The plan-time coverage floor stops flagging non-writes.** Backticked list-item paths count as declared writes only inside a Changes section (`### Changes` heading or `**Changes**:` field) — a reference bullet elsewhere ("mirror `x/state.ts`") no longer reads as an undeclared write; `isPathLike`'s extension is bounded to 1–5 chars mirroring the citation regex, so a dotted identifier (`deps.finalize` — a live run's blocking finding and wasted code-fix round) never reads as a file; and a body form citing a declared file by bare basename or partial path is covered via whole-segment suffix match instead of demanding the bare name be added to `files:` (which would have corrupted the very dep-derivation the floor protects).
+
+## [2.6.3] - 2026-08-20
+
+### Changed
+
+- **The deterministic citation floor no longer halts a run over ambiguity or line drift — findings are severity-tiered.** `verifyCitations` now marks resolver-limitation shapes ADVISORY (`advisory: true` on the finding): an ambiguous bare/suffix citation whose every candidate is a real tree file, a post-resolution read failure, and a line range past end-of-file. An advisory-only structure verdict rates `severity: low` (still `pass: false`, findings persisted), which the gates' `allDimensionsPass` severity floor rides through — so `ship`'s loop-less `plan-cite-check` gate no longer terminates a full goal→research→plan run over a path-prefix omission, and `build`/`vet`'s fix loops stop burning `plan-fix`/`code-fix` rounds on them. A citation that resolves to NOTHING by any strategy — the one fabrication-shaped category — and a phase-body edit missing from `files:` (the coverage floor implement's dep fanout relies on) still rate `high` and block exactly as before. Motivated by the run-history audit: every terminal ship cite-stop on record was an advisory shape, and none was a fabrication.
+- **Ship's grade panel now adjudicates the citation floor's advisory findings.** When the latest `plan-cite-check` verdict carries findings (advisory by construction at that point — a blocking finding stops before grade), `SHIP_DIMENSION_FANOUT` threads the verdict JSON to the correctness unit as the `grade` skill's new optional `--cite-check <verdict-path>` flag. The grader folds each finding into its live-codebase spot-check — resolving the citation by file + symbol per the citation-resolution rule — and reports a finding only when the underlying claim is actually wrong, so advisory findings are read and ruled on instead of rotting on the trail. The flag is correctness-only, never triggers confirm mode, and produces no `finding_rulings`.
+
+- **Standalone iterative design now crosses a hard session boundary after every approved non-final slice.** The exact verified code and Success Criteria are written to the design artifact and re-read to confirm they match the approved payload, then the run stops with a fresh-session `/skill:design --resume <artifact>` command. Resume mode reads locked slices and the first pending slice from the artifact instead of trusting conversational or compaction summaries. This bounds verifier-heavy slice work to one slice per Pi context.
+
+### Fixed
+
+- **The lane-relay brand survives pi ≥0.84.4's ctx.ui spread wrapper — the dead-lane-navigation regression after the host update is closed.** pi 0.84.4's `ui_prompt_start`/`ui_prompt_end` feature re-wraps every extension's `ctx.ui` by spread (`wrapUIPromptContext` in the extension runner; upstream lossiness tracked as earendil-works/pi#8829). The relay served `LANE_RELAY_BRAND` only from its Proxy `get` trap — never as an own key — so the spread copy bound into every detached child lost it, `isLaneRelayUiContext(ctx.ui)` returned false, and both launcher-only `session_start` gates fell open: lane-switcher re-installed the dock editor with `switchIntoLane` capturing the CHILD's relay ui (every ↓/⏎/`^Q`/`/lanes` step-in then DEFERRED the lane console into a pending-input queue instead of mounting it on the terminal — observed 2026-08-29 morning, minutes after the 0.84.3→0.84.4 update, as fully dead lane navigation plus inflating "needs input" badges immediately after `/wf build`), and session-capture re-pointed the captured foreground UI at the child. The Proxy now also reports the brand as an own ENUMERABLE key via `ownKeys`/`getOwnPropertyDescriptor` traps (`configurable: true` — the Proxy invariant for a key the target does not own; duplicate-key guarded), so `{...relayProxy}` carries `[LANE_RELAY_BRAND]: true` and both gates hold on 0.84.4, while ≤0.84.3 — where children receive the un-copied proxy — keeps reading the `get` trap exactly as before. The relay's behavioral overrides needed no help (a spread `get`s the deferring `custom`, the focus-gated `notify`, and the suppressed ambient setters through the proxy); all of it is pinned by a regression suite modeling pi's wrapper shape byte-for-byte: spread copy still detects as a relay (plain-ctx spread does not false-positive), still parks `custom`, keeps the focus gate and suppression, and double-wrapping never trips the ownKeys duplicate invariant.
+
+- **Overflow recovery no longer answers RPIV's hidden pipeline/Git messages instead of resuming the interrupted task.** `session_compact` previously called `pi.sendMessage` separately for root guidance, the pipeline pointer, and Git context. Pi correctly treated them as queued steering items; default one-at-a-time delivery then produced one assistant acknowledgement per control message and displaced the active task. Compaction now only marks the exact SessionManager identity. Overflow retry proceeds directly from the compaction summary, and the session's next real user turn receives one merged hidden context block from `before_agent_start`.
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- Package card cover on pi.dev: `package.json` now declares `pi.image` pointing at the package's `docs/cover.png`.
+
+## [2.6.0] - 2026-08-15
+
+### Added
+
+- Support Pi's `max` thinking level in `models.json` and the `/rpiv-models` picker when the selected model advertises it.
+
+### Fixed
+
+- **The plan citation floor now disambiguates against the plan's own declared write-set.** An ambiguous bare/suffix citation (`messages.ts:18` matching several tree files) resolves deterministically when exactly one candidate is in the union of the plan's frontmatter `files:` arrays; a tie inside the declared set, or an empty intersection, still fails the floor. Previously such a citation always failed `plan-cite-check`/`code-cite-check` — terminal for the loop-less `ship` preset, which halted a full run over a mechanical path-prefix omission the plan itself had already resolved.
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+### Added
+
+- **Each lane now shows an end-of-run recap.** When a run reaches a terminal
+  state, the lane surfaces a one-line summary — the newest artifact, a
+  `+N more` count when more landed, and the `⚠ <reason>` segment for a
+  non-completed outcome — projected from the run's on-disk JSONL trail via
+  rpiv-workflow's new `summarizeRun`. Auto-shown, no toggle; the entries under
+  Changed/Fixed below refine this feature's storage and presentation.
+
+- **The `ship` workflow is back — rebuilt as a lightweight `/wf` preset.** A single forward pass for a small, well-understood task: `goal → research → plan → plan-cite-check → grade → implement → implement-scope-check → reconcile → validate → commit`, stop-on-fail at every gate — no fix loops, confirm panels, snapshots, or code-elaboration lane. Research is front-loaded and trimmed (a custom prompt stage with at most two `codebase-analyzer` dispatches, not a full `/skill:research` pass), the plan comes from the new `quick-plan` skill, and one tier-independent grade (correctness, completeness, architecture-fit) gates it before `implement`. This inverts the removal calculus of 2.3.0's no-research subset: the old `ship` skipped research to save latency and paid for it in grounding; the new one keeps research but trims it to scale.
+
+- **New `quick-plan` skill — the lightweight plan producer `ship` dispatches.** Consumes a `research` artifact and writes one implement-ready `status: ready` plan: at most a single targeted `codebase-pattern-finder` dispatch, then the plan — no slice decomposition, no per-slice verification loop, no risk frontmatter, no interactive checkpoints. Workflow-dispatched only (`disable-model-invocation: true`).
+
+### Changed
+
+- **A gate-stopped run now says so — end-of-run toast and lane recap carry the stop reason.** A stop-on-fail gate routing to `stop` (ship's citation floor and grade gate, any `match`/`gate` no-match) used to surface exactly like a full pass: a `✓ finished` toast and a completed recap, with the failing verdict unread on disk — observed on ship's first run, which silently stopped at a failed completeness gate. rpiv-workflow's recap now refines that shape to outcome `stopped` (see its changelog), ship's two bespoke gates attach a stop-reason note naming the blocking dimensions and severity (via the new `setRouteNote`), and the lane toast becomes `⚠ <name> stopped at <gate>: <reason> — /lanes to view` while the lane console's recap line picks up the `⚠` segment unchanged.
+
+- **`ship`'s plan stage now hands `quick-plan` the verbatim goal, and `quick-plan` must defer narrowed-out asks explicitly.** The stage declares `reads: ["research", "goal"]` (dispatching `--research <path> --goal <path>`) instead of falling to the rolling primary, so the planner anchors on the same verbatim brief the grade panel's completeness dimension judges against — previously it saw only the research doc, whose grounding routinely narrows a broad brief. `quick-plan` gains a matching obligation: an `## Out of Scope` template section plus a "defer explicitly, never silently" rule — every ask the goal names that no phase implements gets a one-line deferral with a reason, the exact form the completeness grade already accepts. Closes the gap where a research-stage narrowing was silently inherited by the plan and then failed ship's stop-on-fail completeness gate (observed on the preset's first run).
+
+- **Artifact paths on lane rows and the recap line drop the canonical
+  `.rpiv/artifacts/` root.** Every collector-produced artifact shares it, so the
+  16 columns carried no information; the `→` segment now reads
+  `<bucket>/<file>.md` (e.g. `→ validation/2026-08-05_….md`). Display-only —
+  stored values (`lastArtifact`, `RunRecap.artifacts`) keep the full path, and a
+  non-canonical path (url/opaque handles, out-of-tree files) passes through
+  untouched.
+
+- **Recap storage collapsed to a single source of truth.** The redundant
+  `retireRun` 5th-arg recap path is removed; `setRecap` is now the sole recap
+  writer (no behavior change — the ungated `setRecap` was already the
+  load-bearing write on both the normal and abort paths). `retireRun` returns to
+  a 4-arg shape `(runId, status, error?, lastArtifact?)`.
+
+- **Published skill-count prose corrected: 27 → 29 (and 18 → 20 model-hidden).** `remediate` (2.4.0) already declared a contract the prose never caught up to; `quick-plan` adds one more. Every "27 skills" / "18 of the 27 skills" site across `package.json`, the README, and `docs/` now reads 29 / 20 of the 29, and the published description names four built-in `/wf` workflows. Alongside, `models.json` `presets.ship` is a live key again — the warn-on-miss validator builds its known-workflow set from the live `builtInWorkflows`, so the returning `ship` silently un-warns it (only `presets.arch` and `presets["pr-triage"]` remain stale).
+
+### Fixed
+
+- **The end-of-run recap is now a single summary line, not a per-artifact
+  report.** `renderRecap` no longer emits the outcome-glyph + workflow header (a
+  duplicate of the lane chip's status) nor one `→ <path>` line per artifact — it
+  renders exactly one line: the NEWEST artifact (trail-order last, partial
+  artifacts included), a `+N more` count when more landed, and the `⚠ <reason>`
+  segment for a non-completed outcome, joined with ` · ` and each omitted when
+  empty (a recap with nothing to add beyond the chip renders nothing at all).
+  The original multi-line block was both redundant — the lane row above it
+  already carries status, short reason, and the primary artifact — and a
+  belowEditor ghost-block source: as artifact count grew it pushed the lane block
+  past its budget, so the console's total height grew with it. A ≤1-line summary
+  keeps `laneBlock.length` constant w.r.t. artifact count by construction, so the
+  transcript flex region absorbs it and the total stays exactly `maxRows` (the
+  static-lanes + ghost-block invariant). The full artifact list remains available
+  in the run's JSONL trail (`summarizeRun` still projects it — the `RunRecap`
+  data shape is unchanged; this is presentation-only).
+
+- **A resumed lane is no longer re-retired and re-capped by its aborted
+  predecessor's stale terminal `onWorkflowEnd`.** Resume reuses the `runId` and
+  reactivates the retained lane back to `"running"` via `recordRun`, which re-arms
+  `retireRun`'s first-retire-wins gate — so the aborted predecessor's late terminal
+  `onWorkflowEnd` (still on the event loop after a cooperative abort) passed both
+  the status check and the re-armed gate and stamped the resumed lane with the
+  predecessor's outcome + recap. The lifecycle bridge now registers an
+  `onWorkflowStart` listener that captures `ctx.state` (the runner's `run.state`,
+  threaded by reference) keyed by `runId`, and `onWorkflowEnd` early-returns when
+  the recorded instance exists and differs from the event's `ctx.state` — a resume
+  builds a fresh `state` via `reconstructState`, so object identity distinguishes
+  the two instances. Fail-open by design (no instance recorded → no block), so
+  existing `onWorkflowEnd` paths are unchanged. A microtask-scale residual window
+  (between `recordRun` re-arming the gate and the resumed `onWorkflowStart`
+  overwriting the captured instance) is accepted and documented in the guard — it
+  shrinks the old race window, which spanned the predecessor run's entire remaining
+  stage, to microtask scale.
+
+## [2.4.0] - 2026-08-03
+
+### Added
+
+- **A failing `validate` now repairs instead of stopping.** The `build` gate on
+  validate's published `verdict` splits: `pass` ⇒ `commit` (unchanged), `fail` ⇒
+  the new `validate-fix` arm, which re-enters at `implement-scope-check` so a fix
+  flows back through scope-check → reconcile → validate and the gate re-folds on
+  a fresh verdict. Previously a `fail` was terminal STOP, leaving the report on
+  disk for the user to act on by hand. Deliberately still not a `fallback`: a
+  missing or unexpected verdict stays terminal STOP, so un-anticipated data can
+  route neither into `commit` nor into the repair arm, and the sole path to
+  commit remains an explicit `pass`. The re-entry edge is deterministic and
+  non-counted; the budget-consuming edge is the gate's `fail` branch, bounded by
+  the runner's per-destination backward-jump budget.
+
+- **New `remediate` skill — the repair arm's body.** The tools/contract twin of
+  `implement` (`Bash(*)` + `side-effect`/`code-mutation`, so it owns no outcome
+  and emits no artifact) and the body-discipline twin of `amend` (single pass,
+  surgical, no subagents, no self-review, no questions). Reads `--plans` and
+  `--validation`, re-runs each failed `verify-at-implement` risk ruling's own
+  prescribed procedure, applies the minimal localized fix grounded in the
+  failing report, and confirms the procedure passes. It is workflow-dispatched
+  only (`disable-model-invocation: true`) — the workflow loops it straight back
+  to the validate gate, which is the only re-judgement.
+
+### Fixed
+
+- **`reconcile` no longer fails on its own prior successful deletion.** A
+  directive whose `replace` is empty and whose `find` is absent is now the
+  idempotent-re-run no-op for a deletion (find-absent *is* a deletion's success
+  condition), not a stale-directive finding. Without this the `validate-fix`
+  loop could not re-run `reconcile` after a repair pass. An absent `find` whose
+  non-empty `replace` is also absent is still a finding — reconcile does not
+  guess.
+
+- **`remediate` registered where the bundled-skill guards read.** It is now
+  listed among the workflow-internal skills in the pipeline pointer, so the
+  suggestion surface never offers it directly, and it is counted in the bundled
+  skill-contract guard (27 → 28).
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+### Removed
+
+- **`ship` and `arch` built-in `/wf` workflows removed.** Both were subsets of
+  the now-mature `build` pipeline (`build` is the parallel, panel-gated
+  generalization of `arch`; `ship`'s fast blueprint → implement → validate →
+  commit spine is `build` with the research/slice/design/plan gates skipped),
+  so the curated set is `build` / `vet` / `polish`. The dead `IMPLEMENT_PHASE_FANOUT`
+  const (the serial twin only `ship`/`arch` used) is removed as dead code.
+
+### Changed
+
+- **`build` is now the default `/wf` workflow** when no project/user config sets
+  one (it is first in the `builtInWorkflows` export array, which `resolve-default.ts`
+  reads via `Map.keys().next().value`). `build` is heavier and more interactive
+  than the removed `ship` — research → slice → design-checkpoint → gated plan/code
+  → validate — so bare `/wf "<task>"` now resolves to the full pipeline.
+
+- **`models.json` `presets.ship` / `presets.arch` entries now warn, not error.** The
+  warn-on-miss validator builds its known-workflow set from the live
+  `builtInWorkflows`, so once `ship`/`arch` leave the array an existing
+  `presets.ship`/`presets.arch` entry self-heals to a soft warn-on-miss (unknown
+  workflow) and falls through the cascade rather than failing `/rpiv-models`.
+
+### Added
+
+- **Declared write-sets carry their co-located test twins.** A phase declaring
+  `x.ts` in `files:` implicitly covers `x.test.ts` (likewise tsx/js/jsx) at
+  both consumers of the declared set: the implement DAG's conflict fold (so a
+  phase declaring the production file now serializes against one declaring the
+  test — closing a latent race where they counted as disjoint) and the
+  `implement-scope-check` floors (so the mechanical twin follow-up a signature
+  change forces — mock arity, call-site matchers — is no longer an "undeclared
+  write" that STOPs the run; a live run halted one stage short of validate on
+  exactly this). Asymmetric: declaring a test file licenses nothing extra, and
+  a non-twin write still fails the floor. Elaborations no longer need
+  prose scope-addition notes for twin edits.
+
+- **AV lint rule 5: wrap/case-fragile prose greps.** The plan gate's
+  Automated-Verification contract floor now flags a grep-family command whose
+  positional pattern is a multi-word literal and whose file operands are all
+  markdown — prose re-wraps under ordinary editing (splitting the phrase
+  across lines, invisible to a line-based grep) and sentence-cases it
+  (defeating a case-sensitive match), so such a line can fail at `reconcile`
+  (whose fail route is STOP) while the asserted text is present. Both classes
+  false-failed a live run. `-e`/`-f` patterns, code-file targets, single
+  tokens, and directory operands fail open, matching the floor's posture.
+
+- **Cite-only discharge on the build slice gate.** A `design-readiness` fail
+  whose every finding is pure citation bookkeeping — a missing `Draws on`
+  seed, or a `path:line` whose line numbers drifted — no longer buys a second
+  LLM grade panel. The `grade` skill classifies such a fail `remedy: "cite"`
+  with a per-finding `requires` seed (plus `stale`, copied verbatim, on a
+  line-drift refresh), and `slice-check` discharges it deterministically: the
+  re-cut map must satisfy every finding (seed path present; on a refresh, the
+  grader-verified citation present exactly and the stale one gone) with the
+  slice structure unchanged (`slices` + `coverage` frontmatter identical to
+  the judged round). The fix is witnessed by publication order — the latest
+  `slices` round must postdate the verdict — so an in-place map edit counts,
+  and occurrences inside fenced spans or `old→new` arrow pairs (a re-slice
+  note's quotations; the note format is contracted in the slice skill) do not
+  count as live citations. The `citeDischarged` stamp is earned only on a
+  green structure floor and honored by `sliceGatePasses` only for the current
+  map's basename — the skip stays provably equivalent to "re-grade, then
+  pass", and a fix that also restructured (or any finding without a concrete
+  `requires`) takes the normal re-grade.
+
+## [2.2.0] - 2026-07-29
+
+### Added
+
+- **Dependency citations resolve in the cite checks.** `file:line` citations
+  into installed dependency source (lockfile-pinned) now verify: the checker
+  probes `node_modules/<path>` and `node_modules/@<path>` before failing a
+  citation, so research/design/plan artifacts citing host-package internals
+  (e.g. `node_modules/@earendil-works/pi-coding-agent/dist/...`) no longer
+  trip the deterministic floor as unbacked. The suffix-fallback walk still
+  never resolves a bare basename into `node_modules`.
+- **`BashWatchdog.reset()`.** The per-command bash watchdog gains a `reset()`
+  that clears its `fired` flag and pending timers WITHOUT unsubscribing the
+  live `tool_execution_start` listener — so a resumed turn's new bash call
+  re-arms a fresh per-`toolCallId` timer on the same watchdog handle. Wired onto
+  the workflow-execution host port as `resetToolTimeout` beside the existing
+  `toolTimeout` verdict channel, enabling strike-based recovery in
+  `rpiv-workflow`.
+- **`readSessionBranch` host enablement.** The workflow-execution host exposes
+  a `readSessionBranch(file)` reader backed by `SessionManager.open(file).getBranch()`,
+  narrowed to `BranchEntry[]` and wrapped to fail soft (returns `undefined` on
+  any throw). The death-scene artifact writer consumes it to render a failed
+  stage's last tool calls + final assistant text + session-file path purely from
+  the persisted session JSONL, with no live-session re-query.
+
+## [2.1.0] - 2026-07-23
+
+### Changed
+- Bundled skills' `ask_user_question` guidance now matches the runtime's custom-answer behavior: the "Type something." row appears on every question and reserved labels are rejected in every mode.
+- Published package description corrected to the current inventory: 27 skills, 15 agents, and five built-in workflows.
+- README rewritten to follow the documentation standard shared across all packages.
+- npm tarball now includes the versioned `docs/` reference and no longer ships cover or screenshot art.
+
+### Fixed
+- The `scope-tracer` agent prompt no longer cites stale subagent-runtime package internals for its sequential-sweep constraint; the constraint itself is unchanged. Run `/rpiv-update-agents` to refresh installed copies.
+
+## [2.0.0] - 2026-07-21
+
+### Added
+- Detached parallel execution: every `/wf` stage runs in its own child session with bounded parallel fan-out, while the interactive session stays a launcher and observer.
+- Always-on lane dock below the editor showing each run's live progress, streaming thinking, per-unit fan-out sub-rows, token usage, failure reasons, and the run's resume handle.
+- Lane browser: step in via `↓` on an empty prompt, `^Q`, or `/lanes` to navigate runs, replay faithful transcripts with full tool rendering, and stop runs.
+- Questions from detached runs park in a per-lane queue with a needs-input badge; `⏎` on a flagged lane arms the question inline, and the console backs out to the dock once the queue drains.
+- The lane browser auto-closes when the last running lane finishes, and `esc` clears completed lanes from the dock.
+- Workflow runs that park a question raise Warp's Blocked badge per run when the optional Warp integration is installed.
+- New `build` workflow: a sliced pipeline — verbatim goal capture, research, gated slicing with a deterministic structure floor, dependency-aware per-slice design fan-out, a consolidated `design-review` checkpoint, synthesis, and gated plan/code/validate/commit loops — superseding the seven-stage build.
+- New pipeline skills `slice`, `design-slice`, `synthesize`, `grade`, `amend`, and `elaborate` back the sliced flow; `implement` gains a single-phase fan-out mode.
+- Risk-scaled gates: a light/standard/strict tier sizes each grade panel to the task, and a dimension's first blocking verdict gets one independent confirmation — ruling on the prior round's findings — before it buys a fix round.
+- Deterministic citation floor verifies every file:line citation in slice maps, plans, and code-bearing plans against the tree, backing unique path suffixes and routing fabrications to a surgical amend instead of a blind halt.
+- Synthesized plans declare structured risk flags that `grade` and `validate` must rule on; a failed ruling blocks the gate.
+- Per-run commit baseline: `validate` judges scope against the run's own changes and `commit` fences pre-existing dirty files out of the run's commit.
+- Per-command bash watchdog on child sessions (default 3 minutes, overridable via `RPIV_BASH_TIMEOUT_MS`) aborts wedged commands instead of freezing the run.
+- `code-review` skill supports tree-scoped reviews.
+- Model configuration honors `XDG_CONFIG_HOME`, reading the legacy `~/.config` location only when the XDG file is absent.
+- Pipeline-stage skills are gated to explicit `/skill:<name>` invocation or workflow dispatch, with a compact stage-command index injected at session start for discoverability.
+
+### Changed
+- The lane dock replaces the legacy status line and per-stage completion toasts as the live progress surface.
+
+### Removed
+- Remove the `pr-triage` `/wf` preset; its skills remain standalone-invokable.
+- Remove the one-shot `thoughts/shared` to `.rpiv/artifacts` auto-migration; migrate any remaining content manually.
+
+### Fixed
+- Skill invocations carry their arguments as an explicit labeled trailer, so skills no longer misread supplied input as empty.
+- Malformed YAML frontmatter in an artifact degrades to empty metadata instead of halting the whole workflow.
+- Phase, slice, and review heading counts ignore fenced code blocks, so plans embedding example headings no longer trip the staleness guard.
+- Declare typebox as a runtime dependency so tools register under installers that do not materialize peer dependencies.
+- Exclude test files from the published tarball.
+
+### Performance
+- The build workflow converges without redoing settled work: fixes that clear only the deterministic citation floor skip the re-grade, and re-grades rerun only the failing dimensions, carrying passing verdicts forward.
+
+### Breaking / Upgrade Notes
+- `/wf` stages now run in detached child sessions instead of swapping the interactive session; monitor and answer runs through the lane dock.
+- Run state trails move to schema v2 — runs recorded by an earlier version refuse to resume, so finish or restart in-flight runs before upgrading.
+- The `pr-triage` workflow preset is removed; invoke its skills standalone instead.
+
+## [1.20.0] - 2026-06-15
+
+### Added
+- **User-installed skill contracts.** A new lazy contract provider (owner `"user-skills"`) harvests `contract:` frontmatter from skills in Pi's default user locations (`<agentDir>/skills` + `<cwd>/.pi/skills`) and registers them alongside the bundled set, so workflows naming user skills get contract-driven validation and outcome derivation. Enumeration is filesystem-based via Pi's `loadSkills` (no captured `pi` handle — those go stale on session replacement / `/reload`); bundled skills are excluded by a realpath-safe path check. Skills shipped by other Pi packages register their own contracts via `registerSkillContracts`.
+- **Outcome derivation consults registered bucket mappings.** `deriveOutcomes` resolves `artifactKind → bucket` through `registerBucketKindMapping` entries first, falling back to the built-in `BUCKET_BY_KIND` table — user skills with novel artifact kinds can route to their own buckets. Overriding a built-in kind's bucket surfaces a load-time warning (once per kind per load): workflows reading the canonical bucket would otherwise halt at runtime far from the cause.
+
+### Changed
+- The built-in workflows' loop stages migrate to the new `loop:` field + `fanout()` / `iterate()` / `assess()` constructors (no behavior change): `FRONTMATTER_PHASE_FANOUT` / `PLANS_PHASE_FANOUT` become `fanout({ units })`, and `REVIEW_PHASE_ITERATE` becomes `iterate({ next })`. `implement` still fans out one pass per plan phase; polish's `blueprint` still iterates one pass per review phase.
+
+### Added
+- Per-unit model resolution for loop stages via the new `onUnitStart` lifecycle hook — a judge or per-phase unit's dispatched skill now resolves its model through the existing `models.json` `skills.<name>` cascade with no new configuration axes.
+
+### Changed
+- Action-required session banners share one boxed renderer (`renderBanner` in `banner.ts`). The agent-drift notice now uses the same rounded-box style as the missing-siblings banner, listing each drift category as a bullet with the `/rpiv-update-agents` call to action; passive status lines (copied/synced) stay single-line.
+
+### Removed
+- **Agent-manifest v1 migration + `.rpiv-managed.v2` sentinel.** The v1 (string-array) manifest format never reached production, so the one-shot "package wins" migration window and its sentinel marker are gone. `syncBundledAgents` now applies the smart gate uniformly: a file with no recorded hash, or whose content differs from it, is gated as `pendingUpdate`/`pendingRemove` and `/rpiv-update-agents` force-resolves. A leftover `.rpiv-managed.v2` file from earlier builds is inert.
+
+## [1.19.1] - 2026-06-10
+
+### Added
+- New `pr-triage` built-in workflow — read-only triage for incoming GitHub PRs. The `pr-triage` skill fetches the PR thread, assesses the diff against repo standards, and writes a triage artifact with a recommended disposition; a script-stage security gate halts the run on BLOCK (`security_flag ≥ 2`) before any checkout. Chain: `pr-triage → security-gate → stop`. Adds the `triage` outcome bucket and brings the built-in workflow count from five to six.
+
+### Fixed
+- `rpiv-core` no longer fails to load with `Cannot find module '@juicesharp/rpiv-config'` (or `@juicesharp/rpiv-workflow/registration`) when those packages aren't resolvable from `rpiv-pi`'s install location — e.g. peers not nested under `rpiv-pi` combined with an install-scope split. Root cause is module resolution, not jiti's `exports`/`.ts` handling (jiti 2.7.0 resolves `.ts` subpath exports fine). Two fixes: `@juicesharp/rpiv-config` moves from `peerDependencies` to `dependencies` so npm always installs it alongside `rpiv-pi` regardless of peer settings or scope; and the `@juicesharp/rpiv-workflow/registration` value-import is deferred off the entry path (via the `outcome-derivation` chain) so a missing or non-co-located optional sibling degrades gracefully instead of crashing extension load. The absent-sibling guard now also recognizes jiti's `MODULE_NOT_FOUND` (Pi loads extensions via jiti) in addition to Node's `ERR_MODULE_NOT_FOUND`, so a genuinely-absent sibling stays a silent no-op rather than a noisy `[rpiv-core] failed to register` log. (#66)
+
+## [1.19.0] - 2026-06-09
+
+### Added
+- Pipeline skills (`code-review`, `commit`, `design`, `discover`, `explore`, `implement`, `plan`, `research`, `validate`, and the annotate/handoff/frontend skills) now declare `produces`/`consumes` contracts in their frontmatter, so workflows can derive routing and validate stage-to-stage compatibility automatically.
+- The `plan` skill emits a `phases:` frontmatter array and `implement` fans out one pass per plan phase; `architecture-review` phases carry scheduling metadata (`depends_on`, `blast_radius`, `effort`) so blueprint passes run in dependency order and each pass sees only the plans it depends on.
+
+### Changed
+- `ship` and `polish` presets are now contract-driven — their phase fan-out and stage outcomes derive from the plan's `phases` contract rather than hand-wired buckets.
+
+### Removed
+- Experimental prototype presets `blueprint-c`, `architecture-review-c`, `shipx`, and `polishx`; their proven behavior is now folded into the shipped `ship`/`polish` flows.
+
+### Fixed
+- `/code-review` now works inside a git worktree. The patch tempfile path resolves via `git rev-parse --git-path` instead of a hardcoded `.git/code-review-patch.diff`, which failed with `Not a directory` (ENOTDIR) where `.git` is a gitlink file. (#63)
+- `implement` can check off `Automated Verification` checkboxes again; the plan-mutation ban is narrowed to plan content only. (#64)
+- `validate` skill guidance no longer contradicts the runtime ordering of `implement → validate → commit`. (#62)
+
+## [1.18.2] - 2026-06-04
+
+### Fixed
+- Workflow runs no longer halt when a planning skill pauses for developer input. `research`, `design`, and `blueprint` previously ended the assistant turn on a free-text "wait for the developer's response" gate (or the sanctioned "Free-text with ❓ Question:" question branch) before writing their artifact; inside a `/wf` run the runner reads turn-end as "stage done", finds no artifact path, and fails the stage (`research finished without producing a path matching …`), halting the chain. These pre-write checkpoints now go through the `ask_user_question` tool, which keeps the session alive across the pause; its automatic "Other" row preserves the free-text escape hatch, so standalone (non-workflow) behavior is unchanged. (#58)
+
+## [1.18.1] - 2026-06-04
+
+### Fixed
+- Sibling detection now recognizes the API-compatible `@gotgenes/pi-subagents` fork (same `subagent` / `get_subagent_result` / `steer_subagent` tool surface), so users running it no longer see a false "1 sibling extension missing" banner on `session_start`. Detection-only change: `pkg` stays `npm:@tintinweb/pi-subagents`, so `/rpiv-setup` still installs the upstream fork by default, and the `LEGACY_SIBLINGS` prune leaves the scoped `@gotgenes` namespace untouched. The widened regex adds a `(?![-\w])` word boundary to avoid over-matching a hypothetical `@scope/pi-subagents-*` variant.
+
+## [1.18.0] - 2026-06-04
+
 ### Added
 - Per-agent and per-stage model/effort configuration via `~/.config/rpiv-pi/models.json`. Configured agents have `model`/`thinking` frontmatter injected at sync time; workflow stages have `setModel`/`setThinkingLevel` applied via lifecycle listeners. Supports `defaults` cascade into both agents and stages. 5-value ThinkingLevel vocabulary (`minimal|low|medium|high|xhigh`); "off" is rejected with a warning.
 - Per-workflow per-stage overrides via `presets.<workflow>.stages.<stage>` — resolves before flat `stages[stage]`. Same five-value `thinking` vocabulary; per-field cascade against `defaults`.
@@ -18,6 +439,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - First-class `off` thinking level. `models.json` `thinking` now accepts all six values (`off | minimal | low | medium | high | xhigh`), and `off` is honored end-to-end — injected as `thinking: off` into agent frontmatter and applied via `setThinkingLevel("off")` at the stage/skill seams. `off` (disable reasoning) is now distinct from **omitting** the field (inherit the session baseline); the `/rpiv-models` effort picker offers `inherit (no override)` and `off (disable reasoning)` as separate choices. Previously the picker's "off" silently meant "inherit" and a persisted `thinking: "off"` was dropped with a warning. (Corrects the prior claim that `setThinkingLevel`/agent frontmatter reject `off` — they accept it; the restriction was rpiv-side only.)
 - Canonical model-key form is now `provider/modelId` (slash-separated). Legacy `provider:modelId` (colon) form is still accepted on read for back-compatibility; new saves emit slash form. Persisted advisor configs auto-migrate on the next `/advisor` save; persisted `disabledForModels` arrays stay colon-form on disk and are normalised at compare time. **Rollback caveat**: rolling back across this release without first re-running `/advisor` on the older version silently disables the advisor (the older `parseModelKey` is colon-strict).
+- Faster session start. Startup maintenance — per-cwd agent cleanup, bundled-agent sync, and the cleanup/drift/missing-siblings banner — now runs once per process instead of on every `session_start`, so programmatic spawns (each `/wf` stage, batch ops) no longer re-run the redundant filesystem work the immutable bundle made pointless. Built-in workflow registration and the model-override lifecycle now import rpiv-workflow's runner-free `/startup` entry, and the built-in workflow definitions are constructed on first `/wf` — keeping the workflow runtime off the session-start path. `/reload` and `/rpiv-update-agents` remain the explicit re-sync paths.
 
 ### Fixed
 - `/rpiv-update-agents` now re-reads `models.json` before syncing, so mid-session edits to per-agent `model`/`thinking` overrides are injected into the agent frontmatter on disk. Previously the command reused the config cached at session start and silently re-injected stale overrides.

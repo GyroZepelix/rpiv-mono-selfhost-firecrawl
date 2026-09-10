@@ -4,11 +4,14 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { acts, defineWorkflow, gate, produces, type StageDef, type Workflow } from "./api.js";
+import { acts, defineWorkflow, fanin, gate, produces, type StageDef, type Workflow } from "./api.js";
+import { judge } from "./judge.js";
 import type { LoadedWorkflows } from "./load/index.js";
+import { assess, fanout, iterate, majority, panel, verify } from "./loop-constructors.js";
 import { gitCommitOutcome } from "./outcomes/index.js";
 import { eq, gt } from "./predicates.js";
-import { formatWorkflowDetails, formatWorkflowList } from "./preview.js";
+import { CMD_USAGE_PREVIEW, formatWorkflowDetails, formatWorkflowList } from "./preview.js";
+import type { SkillContract } from "./skill-contract.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -51,6 +54,7 @@ const baseLoaded = (overrides: Partial<LoadedWorkflows> = {}): LoadedWorkflows =
 	layers: ["built-in", "project"],
 	issues: [],
 	skillAliases: {},
+	skillContracts: new Map(),
 	...overrides,
 });
 
@@ -89,6 +93,10 @@ describe("formatWorkflowList", () => {
 		expect(out).toContain("preview stages");
 	});
 
+	it("pins the exact preview usage hint — the gap width is part of the rendered layout", () => {
+		expect(CMD_USAGE_PREVIEW).toBe("/wf <workflow>             — preview stages");
+	});
+
 	it("renders single-layer banner when only built-in is active", () => {
 		const out = formatWorkflowList(
 			baseLoaded({
@@ -117,6 +125,7 @@ describe("formatWorkflowList", () => {
 			layers: ["built-in"],
 			issues: [],
 			skillAliases: {},
+			skillContracts: new Map(),
 		};
 		const out = formatWorkflowList(loaded);
 		const descLine = out.split("\n").find((l) => l.includes("described")) ?? "";
@@ -139,6 +148,7 @@ describe("formatWorkflowList", () => {
 			layers: ["built-in"],
 			issues: [],
 			skillAliases: {},
+			skillContracts: new Map(),
 		};
 		const out = formatWorkflowList(loaded);
 		const descLine = out.split("\n").find((l) => l.includes("long")) ?? "";
@@ -217,7 +227,7 @@ describe("formatWorkflowDetails", () => {
 				commit: acts(),
 			},
 			edges: {
-				"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }),
+				"code-review": gate("severeIssueCount", { revise: gt(0), commit: eq(0) }, "commit"),
 				revise: "commit",
 				commit: "stop",
 			},
@@ -229,6 +239,7 @@ describe("formatWorkflowDetails", () => {
 			layers: ["built-in"],
 			issues: [],
 			skillAliases: {},
+			skillContracts: new Map(),
 		};
 		const out = formatWorkflowDetails(loaded, "branching");
 		const crLine = out.split("\n").find((l) => /code-review/.test(l)) ?? "";
@@ -255,6 +266,7 @@ describe("formatWorkflowDetails", () => {
 			layers: ["built-in"],
 			issues: [],
 			skillAliases: {},
+			skillContracts: new Map(),
 		};
 		const out = formatWorkflowDetails(loaded, "described");
 		const lines = out.split("\n");
@@ -282,6 +294,7 @@ describe("formatWorkflowDetails", () => {
 			layers: ["built-in"],
 			issues: [],
 			skillAliases: {},
+			skillContracts: new Map(),
 		};
 		const out = formatWorkflowDetails(loaded, "schemas");
 		const lines = out.split("\n");
@@ -294,6 +307,207 @@ describe("formatWorkflowDetails", () => {
 		expect(bLine).toContain("out-schema");
 		expect(cLine).not.toContain("in-schema");
 		expect(cLine).not.toContain("out-schema");
+	});
+
+	it("renders the loop tag for an assess stage — skill judge", () => {
+		const verdictSpec = { name: "verdicts", collector: { snapshot: false } } as never;
+		const assessWorkflow: Workflow = {
+			name: "assessed",
+			start: "breakdown",
+			stages: {
+				breakdown: produces({
+					loop: assess({
+						judge: judge({ skill: "grade-breakdown", outcome: verdictSpec }),
+						done: () => true,
+						feedForward: () => "decompose further",
+						max: 5,
+					}),
+				}),
+				commit: acts(),
+			},
+			edges: { breakdown: "commit", commit: "stop" },
+		};
+		const loaded: LoadedWorkflows = {
+			workflows: [assessWorkflow],
+			default: "assessed",
+			workflowSources: new Map([["assessed", "built-in"]]),
+			layers: ["built-in"],
+			issues: [],
+			skillAliases: {},
+			skillContracts: new Map(),
+		};
+		const out = formatWorkflowDetails(loaded, "assessed");
+		const bdLine = out.split("\n").find((l) => /breakdown/.test(l)) ?? "";
+		expect(bdLine).toContain("assess(judge: skill:grade-breakdown)·max=5");
+	});
+
+	it("renders the loop tag for an assess stage — prompt judge with default max", () => {
+		const verdictSpec = { name: "verdicts", collector: { snapshot: false } } as never;
+		const assessWorkflow: Workflow = {
+			name: "assessed-prompt",
+			start: "breakdown",
+			stages: {
+				breakdown: produces({
+					loop: assess({
+						judge: judge({ prompt: "Are all tasks atomic?", outcome: verdictSpec }),
+						done: () => true,
+						feedForward: () => "decompose further",
+					}),
+				}),
+				commit: acts(),
+			},
+			edges: { breakdown: "commit", commit: "stop" },
+		};
+		const loaded: LoadedWorkflows = {
+			workflows: [assessWorkflow],
+			default: "assessed-prompt",
+			workflowSources: new Map([["assessed-prompt", "built-in"]]),
+			layers: ["built-in"],
+			issues: [],
+			skillAliases: {},
+			skillContracts: new Map(),
+		};
+		const out = formatWorkflowDetails(loaded, "assessed-prompt");
+		const bdLine = out.split("\n").find((l) => /breakdown/.test(l)) ?? "";
+		expect(bdLine).toContain("assess(judge: prompt)·max=8");
+	});
+
+	it("renders the loop tag for an assess stage — N-judge panel (fan-in + fold name)", () => {
+		const vspec = (name: string) => ({ name, collector: { snapshot: false } }) as never;
+		const panelWorkflow: Workflow = {
+			name: "paneled",
+			start: "breakdown",
+			stages: {
+				breakdown: produces({
+					loop: assess({
+						judge: panel({
+							members: [
+								judge({ skill: "grade-a", outcome: vspec("va") }),
+								judge({ skill: "grade-b", outcome: vspec("vb") }),
+								judge({ skill: "grade-c", outcome: vspec("vc") }),
+							],
+							fold: majority(() => true),
+						}),
+						done: () => true,
+						feedForward: () => "again",
+						max: 5,
+					}),
+				}),
+				commit: acts(),
+			},
+			edges: { breakdown: "commit", commit: "stop" },
+		};
+		const loaded: LoadedWorkflows = {
+			workflows: [panelWorkflow],
+			default: "paneled",
+			workflowSources: new Map([["paneled", "built-in"]]),
+			layers: ["built-in"],
+			issues: [],
+			skillAliases: {},
+			skillContracts: new Map(),
+		};
+		const out = formatWorkflowDetails(loaded, "paneled");
+		const bdLine = out.split("\n").find((l) => /breakdown/.test(l)) ?? "";
+		expect(bdLine).toContain("assess(judge: panel(3, majority))·max=5");
+	});
+
+	it("renders the verify tag for a panel post-condition", () => {
+		const vspec = (name: string) => ({ name, collector: { snapshot: false } }) as never;
+		const verifyWorkflow: Workflow = {
+			name: "gated",
+			start: "build",
+			stages: {
+				build: produces({
+					outcome: { name: "impl", collector: { snapshot: false } } as never,
+					verify: verify({
+						judge: panel({
+							members: [
+								judge({ skill: "grade-a", outcome: vspec("va") }),
+								judge({ skill: "grade-b", outcome: vspec("vb") }),
+							],
+							fold: majority(() => true),
+						}),
+						done: () => true,
+					}),
+				}),
+			},
+			edges: { build: "stop" },
+		};
+		const loaded: LoadedWorkflows = {
+			workflows: [verifyWorkflow],
+			default: "gated",
+			workflowSources: new Map([["gated", "built-in"]]),
+			layers: ["built-in"],
+			issues: [],
+			skillAliases: {},
+			skillContracts: new Map(),
+		};
+		const out = formatWorkflowDetails(loaded, "gated");
+		const buildLine = out.split("\n").find((l) => /build/.test(l)) ?? "";
+		expect(buildLine).toContain("verify(panel(2, majority))");
+	});
+
+	it("renders the loop tag for fanout / iterate stages (max and bare kind)", () => {
+		const loopWorkflow: Workflow = {
+			name: "looped",
+			start: "build",
+			stages: {
+				build: acts({ loop: fanout({ units: () => [], max: 32 }) }),
+				bp: produces({
+					outcome: { name: "plans", collector: { snapshot: false } } as never,
+					loop: iterate({ next: () => null }),
+				}),
+				commit: acts(),
+			},
+			edges: { build: "bp", bp: "commit", commit: "stop" },
+		};
+		const loaded: LoadedWorkflows = {
+			workflows: [loopWorkflow],
+			default: "looped",
+			workflowSources: new Map([["looped", "built-in"]]),
+			layers: ["built-in"],
+			issues: [],
+			skillAliases: {},
+			skillContracts: new Map(),
+		};
+		const out = formatWorkflowDetails(loaded, "looped");
+		const buildLine = out.split("\n").find((l) => /^\s*\d+\.\s+build\b/.test(l)) ?? "";
+		const bpLine = out.split("\n").find((l) => /^\s*\d+\.\s+bp\b/.test(l)) ?? "";
+		expect(buildLine).toContain("fanout·max=32");
+		expect(bpLine).toContain("iterate");
+		expect(bpLine).not.toContain("iterate·max");
+	});
+
+	it("renders the fan-in marker for a fanin() read and leaves bare-string reads unmarked", () => {
+		const faninWorkflow: Workflow = {
+			name: "synth",
+			start: "plan",
+			stages: {
+				plan: produces({
+					outcome: { name: "plans", collector: { snapshot: false } } as never,
+					loop: fanout({ units: () => [], max: 3 }),
+				}),
+				rubric: produces({ outcome: { name: "rubric", collector: { snapshot: false } } as never }),
+				synthesize: produces({ reads: [fanin("plans"), "rubric"], skill: "synthesize" }),
+			},
+			edges: { plan: "rubric", rubric: "synthesize", synthesize: "stop" },
+		};
+		const loaded: LoadedWorkflows = {
+			workflows: [faninWorkflow],
+			default: "synth",
+			workflowSources: new Map([["synth", "built-in"]]),
+			layers: ["built-in"],
+			issues: [],
+			skillAliases: {},
+			skillContracts: new Map(),
+		};
+		const out = formatWorkflowDetails(loaded, "synth");
+		const synthLine = out.split("\n").find((l) => /^\s*\d+\.\s+synthesize\b/.test(l)) ?? "";
+		const rubricLine = out.split("\n").find((l) => /^\s*\d+\.\s+rubric\b/.test(l)) ?? "";
+		// fanin("plans") is marked; the latest-wins "rubric" read is not.
+		expect(synthLine).toContain("⇉ plans");
+		expect(synthLine).not.toContain("⇉ plans,rubric");
+		expect(rubricLine).not.toContain("⇉");
 	});
 
 	it("annotates aliased stages with (skill: <body>) when stage.skill differs from the stage id", () => {
@@ -313,6 +527,7 @@ describe("formatWorkflowDetails", () => {
 			layers: ["built-in"],
 			issues: [],
 			skillAliases: {},
+			skillContracts: new Map(),
 		};
 		const out = formatWorkflowDetails(loaded, "aliased");
 		const aliasLine = out.split("\n").find((l) => /implement-after-revise/.test(l)) ?? "";
@@ -341,5 +556,28 @@ describe("skill-alias banner", () => {
 	it("omits the banner when no aliases are in effect", () => {
 		expect(formatWorkflowDetails(baseLoaded(), "mid")).not.toContain("Skill aliases in effect");
 		expect(formatWorkflowList(baseLoaded())).not.toContain("Skill aliases in effect");
+	});
+});
+
+describe("skill-contracts banner", () => {
+	const contract = (source: SkillContract["source"]): SkillContract => ({ source });
+
+	it("tallies declared vs harvested contracts in the list view", () => {
+		const out = formatWorkflowList(
+			baseLoaded({
+				skillContracts: new Map([
+					["research", contract("declared")],
+					["design", contract("declared")],
+					["plan", contract("declared")],
+					["implement", contract("harvested")],
+					["commit", contract("harvested")],
+				]),
+			}),
+		);
+		expect(out).toContain("Skill contracts: 3 declared, 2 harvested");
+	});
+
+	it("omits the banner when no contracts are in effect", () => {
+		expect(formatWorkflowList(baseLoaded())).not.toContain("Skill contracts:");
 	});
 });

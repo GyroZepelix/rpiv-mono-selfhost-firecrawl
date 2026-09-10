@@ -8,6 +8,95 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+- "v2.1 to v2.9: teaching the pipeline to finish" blog post: version-by-version release notes for the arc since v2.0, framed around the six lines every change follows, each item with its rationale.
+
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+## [2.6.0] - 2026-08-15
+
+### Changed
+
+- Document Pi's model-specific `max` thinking level in the model-sizing guide.
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+## [2.1.0] - 2026-07-23
+
+## [2.0.0] - 2026-07-21
+
+### Added
+
+- "Three answers to the delegation gap" blog post: a sourced three-way comparison of model-written orchestration, completion-condition loops, and a gated pipeline, each answer with its own diagram.
+- Landing rebuilt around the three-pipeline release: a seven-act hero rail with driver marks, an Inside-build anatomy section, and a rewritten catalog, first-run trace, and roadmap.
+- Reference pages for the eight build-pipeline skills, plus an "Artifact verifiers" tier covering the three internal review agents.
+- Fluid reading typography across blog and docs, with a centered reading column on blog posts and larger small-text sizes site-wide.
+
+### Changed
+
+- Guides updated for the build/vet/polish catalog: build's full anatomy, parallel fan-out and the lane console, and remapped scope-ladder and model-preset advice.
+- Em dashes swept from guide and reference prose, with overlong sentences split for readability.
+
+### Removed
+
+- The archived `/classic` landing page.
+- Reference pages for the `outline-test-cases` and `write-test-cases` skills and the `test-case-locator` agent, which no longer ship.
+
+### Fixed
+
+- Code-block backgrounds now match the site's dark palette instead of the highlighter theme default.
+
+## [1.20.0] - 2026-06-15
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+### Added
+- Workflow framework explainer ("How a workflow works") and a companion narrative blog post ("The workflow author's tale").
+- Brownfield guidance section explaining `/skill:annotate-guidance` for onboarding an existing codebase.
+- Staggered scroll-in entrance for the flow catalog (honors `prefers-reduced-motion`).
+
+### Changed
+- Redesigned the landing page around the `/wf` workflow runner — new hero with a workflow flow graphic plus workflow-focused sections (catalog, run anatomy, stage skills, around-the-flow skills) and refreshed navigation.
+- Trimmed the primary nav to its core wayfinding tabs.
+- Agent tiers render as a wrapped grid with deduplicated tool chips; around-skill cards now link to their reference pages.
+- Workflow guides describe contract-based, numeric routing, and the compose guide derives stage outcomes from skill contracts; `/rpiv-setup` and fanout copy rewritten for accuracy (fanout runs its units sequentially for isolation, not in parallel).
+- Docs sidebar scrollbars stay hidden until hover.
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
+### Added
 - New "Right-size the model" guide: per-skill, per-stage, per-preset-stage, and per-agent model and reasoning-effort overrides via `/rpiv-models`.
 - Release notes blog post for v1.18.0.
 

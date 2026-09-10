@@ -1,5 +1,5 @@
 /**
- * OutputSpec authoring surface — the contract a stage's data-channel
+ * Outcome authoring surface — the contract a stage's data-channel
  * implementation satisfies. Decomposed into two orthogonal halves so
  * authors can mix-and-match:
  *
@@ -9,7 +9,7 @@
  *   - `ArtifactParser<B, K, D>`   — INTERPRET: given the artifacts, what
  *                                    typed data does downstream see?
  *
- * `OutputSpec` is the wired-up pair — `{ collector, parser? }` — that
+ * `Outcome` is the wired-up pair — `{ collector, parser? }` — that
  * stages declare via `StageDef.outcome`. When `parser` is omitted the
  * output data IS the artifact list (kind = `"artifacts"`).
  *
@@ -20,22 +20,19 @@
  */
 
 import type { Artifact } from "./handle.js";
+import type { RunView } from "./output.js";
 import type { BranchEntry } from "./transcript.js";
-import type { RunState } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Snapshot — pre-stage reference capture (shared by collector + parser)
 // ---------------------------------------------------------------------------
 
-export interface SnapshotCtx {
+export interface SnapshotContext {
 	cwd: string;
 	runId: string;
 	stageIndex: number;
-	state: Readonly<RunState>;
+	state: RunView;
 }
-
-/** Fail-soft: implementations catch and return undefined rather than throwing. */
-export type SnapshotFn<Snapshot = unknown> = (ctx: SnapshotCtx) => Promise<Snapshot> | Snapshot;
 
 // ---------------------------------------------------------------------------
 // Collector — discover what the stage produced
@@ -48,12 +45,21 @@ export type SnapshotFn<Snapshot = unknown> = (ctx: SnapshotCtx) => Promise<Snaps
  * prefix without re-materialising a slice. `snapshot` is whatever the
  * collector's optional `snapshot` hook returned.
  */
-export interface CollectCtx<Snapshot = unknown> extends SnapshotCtx {
+export interface CollectContext<Snapshot = unknown> extends SnapshotContext {
 	branch: BranchEntry[];
 	branchOffset?: number;
 	snapshot: Snapshot;
 	/** Filled by the runner; collectors MUST NOT set this themselves. */
 	skill: string;
+	/**
+	 * Present iff this session IS one loop unit — the unit's display label.
+	 * Grade panels label each dimension unit with the dimension it grades, so
+	 * there it IS the verdict dimension; a collector may narrow collection to
+	 * it (the disk-first verdict collector's determined-name tightness).
+	 * Absent for single stages and unlabeled wirings — those collectors must
+	 * degrade to their loose shapes, never fatal on what they accepted before.
+	 */
+	unitLabel?: string;
 }
 
 /**
@@ -66,6 +72,24 @@ export interface CollectCtx<Snapshot = unknown> extends SnapshotCtx {
  *   `kind: "ok"` + `artifacts: [...]`            — N>=1 artifacts; parser (or default) shapes the data.
  *   `kind: "fatal"`                              — collector cannot satisfy its contract;
  *                                                   runner halts with the carried message.
+ *
+ * THE "NOTHING FOUND" CONVENTION — what a collector returns when it
+ * comes up empty depends on WHY it's empty, and the two must never be
+ * conflated:
+ *
+ *   - Genuinely empty (the stage really produced nothing the collector
+ *     watches): `{ kind: "ok", artifacts: [] }` — honest empty; the runner's
+ *     completion contract decides whether that halts.
+ *   - Environment broke MID-STAGE (the channel worked at snapshot time and
+ *     fails after — git gone, fs unreadable): `{ kind: "fatal" }` with the
+ *     real cause. Returning `ok []` here would let routing/judges act on
+ *     fabricated "nothing happened" data.
+ *   - Environment absent from the START (snapshot already found no channel —
+ *     e.g. not a git repo): degrade to the collector's documented no-signal
+ *     shape (`ok []` for diff collectors; `gitCommitOutcome` instead emits
+ *     its one sentinel no-op artifact so its parser stays total — the
+ *     documented exception). The stage ran outside the watched environment
+ *     on purpose; halting would punish a legitimate setup.
  */
 export type CollectResult = { kind: "ok"; artifacts: readonly Artifact[] } | { kind: "fatal"; message: string };
 
@@ -82,8 +106,8 @@ export type CollectResult = { kind: "ok"; artifacts: readonly Artifact[] } | { k
  * widening at every call site.
  */
 export interface ArtifactCollector<Snapshot = unknown> {
-	snapshot?(ctx: SnapshotCtx): Promise<Snapshot> | Snapshot;
-	collect(ctx: CollectCtx<Snapshot>): Promise<CollectResult> | CollectResult;
+	snapshot?(ctx: SnapshotContext): Promise<Snapshot> | Snapshot;
+	collect(ctx: CollectContext<Snapshot>): Promise<CollectResult> | CollectResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,12 +115,12 @@ export interface ArtifactCollector<Snapshot = unknown> {
 // ---------------------------------------------------------------------------
 
 /**
- * Context handed to a parser's `parse`. Extends `CollectCtx` with the
+ * Context handed to a parser's `parse`. Extends `CollectContext` with the
  * `artifacts` the matching collector just returned, so parsers can
  * narrow on `artifacts[0].handle.kind` and inspect any `meta` the
  * collector attached. `snapshot` flows through unchanged.
  */
-export interface ParseCtx<Snapshot = unknown> extends CollectCtx<Snapshot> {
+export interface ParseContext<Snapshot = unknown> extends CollectContext<Snapshot> {
 	artifacts: readonly Artifact[];
 }
 
@@ -118,11 +142,11 @@ export type ParseResult<Kind extends string = string, Data = unknown> =
  * Method shorthand for the same bivariance reason as `ArtifactCollector`.
  */
 export interface ArtifactParser<Snapshot = unknown, Kind extends string = string, Data = unknown> {
-	parse(ctx: ParseCtx<Snapshot>): Promise<ParseResult<Kind, Data>> | ParseResult<Kind, Data>;
+	parse(ctx: ParseContext<Snapshot>): Promise<ParseResult<Kind, Data>> | ParseResult<Kind, Data>;
 }
 
 // ---------------------------------------------------------------------------
-// OutputSpec — wired-up pair on `StageDef.outcome`
+// Outcome — wired-up pair on `StageDef.outcome`
 // ---------------------------------------------------------------------------
 
 /**
@@ -130,11 +154,11 @@ export interface ArtifactParser<Snapshot = unknown, Kind extends string = string
  * the output emits `kind: "artifacts"` with `data = artifacts`.
  *
  * Generic over `<Snapshot, Kind, Data>` so specialised output specs
- * (`OutputSpec<GitHeadSnapshot, "git-commit", GitCommitData>`) flow types
+ * (`Outcome<GitHeadSnapshot, "git-commit", GitCommitData>`) flow types
  * end-to-end from snapshot through collect into the downstream
  * `output.data`.
  */
-export interface OutputSpec<Snapshot = unknown, Kind extends string = string, Data = unknown> {
+export interface Outcome<Snapshot = unknown, Kind extends string = string, Data = unknown> {
 	/**
 	 * Categorical name this outcome publishes under in `state.named`. When set,
 	 * the runner uses it as the default publish name for any stage wired with
@@ -150,6 +174,17 @@ export interface OutputSpec<Snapshot = unknown, Kind extends string = string, Da
 	collector: ArtifactCollector<Snapshot>;
 	parser?: ArtifactParser<Snapshot, Kind, Data>;
 }
+
+/**
+ * @deprecated Renamed to `Outcome` (matching the `StageDef.outcome` field,
+ * the `outcomes/` directory, and the `*Outcome` instances). This alias ships
+ * for one release and will be removed.
+ */
+export type OutputSpec<Snapshot = unknown, Kind extends string = string, Data = unknown> = Outcome<
+	Snapshot,
+	Kind,
+	Data
+>;
 
 // ---------------------------------------------------------------------------
 // Author helpers — `define*` shorthands match `defineWorkflow` /

@@ -3,6 +3,14 @@ name: annotate-guidance
 description: Generate architecture.md guidance files under .rpiv/guidance/ that document a project's architecture and patterns for AI assistants, written to a shadow tree alongside the source. Use when the user wants to onboard Claude, Cursor, or an AI agent to a codebase via the guidance system, document architecture, or asks to "annotate guidance". Prefer this over annotate-inline when the project uses the .rpiv/guidance/ shadow tree instead of inline CLAUDE.md files.
 argument-hint: [target-directory]
 allowed-tools: Agent, Read, Write, Glob, Grep
+contract:
+  produces:
+    kind: side-effect
+    meta:
+      effect: guidance-generation
+  consumes:
+    meta:
+      world: source-tree
 ---
 
 # Annotate Guidance
@@ -132,10 +140,8 @@ You are tasked with generating architecture guidance files for a brownfield proj
 
    **Choosing question format:**
 
-   - **`ask_user_question` tool** — when your question has 2-4 concrete options from code analysis (pattern conflicts, integration choices, scope boundaries, priority overrides). The user can always pick "Other" for free-text. Example: Use the `ask_user_question` tool with the question "Found 2 mapping approaches — which should new code follow?". Options: "Manual mapping (Recommended)" (Used in OrderService (src/services/OrderService.ts:45) — 8 occurrences); "AutoMapper" (Used in UserService (src/services/UserService.ts:12) — 2 occurrences).
+   - **`ask_user_question` tool** — use `ask_user_question` with 2-4 concrete hypotheses. State observed behavior, `file:line` evidence, impact, and the decision; the automatic `Type something.` row accepts unexpected detail.
 
-   - **Free-text with ❓ Question: prefix** — when the question is open-ended and options can't be predicted (discovery, "what am I missing?", corrections). Example:
-     "❓ Question: Integration scanner found no background job registration for this area. Is that expected, or is there async processing I'm not seeing?"
 
    **Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 
@@ -204,6 +210,7 @@ You are tasked with generating architecture guidance files for a brownfield proj
    - Write each file to `.rpiv/guidance/{relative_path}/architecture.md`. For the root file, write to `.rpiv/guidance/architecture.md`. Create any intermediate directories that do not exist.
    - Write ALL files at once using the Write tool
    - Do NOT ask for confirmation before each file — batch mode
+   - **Record both forms of a formatter/auto-fixer.** Where the project has a formatter or auto-fixer, record BOTH its repo-wide form AND its path-scoped form (the invocation that rewrites only the paths it is given) in the `# Commands` table — phase-scoped verification depends on the scoped form being known, because a phase's `#### Automated Verification:` command must be write-scoped to that phase's own `files:` set.
    - After writing, present a summary:
      ```
      ## Architecture Guidance Files Created

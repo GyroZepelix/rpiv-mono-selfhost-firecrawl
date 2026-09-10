@@ -17,8 +17,8 @@ const identityTheme: WrappingSelectTheme = {
 	scrollInfo: (t) => t,
 };
 
-// Numbering is preserved — rows render as "❯ N. label". The chat row's number is kept
-// continuous with the active tab's options via setNumbering() (driven by ask-user-question.ts).
+// Numbering is preserved — rows render as "❯ N. label". setNumbering() lets the host
+// realign the number column when the underlying item set changes.
 describe("WrappingSelect.setSelectedIndex", () => {
 	it("clamps negative to 0", () => {
 		const s = new WrappingSelect(
@@ -99,13 +99,32 @@ describe("WrappingSelect.render — inline input when kind:'other' + focused", (
 		expect(lines[0]).toContain("hi");
 		expect(lines[0]).toContain(CURSOR_MARKER);
 	});
-	it("renders label (not input) when kind:'other' but NOT focused", () => {
+	it("renders the custom draft (without a cursor) when kind:'other' is not focused", () => {
 		const s = new WrappingSelect([{ kind: "other", label: "pick" }], 1, identityTheme);
 		s.setFocused(false);
-		s.setInputBuffer("buf");
+		s.setInputBuffer("draft");
 		const lines = s.render(40);
-		expect(lines[0]).toContain("pick");
+		expect(lines[0]).toContain("draft");
+		expect(lines[0]).not.toContain("pick");
 		expect(lines[0]).not.toContain(CURSOR_MARKER);
+	});
+
+	it("falls back to the Type something label when the unfocused draft is empty", () => {
+		const s = new WrappingSelect([{ kind: "other", label: "pick" }], 1, identityTheme);
+		s.setFocused(false);
+		s.setInputBuffer("");
+		expect(s.render(40)[0]).toContain("pick");
+	});
+
+	it("shows a changed custom draft without the prior answer's confirmation mark", () => {
+		const s = new WrappingSelect([{ kind: "other", label: "pick" }], 1, identityTheme);
+		s.setFocused(false);
+		s.setConfirmedIndex(0, "confirmed");
+		s.setInputBuffer("new draft");
+		const line = s.render(40)[0] ?? "";
+		expect(line).toContain("new draft");
+		expect(line).not.toContain("confirmed");
+		expect(line).not.toContain("✔");
 	});
 
 	// Regression: pre-fix the inline-input row was hard-truncated to `width`, so long
@@ -374,7 +393,7 @@ describe("WrappingSelect.render — number column padding", () => {
 		expect(lines[0]).toContain(" 1. ");
 		expect(lines[9]).toContain("10. ");
 	});
-	it("uses numberStartOffset for numbering (so chat row reads as `(N+1). Chat about this`)", () => {
+	it("uses numberStartOffset for numbering (continues a prior list's sequence)", () => {
 		const s = new WrappingSelect([{ kind: "option", label: "chat" }], 1, identityTheme, {
 			numberStartOffset: 5,
 			totalItemsForNumbering: 10,
@@ -625,7 +644,6 @@ describe("WrappingSelectItem.kind contract — exhaustive", () => {
 	const allKinds: WrappingSelectItem[] = [
 		{ kind: "option", label: "opt" },
 		{ kind: "other", label: "Type something." },
-		{ kind: "chat", label: "Chat about this" },
 		{ kind: "next", label: "Next" },
 	];
 

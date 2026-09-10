@@ -7,6 +7,102 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+### Fixed
+
+- The published npm tarball no longer includes the co-located `advisor/pi-compat.test.ts` — the `files` array now carries the same `!**/*.test.ts` negation as every sibling package.
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- Package card cover on pi.dev: `package.json` now declares `pi.image` pointing at the package's `docs/cover.png`.
+
+### Fixed
+
+- OAuth-backed advisor models (e.g. `kimi-coding`) no longer fail with "has no API key available": a missing literal API key is only an error on legacy hosts without Pi's auth-aware runtime facade, which applies OAuth credentials itself. ([#166](https://github.com/juicesharp/rpiv-mono/issues/166))
+
+## [2.6.0] - 2026-08-15
+
+### Added
+
+- Offer Pi's `max` thinking level for advisor models that advertise support and recognize it in effort-based blocklist policies.
+
+### Changed
+
+- The `/advisor` effort picker now derives all levels from the model's capability report intersected with the known effort ordering: base levels a model explicitly disables are hidden (previously `minimal`–`high` were always offered), and levels unknown to this package are never offered or persisted.
+- Esc in the `/advisor` effort picker no longer discards the model selection: the advisor enables with no explicit effort (model default) and notifies, instead of silently aborting the whole flow.
+- The `/advisor` effort picker's `off` row is labeled `off (no reasoning sent)` to distinguish it from `/rpiv-models`' `off (disable reasoning)`, which persists an explicit `thinking: "off"`.
+
+### Fixed
+
+- Session restore now overwrites (never merges) the in-memory effort with the persisted value: a config carrying a model but no `effort` — a state the Esc/off choices persist, possibly from another Pi process sharing `advisor.json` — previously left a stale in-memory effort that was silently sent as `reasoning` on every advisor call. A hand-edited `effort` unknown to the effort ordering is now dropped with a warning instead of restored, and an unknown `minEffort` in `disabledForModels` warns before its entry is dropped.
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+### Fixed
+- An empty advisor response (a normal stop that carried no text) is now retried once with identical inputs before surfacing the empty-response error, so a transient provider hiccup no longer fails the call outright. Aborted and errored calls still surface immediately and are never retried.
+
+## [2.1.0] - 2026-07-23
+
+### Changed
+- Default prompt guidelines now require the executor to surface the advisor's key guidance in the next visible reply after each `advisor` result, so users (including Cursor bridge sessions) are not left with only a collapsed tool card.
+- README rewritten to follow the documentation standard shared across all packages.
+- npm tarball now includes the versioned `docs/` reference and no longer ships cover or screenshot art.
+
+### Fixed
+- Route advisor completions through Pi's auth-aware model runtime when available, preserving credential-derived request base URLs such as GitHub Copilot's OAuth proxy endpoint instead of using the static catalog URL. Older hosts retain the compatibility fallback.
+
+## [2.0.0] - 2026-07-21
+
+### Added
+- Read configuration from `XDG_CONFIG_HOME` when set, falling back to the legacy `~/.config` location only when no config file exists at the new path.
+
+### Fixed
+- Restore advisor model calls under Pi 0.80 and newer hosts while remaining compatible with older hosts, and surface genuine initialization failures instead of masking them.
+- Register tools correctly under installers that do not materialize peer dependencies.
+
+## [1.20.0] - 2026-06-15
+
+### Fixed
+- Restore now strips the advisor tool (and its prompt block) from the active set when there is no usable advisor model — missing config, an unparseable model key, or a model no longer in the registry. The tool is registered active-by-default at load, so its prompt snippet previously lingered in the base system prompt even though every `advisor()` call would fail with `ERR_NO_MODEL` (#72).
+- Clear the stale in-memory advisor selection on a no-model restore. The module-level selection persists across `session_start` fires, so a model removed from the registry mid-process would otherwise let the per-turn `before_agent_start` strip read a truthy model and re-add the tool just stripped — the strip now sticks.
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
 ### Changed
 - Persisted model keys now use the canonical `provider/modelId` (slash) form; legacy `provider:modelId` (colon) entries are still read and matched, and configs auto-migrate to slash form on the next `/advisor` save. Rollback caveat: rolling back across this release without first re-running `/advisor` can silently disable the advisor, since the older key parser is colon-strict.
 

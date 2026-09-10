@@ -22,7 +22,7 @@ function makePi() {
 	);
 	// Provide a minimal sourceInfo stub on each mock entry so a future read of
 	// `sourceInfo` in skillCommandNames doesn't silently pass tests while
-	// failing production (Plan Review row #concern-G).
+	// failing production.
 	const stubSourceInfo = { path: "/stub/SKILL.md", baseDir: "/stub" };
 	const getCommands = vi.fn(() => [
 		{ name: "skill:commit", description: "Commit changes", source: "skill", sourceInfo: stubSourceInfo },
@@ -387,9 +387,9 @@ describe("removeOverride (cascade cleanup)", () => {
 
 	it("collapses the whole presets tree when the last stage is removed", () => {
 		const { next, removed } = removeOverride(
-			{ presets: { ship: { stages: { research: "zai/glm-4-7" } } } },
+			{ presets: { build: { stages: { research: "zai/glm-4-7" } } } },
 			"presets",
-			["ship", "research"],
+			["build", "research"],
 		);
 		expect(removed).toBe(true);
 		expect(next.presets).toBeUndefined();
@@ -399,16 +399,16 @@ describe("removeOverride (cascade cleanup)", () => {
 		const { next, removed } = removeOverride(
 			{
 				presets: {
-					ship: { stages: { research: "zai/glm-4-7", plan: "anthropic/opus" } },
+					build: { stages: { research: "zai/glm-4-7", plan: "anthropic/opus" } },
 					polish: { stages: { review: "zai/glm-4-7" } },
 				},
 			},
 			"presets",
-			["ship", "research"],
+			["build", "research"],
 		);
 		expect(removed).toBe(true);
 		expect(next.presets).toEqual({
-			ship: { stages: { plan: "anthropic/opus" } },
+			build: { stages: { plan: "anthropic/opus" } },
 			polish: { stages: { review: "zai/glm-4-7" } },
 		});
 	});
@@ -427,8 +427,8 @@ describe("removeOverride (cascade cleanup)", () => {
 	});
 
 	it("reports removed=false for an absent preset stage", () => {
-		const config = { presets: { ship: { stages: { research: "zai/glm-4-7" } } } };
-		expect(removeOverride(config, "presets", ["ship", "plan"]).removed).toBe(false);
+		const config = { presets: { build: { stages: { research: "zai/glm-4-7" } } } };
+		expect(removeOverride(config, "presets", ["build", "plan"]).removed).toBe(false);
 		expect(removeOverride(config, "presets", ["polish", "review"]).removed).toBe(false);
 	});
 });
@@ -500,7 +500,7 @@ describe("/rpiv-models — save failure", () => {
 
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Failed to save"), "error");
 
-		// Tightened (per slice-verifier WARNING): cache MUST NOT have been reset.
+		// Cache MUST NOT have been reset on save failure.
 		// The seeded sentinel persists — proving invalidateModelsConfigCache was NOT
 		// called (early return on saveJsonConfig=false).
 		const afterFail = loadModelsConfig();
@@ -537,19 +537,19 @@ describe("applyOverride", () => {
 	});
 
 	it("adds a preset stage to a new workflow", () => {
-		const result = applyOverride({}, "presets", ["ship", "research"], { model: "zai/glm-4-7" });
-		expect(result.presets).toEqual({ ship: { stages: { research: "zai/glm-4-7" } } });
+		const result = applyOverride({}, "presets", ["build", "research"], { model: "zai/glm-4-7" });
+		expect(result.presets).toEqual({ build: { stages: { research: "zai/glm-4-7" } } });
 	});
 
 	it("adds a preset stage to an existing workflow", () => {
 		const result = applyOverride(
-			{ presets: { ship: { stages: { research: "zai/glm-4-7" } } } },
+			{ presets: { build: { stages: { research: "zai/glm-4-7" } } } },
 			"presets",
-			["ship", "plan"],
+			["build", "plan"],
 			{ model: "openai/gpt-5.5", thinking: "medium" },
 		);
 		expect(result.presets).toEqual({
-			ship: { stages: { research: "zai/glm-4-7", plan: { model: "openai/gpt-5.5", thinking: "medium" } } },
+			build: { stages: { research: "zai/glm-4-7", plan: { model: "openai/gpt-5.5", thinking: "medium" } } },
 		});
 	});
 
@@ -581,5 +581,217 @@ describe("/rpiv-models — loadWorkflowMap error handling", () => {
 		const ctx = makeCtx();
 		await handler()("", ctx);
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("No workflows"), "error");
+	});
+
+	it("exits cleanly when the presets STAGE step's loadWorkflowMap rejects (second call)", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		const sources = await import("./models-config-sources.js");
+		// Workflow step succeeds; the stage step's second load rejects (e.g. the
+		// workflow was deleted between picks).
+		vi.spyOn(sources, "loadWorkflowMap")
+			.mockResolvedValueOnce({ build: ["plan", "research"] })
+			.mockRejectedValueOnce(new Error("load failed"));
+		vi.mocked(showFilterablePicker).mockResolvedValueOnce("presets").mockResolvedValueOnce("build"); // workflow picked; stage step then aborts before its picker
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		const ctx = makeCtx();
+		await handler()("", ctx);
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("No workflows"), "error");
+		expect(existsSync(CONFIG_PATH)).toBe(false); // aborted before any write
+	});
+});
+
+describe("/rpiv-models — ESC navigates one level up", () => {
+	it("ESC at the model picker returns to the scope picker (re-shown, preselecting the prior scope)", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		// scope=defaults → model picker → ESC (back) → scope picker → ESC (exit).
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("defaults")
+			.mockResolvedValueOnce(null) // ESC at model → back to scope
+			.mockResolvedValueOnce(null); // ESC at scope → exit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		const ctx = makeCtx();
+		await handler()("", ctx);
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		// The scope picker was shown a SECOND time after backing out of the model.
+		expect(calls.length).toBeGreaterThanOrEqual(3);
+		const reshownScope = calls[2][1] as { items: SelectItem[]; preferredValue?: string };
+		expect(reshownScope.items.some((i) => i.value === "defaults")).toBe(true);
+		expect(reshownScope.preferredValue).toBe("defaults"); // highlights where we came from
+		// Nothing was written — the whole flow was cancelled out.
+		expect(existsSync(CONFIG_PATH)).toBe(false);
+	});
+
+	it("ESC at the effort picker returns to the model picker (preselecting the prior model)", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		// defaults → reasoning model → ESC at effort (back) → re-pick a NON-reasoning model → save.
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("defaults")
+			.mockResolvedValueOnce("openai/gpt-5.5") // reasoning → effort prompt
+			.mockResolvedValueOnce(null) // ESC at effort → back to model
+			.mockResolvedValueOnce("zai/glm-4-7"); // re-pick (non-reasoning) → commits
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		// calls: [0]=scope, [1]=model, [2]=effort, [3]=model re-shown.
+		const reshownModel = calls[3][1] as { preferredValue?: string };
+		expect(reshownModel.preferredValue).toBe("openai/gpt-5.5"); // the model we backed out of
+
+		const stored = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(stored.defaults).toBe("zai/glm-4-7"); // the re-picked model won
+	});
+
+	it("ESC at the model picker for presets returns to the STAGE picker (one level), not the workflow", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		const sources = await import("./models-config-sources.js");
+		vi.spyOn(sources, "loadWorkflowMap").mockResolvedValue({ build: ["plan", "research"] });
+
+		// presets → build → plan → ESC at model (back to STAGE) → research → model → save.
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("presets")
+			.mockResolvedValueOnce("build") // workflow
+			.mockResolvedValueOnce("plan") // stage
+			.mockResolvedValueOnce(null) // ESC at model → back to stage (NOT workflow)
+			.mockResolvedValueOnce("research") // re-pick stage
+			.mockResolvedValueOnce("zai/glm-4-7"); // model (non-reasoning) → commit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		// calls: [0]scope [1]workflow [2]stage [3]model [4]stage-again [5]model-again.
+		const reshownStage = calls[4][1] as { title: string; preferredValue?: string };
+		expect(reshownStage.title).toContain("Stage"); // landed on the stage picker, not workflow
+		expect(reshownStage.preferredValue).toBe("plan"); // preselects the stage we backed out of
+
+		const stored = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(stored.presets.build.stages.research).toBe("zai/glm-4-7");
+		expect(stored.presets.build.stages.plan).toBeUndefined(); // only one level up — workflow kept
+	});
+
+	it("ESC at the first key step returns to the scope picker, where a different scope proceeds", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		// agents → ESC at agent step (back to scope) → skills → commit → model → save.
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("agents")
+			.mockResolvedValueOnce(null) // ESC at agent key step → back to scope
+			.mockResolvedValueOnce("skills") // pick a different scope
+			.mockResolvedValueOnce("commit") // skill key step
+			.mockResolvedValueOnce("zai/glm-4-7"); // model (non-reasoning) → commit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		const reshownScope = calls[2][1] as { items: SelectItem[]; preferredValue?: string };
+		expect(reshownScope.items.some((i) => i.value === "skills")).toBe(true);
+		expect(reshownScope.preferredValue).toBe("agents"); // highlights the scope we backed out of
+
+		const stored = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(stored.skills.commit).toBe("zai/glm-4-7");
+	});
+
+	it("inner pickers advertise ESC as 'back' in the nav hint; the scope picker keeps 'cancel'", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		vi.mocked(showFilterablePicker).mockResolvedValueOnce("defaults").mockResolvedValueOnce(null);
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		expect((calls[0][1] as { escHint?: string }).escHint).toBeUndefined(); // scope → default "cancel"
+		expect((calls[1][1] as { escHint?: string }).escHint).toBe("back"); // model → "back"
+	});
+});
+
+describe("/rpiv-models — committing returns to the parent list (not close)", () => {
+	it("after saving a keyed override, returns to the KEY list with the new ✓ (not the scope picker)", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		// skills → commit → model (non-reasoning) → SAVE → land back on the skill list → ESC out.
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("skills")
+			.mockResolvedValueOnce("commit")
+			.mockResolvedValueOnce("zai/glm-4-7") // non-reasoning → commits immediately
+			.mockResolvedValueOnce(null) // ESC on the re-shown skill list → back to scope
+			.mockResolvedValueOnce(null); // ESC on scope → exit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		// calls[3] is the skill list re-shown AFTER the save — same picker, now with ✓.
+		const reshown = calls[3][1] as { title: string; items: SelectItem[] };
+		expect(reshown.title).toBe("Skill"); // returned to the key list, not scope/model
+		expect(reshown.items.find((i) => i.value === "commit")?.label).toContain("✓"); // reflects the save
+		const stored = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(stored.skills.commit).toBe("zai/glm-4-7");
+	});
+
+	it("after saving a defaults override (no key list), returns to the SCOPE picker with the new ✓", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("defaults")
+			.mockResolvedValueOnce("zai/glm-4-7") // non-reasoning → commits
+			.mockResolvedValueOnce(null); // ESC on the re-shown scope picker → exit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		// calls[2] is the scope picker re-shown AFTER the save.
+		const reshown = calls[2][1] as { title: string; items: SelectItem[]; preferredValue?: string };
+		expect(reshown.title).toBe("Model Overrides"); // back at the top-level scope picker
+		expect(reshown.preferredValue).toBe("defaults"); // preselects where we came from
+		expect(reshown.items.find((i) => i.value === "defaults")?.label).toContain("✓");
+	});
+
+	it("supports configuring multiple overrides in one session (save, return to list, configure another)", async () => {
+		rmSync(CONFIG_PATH, { force: true });
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("agents")
+			.mockResolvedValueOnce("codebase-analyst")
+			.mockResolvedValueOnce("zai/glm-4-7") // save agents/codebase-analyst → back to agent list
+			.mockResolvedValueOnce("codebase-locator")
+			.mockResolvedValueOnce("zai/glm-4-7") // save agents/codebase-locator → back to agent list
+			.mockResolvedValueOnce(null) // ESC agent list → scope
+			.mockResolvedValueOnce(null); // ESC scope → exit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		await handler()("", makeCtx());
+
+		const stored = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(stored.agents["codebase-analyst"]).toBe("zai/glm-4-7");
+		expect(stored.agents["codebase-locator"]).toBe("zai/glm-4-7"); // both written in one run
+	});
+
+	it("after a per-entry reset, returns to the key list with the ✓ now gone", async () => {
+		const target = bundledAgentNames()[0]; // a real bundled agent so it appears in the list
+		rmSync(CONFIG_PATH, { force: true });
+		mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+		writeFileSync(CONFIG_PATH, JSON.stringify({ agents: { [target]: "zai/glm-4-7" } }), "utf-8");
+
+		vi.mocked(showFilterablePicker)
+			.mockResolvedValueOnce("agents")
+			.mockResolvedValueOnce(target)
+			.mockResolvedValueOnce("__reset__") // remove → back to agent list
+			.mockResolvedValueOnce(null) // ESC agent list → scope
+			.mockResolvedValueOnce(null); // ESC scope → exit
+		const { pi, handler } = makePi();
+		registerRpivModelsCommand(pi);
+		const ctx = makeCtx();
+		await handler()("", ctx);
+
+		const calls = vi.mocked(showFilterablePicker).mock.calls;
+		const reshown = calls[3][1] as { title: string; items: SelectItem[] };
+		expect(reshown.title).toBe("Agent"); // returned to the key list
+		expect(reshown.items.find((i) => i.value === target)?.label).not.toContain("✓");
+		const stored = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+		expect(stored.agents).toBeUndefined();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Removed"), "info");
 	});
 });

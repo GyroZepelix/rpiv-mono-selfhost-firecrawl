@@ -12,29 +12,36 @@
  * `registerBuiltIns(...)` from their extension entry point with workflows
  * that name their own bundled skills.
  *
- * The registry array is anchored on a `Symbol.for` slot on `globalThis`.
- * Pi may load this module more than once — once for the rpiv-workflow
- * extension itself, and once via the rpiv-pi `import { registerBuiltIns }
- * from "@juicesharp/rpiv-workflow"` cross-package resolution — and
- * module-local state would be siloed between those copies.
- * `globalThis[KEY]` is process-wide and survives the dup load.
+ * The registry array is anchored on a `Symbol.for` slot on `globalThis`
+ * (via `globalSlot`). Pi may load this module more than once — once for the
+ * rpiv-workflow extension itself, and once via the rpiv-pi
+ * `import { registerBuiltIns } from "@juicesharp/rpiv-workflow"`
+ * cross-package resolution — and module-local state would be siloed between
+ * those copies. `globalThis[KEY]` is process-wide and survives the dup load.
  */
 
 import type { Workflow } from "./api.js";
+import { globalSlot, lazyProviderRegistry } from "./internal-utils.js";
 
 const REGISTRY_KEY = Symbol.for("@juicesharp/rpiv-workflow:built-ins");
+const FAILURES_KEY = Symbol.for("@juicesharp/rpiv-workflow:built-in-provider-failures");
 
-type Global = Record<symbol, unknown>;
-
-function getRegistry(): Workflow[] {
-	const g = globalThis as unknown as Global;
-	let registry = g[REGISTRY_KEY] as Workflow[] | undefined;
-	if (!registry) {
-		registry = [];
-		g[REGISTRY_KEY] = registry;
-	}
-	return registry;
-}
+const getRegistry = globalSlot(REGISTRY_KEY, () => [] as Workflow[]);
+const getFailures = globalSlot(FAILURES_KEY, () => [] as unknown[]);
+// Provider lifecycle via the shared `lazyProviderRegistry` — same global-slot
+// strategy as the registry, so a duplicate module load shares one
+// process-wide state. Safe to re-flush: `registerBuiltIns` replaces by name.
+// `onError` RECORDS each provider throw (drained by `drainBuiltInProviderErrors`)
+// instead of propagating, so `loadWorkflows` honors its never-throws contract: a
+// throwing provider degrades to a partial/empty registry instead of crashing
+// `/wf`, but the error is NOT swallowed silently — `loadWorkflows` surfaces it as
+// a LoadIssue so a buggy provider is debuggable. Same posture as the
+// skill-contracts registry.
+const providers = lazyProviderRegistry("@juicesharp/rpiv-workflow:built-in-providers", {
+	onError: (err) => {
+		getFailures().push(err);
+	},
+});
 
 /**
  * Register one or more workflows into the `built-in` layer. Idempotent on
@@ -51,15 +58,47 @@ export function registerBuiltIns(workflows: readonly Workflow[]): void {
 	}
 }
 
+/**
+ * Register a LAZY built-in provider. The thunk runs once on the first
+ * `flushBuiltInProviders()` (which `loadWorkflows` awaits), letting a sibling
+ * defer constructing its workflow definitions off startup and onto first `/wf`.
+ * Register before the first read — `/wf` is the earliest reader.
+ */
+export function registerBuiltInsProvider(provider: () => void | Promise<void>): void {
+	providers.register(provider);
+}
+
+/**
+ * Run all pending providers once, then memoize. Concurrency-safe (callers await
+ * the same promise; later calls are no-ops). Providers registered after the
+ * first flush won't run — acceptable, all register at extension load.
+ */
+export function flushBuiltInProviders(): Promise<void> {
+	return providers.flush();
+}
+
+/**
+ * Drain (return + clear) the errors recorded by failed built-in providers since
+ * the last drain. `loadWorkflows` calls this right after the flush and maps each
+ * into a `LoadIssue`, so a provider bug surfaces in `loaded.issues` instead of
+ * vanishing. Internal — not on the public barrel (mirrors
+ * `drainSkillContractProviderErrors`).
+ */
+export function drainBuiltInProviderErrors(): unknown[] {
+	return getFailures().splice(0);
+}
+
 /** Read-only view of the registry — consumed by `load.ts`. */
 export function getBuiltIns(): readonly Workflow[] {
 	return getRegistry();
 }
 
 /**
- * Test reset. Wired into the repo-wide test setup so cross-test
- * registration leaks don't bias the next case.
+ * Test reset (wired into repo-wide setup). Clears the registry, pending lazy
+ * providers, and the flush latch so the next case starts clean.
  */
 export function __resetBuiltIns(): void {
 	getRegistry().length = 0;
+	providers.reset();
+	getFailures().length = 0;
 }

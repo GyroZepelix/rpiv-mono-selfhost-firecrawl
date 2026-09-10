@@ -12,8 +12,9 @@
 
 import { url } from "../../handle.js";
 import type { ArtifactCollector } from "../../output-spec.js";
-import { defineCollector } from "../../output-spec.js";
-import { lastMatchInBranch } from "../../transcript.js";
+import { requireOpt } from "./require-opt.js";
+import { textScanCollector } from "./text-scan.js";
+import type { ToolCall } from "./tool-call.js";
 
 /**
  * Conservative URL matcher — `https?://` plus non-whitespace, stopping
@@ -26,20 +27,17 @@ const DEFAULT_URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+[^\s<>"'`.,;:!?)\]}]/g;
 export interface UrlCollectorOpts {
 	/** Override the default URL pattern (e.g. narrow to one host). */
 	pattern?: RegExp;
+	/** Narrows the tool-argument fallback to matching tool calls (see `textScanCollector`). */
+	match?: (tc: ToolCall) => boolean;
 }
 
 export function urlCollector(opts: UrlCollectorOpts = {}): ArtifactCollector {
+	requireOpt(
+		"urlCollector",
+		"pattern",
+		"must be a RegExp when provided",
+		opts.pattern === undefined || opts.pattern instanceof RegExp,
+	);
 	const pattern = opts.pattern ?? DEFAULT_URL_PATTERN;
-	return defineCollector({
-		collect: (ctx) => {
-			const href = lastMatchInBranch(ctx.branch, pattern, ctx.branchOffset);
-			if (!href) {
-				return {
-					kind: "fatal",
-					message: `${ctx.skill} finished without producing a URL matching ${pattern.source}`,
-				};
-			}
-			return { kind: "ok", artifacts: [{ handle: url(href), role: "primary" }] };
-		},
-	});
+	return textScanCollector({ pattern, toHandle: url, noun: "URL", match: opts.match });
 }

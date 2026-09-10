@@ -42,25 +42,30 @@
  * (the config file + pack files) before running `/wf`.
  *
  * Module map:
+ *   ./issues.ts           — LoadIssue + Issue (the layer/path-attributed wrapper)
+ *   ./skill-contract-phase.ts — provider flush/drain + effective registry + derivers
  *   ./paths.ts            — OverlayPaths + per-layer path helpers
- *   ./shape-guards.ts     — isWorkflow, isEnvelope, describe, formatError
+ *   ./shape-guards.ts     — isWorkflow, isEnvelope, describe
  *   ./normalize.ts        — normalizeDefaultExport + NormalizeResult
  *   ./merge.ts            — LoadAccumulator, LayerOutcome, loadLayer, mergeOverlay, loadError
+ *   ./legacy.ts           — legacy-layout advisories (notices + probes)
  *   ./resolve-default.ts  — resolveDefault (first-workflow fallback)
  *   ./cache.ts            — mtime-keyed jiti import cache + __resetLoadCache
  */
 
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type { Workflow } from "../api.js";
-import { getBuiltIns } from "../built-ins.js";
+import { drainBuiltInProviderErrors, flushBuiltInProviders, getBuiltIns } from "../built-ins.js";
+import { formatError } from "../internal-utils.js";
 import type { ConfigLayer } from "../layers.js";
-import { LEGACY_OVERLAY_NOTICE, LEGACY_RUNS_NOTICE, LEGACY_USER_CONFIG_NOTICE } from "../messages.js";
-import { validateWorkflow, type WorkflowValidationIssue } from "../validate-workflow.js";
+import type { SkillContractMap } from "../skill-contract.js";
+import { validateWorkflow } from "../validate-workflow.js";
 import { applySkillAliases } from "./alias.js";
+import type { Issue } from "./issues.js";
+import { pushLegacyNotices } from "./legacy.js";
 import { type LoadAccumulator, loadLayer } from "./merge.js";
-import { type OverlayPaths, projectOverlayPaths, userOverlayPaths } from "./paths.js";
+import { projectOverlayPaths, userOverlayPaths } from "./paths.js";
 import { resolveDefault } from "./resolve-default.js";
+import { applySkillContractPhase } from "./skill-contract-phase.js";
 
 // ===========================================================================
 // Public types
@@ -69,18 +74,9 @@ import { resolveDefault } from "./resolve-default.js";
 export type { ConfigLayer } from "../layers.js";
 export { aliasSkills } from "./alias.js";
 export { __resetLoadCache } from "./cache.js";
+export type { Issue, LoadIssue, LoadIssueOrigin } from "./issues.js";
 export type { OverlayPaths } from "./paths.js";
 export { projectOverlayPaths, userOverlayPaths } from "./paths.js";
-
-export interface LoadIssue {
-	kind: "load";
-	layer: ConfigLayer;
-	path?: string;
-	severity: "error" | "warning";
-	message: string;
-}
-
-export type Issue = LoadIssue | (WorkflowValidationIssue & { kind: "validation"; layer: ConfigLayer; path?: string });
 
 export interface LoadedWorkflows {
 	workflows: readonly Workflow[];
@@ -103,6 +99,12 @@ export interface LoadedWorkflows {
 	 * the remap.
 	 */
 	skillAliases: Readonly<Record<string, string>>;
+	/**
+	 * Effective skill-contract registry: registered (`declared`-source) contracts merged
+	 * OVER `harvested` ones (derived from stage usage). Required field, empty
+	 * `Map` when no contract was declared or harvestable.
+	 */
+	skillContracts: SkillContractMap;
 }
 
 // ===========================================================================
@@ -128,12 +130,29 @@ export function findWorkflow(loaded: LoadedWorkflows, name: string): Workflow | 
  * resolved set. Never throws — load + validation errors flow through `issues`.
  */
 export async function loadWorkflows(cwd: string): Promise<LoadedWorkflows> {
+	// Flush lazy built-in providers before reading the registry — lets siblings
+	// defer constructing definitions to first `/wf` (the earliest reader).
+	await flushBuiltInProviders();
+
 	const acc: LoadAccumulator = {
 		issues: [],
 		workflowMap: new Map(),
 		sources: new Map(),
 		sourcePaths: new Map(),
 	};
+	// Built-in provider failures — each provider throw was RECORDED (not
+	// propagated) during `flushBuiltInProviders()`; drain and surface as issues
+	// so the loader keeps its never-throws contract without swallowing the
+	// failure. Runs before `getBuiltIns()` is read, so a provider that throws
+	// before registering contributes its error but (correctly) no workflows.
+	for (const err of drainBuiltInProviderErrors()) {
+		acc.issues.push({
+			kind: "load",
+			layer: "framework",
+			message: `built-in provider failed: ${formatError(err)}`,
+			severity: "warning",
+		});
+	}
 	const layers: ConfigLayer[] = getBuiltIns().length > 0 ? ["built-in"] : [];
 
 	for (const w of getBuiltIns()) {
@@ -164,6 +183,12 @@ export async function loadWorkflows(cwd: string): Promise<LoadedWorkflows> {
 	// declared the key — see `applySkillAliases` in `./alias.ts`.
 	const skillAliases = applySkillAliases(acc, userOutcome, projectOutcome);
 
+	// Skill-contract phase: flush providers, surface their failures +
+	// collisions (attributed to "framework", not a config layer), build the
+	// effective registry, run outcome derivers on per-load stage copies. Must
+	// precede validation — see `./skill-contract-phase.ts`.
+	const skillContracts = await applySkillContractPhase(acc);
+
 	// Validate every merged workflow once. Validation runs even on built-in so
 	// that a future built-in regression surfaces in the same channel as user
 	// errors. Each issue is attributed to the exact file the surviving workflow
@@ -172,7 +197,8 @@ export async function loadWorkflows(cwd: string): Promise<LoadedWorkflows> {
 	for (const w of acc.workflowMap.values()) {
 		const layer = acc.sources.get(w.name) ?? "built-in";
 		const path = acc.sourcePaths.get(w.name);
-		for (const v of validateWorkflow(w)) acc.issues.push({ ...v, kind: "validation", layer, path });
+		for (const v of validateWorkflow(w, { skillContracts }))
+			acc.issues.push({ ...v, kind: "validation", layer, path });
 	}
 
 	const defaultName = resolveDefault(projectOutcome.configDefault, userOutcome.configDefault, acc);
@@ -184,46 +210,6 @@ export async function loadWorkflows(cwd: string): Promise<LoadedWorkflows> {
 		layers,
 		issues: acc.issues,
 		skillAliases,
+		skillContracts,
 	};
-}
-
-/**
- * Push the three independent legacy-migration advisories. Each is a `"warning"`
- * (never blocks the run) and each probes a distinct stale layout the unified
- * `.rpiv/workflows/` move left behind:
- *   - project dashed dir   `<cwd>/.rpiv-workflow/`           → config.ts + packs/
- *   - orphaned run JSONLs   `<cwd>/.rpiv/workflows/*.jsonl`   → runs/
- *   - user-layer rename     `~/.config/rpiv-workflow/workflows.config.ts` → config.ts
- */
-function pushLegacyNotices(cwd: string, userPaths: OverlayPaths, acc: LoadAccumulator): void {
-	if (existsSync(join(cwd, ".rpiv-workflow"))) {
-		acc.issues.push({ kind: "load", layer: "project", severity: "warning", message: LEGACY_OVERLAY_NOTICE(cwd) });
-	}
-
-	if (hasOrphanedRunFiles(cwd)) {
-		acc.issues.push({ kind: "load", layer: "project", severity: "warning", message: LEGACY_RUNS_NOTICE(cwd) });
-	}
-
-	const userDir = dirname(userPaths.configFile);
-	if (existsSync(join(userDir, "workflows.config.ts"))) {
-		acc.issues.push({
-			kind: "load",
-			layer: "user",
-			severity: "warning",
-			message: LEGACY_USER_CONFIG_NOTICE(userDir),
-		});
-	}
-}
-
-/**
- * True when `<cwd>/.rpiv/workflows/` holds top-level `*.jsonl` run files written
- * before the `runs/` relocation. `readdirSync` lists only immediate entries, so
- * files already inside `runs/` never match. A missing / unreadable dir → false.
- */
-function hasOrphanedRunFiles(cwd: string): boolean {
-	try {
-		return readdirSync(join(cwd, ".rpiv", "workflows")).some((f) => f.endsWith(".jsonl"));
-	} catch {
-		return false;
-	}
 }

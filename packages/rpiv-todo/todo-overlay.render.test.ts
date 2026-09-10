@@ -1,8 +1,20 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { createMockPi, createMockUI } from "@juicesharp/rpiv-test-utils";
+import { createMockCtx, createMockPi, createMockUI } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __resetState, registerTodoTool, type TaskAction } from "./todo.js";
+import { __resetState, registerTodoTool, setActiveRenderSession, type TaskAction } from "./todo.js";
 import { TodoOverlay } from "./todo-overlay.js";
+
+const CONFIG_PATH = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+
+function writeConfigFile(contents: string): void {
+	mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+	writeFileSync(CONFIG_PATH, contents, "utf-8");
+}
+function removeConfigFile(): void {
+	rmSync(CONFIG_PATH, { force: true });
+}
 
 const identityTheme = {
 	fg: (_c: string, s: string) => s,
@@ -11,15 +23,20 @@ const identityTheme = {
 	strikethrough: (s: string) => s,
 };
 
-async function setup(actions: Array<{ action: TaskAction; [k: string]: unknown }>) {
+async function setup(
+	actions: Array<{ action: TaskAction; [k: string]: unknown }>,
+	uiOverrides: Partial<Omit<ExtensionUIContext, "theme">> = {},
+) {
 	__resetState();
+	setActiveRenderSession("test-session");
 	const { pi, captured } = createMockPi();
 	registerTodoTool(pi);
 	const tool = captured.tools.get("todo")!;
+	const ctx = createMockCtx();
 	for (const p of actions) {
-		await tool.execute?.("tc", p as never, undefined as never, undefined as never, {} as never);
+		await tool.execute?.("tc", p as never, undefined as never, undefined as never, ctx as never);
 	}
-	const ui = createMockUI() as unknown as ExtensionUIContext;
+	const ui = createMockUI(uiOverrides) as unknown as ExtensionUIContext;
 	const overlay = new TodoOverlay();
 	overlay.setUICtx(ui);
 	overlay.update();
@@ -34,9 +51,11 @@ async function setup(actions: Array<{ action: TaskAction; [k: string]: unknown }
 
 beforeEach(() => {
 	__resetState();
+	removeConfigFile();
 });
 afterEach(() => {
 	__resetState();
+	removeConfigFile();
 	vi.restoreAllMocks();
 });
 
@@ -73,10 +92,11 @@ describe("TodoOverlay — natural-order rendering (no overflow)", () => {
 			{ action: "create", subject: "c" },
 		]);
 		const lines = widget.render(200);
-		expect(lines).toHaveLength(4); // heading + 3
+		expect(lines).toHaveLength(5); // heading + 3 + trailing spacer
 		expect(lines[1]).toContain("├─");
 		expect(lines[2]).toContain("├─");
 		expect(lines[3]).toContain("└─");
+		expect(lines[4]).toBe(""); // trailing spacer below the panel
 	});
 
 	it("omits deleted tasks from the rendered output", async () => {
@@ -157,13 +177,14 @@ describe("TodoOverlay — overflow collapse", () => {
 		}
 		const { widget } = await setup(actions);
 		const lines = widget.render(200);
-		// heading + 10 visible + 1 summary = 12
-		expect(lines).toHaveLength(12);
+		// heading + 10 visible + 1 summary + trailing spacer = 13
+		expect(lines).toHaveLength(13);
 		// All pending present
 		for (let i = 1; i <= 8; i++) expect(lines.join("\n")).toContain(`p${i}`);
-		// Summary correct
-		expect(lines[lines.length - 1]).toContain("+2 more");
-		expect(lines[lines.length - 1]).toContain("2 completed");
+		// Last row is the trailing spacer; the summary sits just above it
+		expect(lines[lines.length - 1]).toBe("");
+		expect(lines[lines.length - 2]).toContain("+2 more");
+		expect(lines[lines.length - 2]).toContain("2 completed");
 	});
 
 	it("truncates pending tail when dropping all completed isn't enough", async () => {
@@ -172,8 +193,9 @@ describe("TodoOverlay — overflow collapse", () => {
 		for (let i = 1; i <= 12; i++) actions.push({ action: "create", subject: `t${i}` });
 		const { widget } = await setup(actions);
 		const lines = widget.render(200);
-		expect(lines).toHaveLength(12);
-		const summary = lines[lines.length - 1];
+		expect(lines).toHaveLength(13);
+		expect(lines[lines.length - 1]).toBe("");
+		const summary = lines[lines.length - 2];
 		expect(summary).toContain("+2 more");
 		expect(summary).toContain("2 pending");
 		expect(summary).not.toContain("completed");
@@ -190,7 +212,8 @@ describe("TodoOverlay — overflow collapse", () => {
 			actions.push({ action: "update", id: i, status: "completed" });
 		}
 		const { widget } = await setup(actions);
-		const summary = widget.render(200).slice(-1)[0];
+		// Last line is the trailing spacer, so the summary is the second-to-last.
+		const summary = widget.render(200).slice(-2)[0];
 		expect(summary).toContain("+5 more");
 		expect(summary).toContain("3 completed");
 		expect(summary).toContain("2 pending");
@@ -217,15 +240,136 @@ describe("TodoOverlay — overflow collapse", () => {
 	});
 
 	it("does not engage overflow at exactly 11 visible tasks", async () => {
-		// 11 tasks → all fit in 12 lines (heading + 11). No summary row.
+		// 11 tasks → all fit (heading + 11 = 12), plus trailing spacer = 13. No summary row.
 		const actions: Array<{ action: TaskAction; [k: string]: unknown }> = [];
 		for (let i = 1; i <= 11; i++) actions.push({ action: "create", subject: `t${i}` });
 		const { widget } = await setup(actions);
 		const lines = widget.render(200);
-		expect(lines).toHaveLength(12);
-		// Last row is a task row, not a summary
-		expect(lines[lines.length - 1]).not.toContain("+");
-		expect(lines[lines.length - 1]).toContain("└─");
+		expect(lines).toHaveLength(13);
+		// Last row is the trailing spacer; the row above is the last task row
+		expect(lines[lines.length - 1]).toBe("");
+		expect(lines[lines.length - 2]).not.toContain("+");
+		expect(lines[lines.length - 2]).toContain("└─");
+	});
+
+	it("follows Pi's tool-output expansion mode and renders every task", async () => {
+		let toolsExpanded = false;
+		const actions: Array<{ action: TaskAction; [k: string]: unknown }> = [];
+		for (let i = 1; i <= 17; i++) actions.push({ action: "create", subject: `t${i}` });
+		const { widget } = await setup(actions, { getToolsExpanded: () => toolsExpanded });
+
+		const collapsed = widget.render(200).join("\n");
+		expect(collapsed).toContain("+7 more");
+		expect(collapsed).not.toContain("t17");
+
+		toolsExpanded = true;
+		const expanded = widget.render(200);
+		expect(expanded).toHaveLength(19); // heading + 17 tasks + trailing spacer
+		expect(expanded.join("\n")).toContain("t17");
+		expect(expanded.join("\n")).not.toContain(" more");
+		expect(expanded[expanded.length - 2]).toContain("└─");
+
+		toolsExpanded = false;
+		expect(widget.render(200).join("\n")).toContain("+7 more");
+	});
+
+	it("keeps the configured budget when the host has no expansion-state API", async () => {
+		const actions: Array<{ action: TaskAction; [k: string]: unknown }> = [];
+		for (let i = 1; i <= 17; i++) actions.push({ action: "create", subject: `t${i}` });
+		const { widget } = await setup(actions);
+		expect(widget.render(200).join("\n")).toContain("+7 more");
+	});
+});
+
+describe("TodoOverlay — collapse/expand render", () => {
+	it("collapsed view returns exactly three lines: heading with (completed/total), expand hint, trailing spacer", async () => {
+		const { widget, overlay } = await setup([
+			{ action: "create", subject: "a" },
+			{ action: "create", subject: "b" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		overlay.toggleCollapse(); // collapse
+		const lines = widget.render(200);
+		expect(lines).toHaveLength(3); // heading + hint + trailing spacer
+		expect(lines[0]).toContain("Todos (1/2)");
+		expect(lines[1]).toContain("└─");
+		expect(lines[1]).toContain("ctrl+shift+t to expand");
+		expect(lines[2]).toBe(""); // trailing spacer
+	});
+
+	it("uncollapsed (default) yields the unchanged full render (regression-safe)", async () => {
+		const { widget } = await setup([
+			{ action: "create", subject: "a" },
+			{ action: "create", subject: "b" },
+		]);
+		// Full render: heading + 2 tasks + trailing spacer = 4 lines
+		const lines = widget.render(200);
+		expect(lines).toHaveLength(4);
+		expect(lines.some((l) => l.includes("a"))).toBe(true);
+		expect(lines.some((l) => l.includes("b"))).toBe(true);
+	});
+
+	it("collapsed render short-circuits before completed-display tracking (no task queued for hide while collapsed)", async () => {
+		const { widget, overlay } = await setup([
+			{ action: "create", subject: "done" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		overlay.toggleCollapse(); // collapse
+		widget.render(200); // collapsed render — must NOT queue the completed task
+		// Draining the pending-hide set is a no-op because nothing was queued.
+		overlay.hideCompletedTasksFromPreviousTurn();
+		overlay.toggleCollapse(); // expand
+		// The completed task is still visible: the collapsed render never queued it,
+		// so the drain above couldn't hide it.
+		const expanded = widget.render(200).join("\n");
+		expect(expanded).toContain("done");
+		expect(expanded).toContain("✓");
+	});
+});
+
+describe("TodoOverlay — collapse hint resolves the key from config", () => {
+	// resolveCollapseKey() runs at render time (per-render, like the row budget), so
+	// the config MUST be written before widget.render(). setup() itself doesn't read
+	// the collapse key — it constructs the overlay directly.
+
+	it("renders the configured key in the collapsed hint (alt+o)", async () => {
+		writeConfigFile(JSON.stringify({ collapseKey: "alt+o" }));
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse(); // collapse
+		const lines = widget.render(200);
+		expect(lines[1]).toContain("alt+o to expand");
+		// The placeholder is always spliced — never leaks the raw {key} token.
+		expect(lines[1]).not.toContain("{key}");
+		expect(lines[1]).not.toContain("ctrl+shift+t");
+	});
+
+	it("renders the default key in the collapsed hint when config is missing", async () => {
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse(); // collapse
+		const lines = widget.render(200);
+		expect(lines[1]).toContain("ctrl+shift+t to expand");
+		expect(lines[1]).not.toContain("{key}");
+	});
+
+	it("renders the default key when the configured spec is invalid", async () => {
+		writeConfigFile(JSON.stringify({ collapseKey: "ctr+t" }));
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse(); // collapse
+		const lines = widget.render(200);
+		expect(lines[1]).toContain("ctrl+shift+t to expand");
+	});
+
+	it("renders a static collapsed label — not the sentinel — when the key resolves to off", async () => {
+		// Reachable mid-session: collapse with a bound key, then edit the config to
+		// "off" without /reload. The per-render resolver returns the sentinel; the
+		// hint must not splice it into the {key} placeholder ("off to expand").
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse(); // collapse
+		writeConfigFile(JSON.stringify({ collapseKey: "off" }));
+		const lines = widget.render(200);
+		expect(lines[1]).toContain("collapsed");
+		expect(lines[1]).not.toContain("off to expand");
+		expect(lines[1]).not.toContain("{key}");
 	});
 });
 
@@ -264,7 +408,7 @@ describe("TodoOverlay — width truncation", () => {
 			{ action: "create", subject: "second" } as never,
 			undefined as never,
 			undefined as never,
-			{} as never,
+			createMockCtx() as never,
 		);
 		const out2 = widget.render(200).join("\n");
 		expect(out2).toContain("first");

@@ -11,16 +11,44 @@ vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@earendil-works/pi-ai")>();
 	return {
 		...actual,
-		completeSimple: vi.fn(),
 		getSupportedThinkingLevels: vi.fn(() => ["off", "minimal", "low", "medium", "high"]),
 	};
 });
 
-import { type AssistantMessage, completeSimple, type UserMessage } from "@earendil-works/pi-ai";
+// completeSimple lives on /compat since pi 0.80 (see test/setup.ts).
+vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@earendil-works/pi-ai/compat")>();
+	return {
+		...actual,
+		completeSimple: vi.fn(),
+	};
+});
+
+// Mock the loader so the overflow gate is controllable independently of the
+// real isContextOverflow regex behavior. loadCompleteSimple is routed to the
+// shared completeSimple spy (above) so existing mockResolvedValueOnce chains
+// keep working; loadIsContextOverflow defaults to undefined (legacy host, no
+// retry) and is overridden per-test in the overflow-retry suite.
+// getRuntimeCompleteSimple stays REAL: mock hosts have no `runtime` slot, so
+// tests default to the legacy path, and runtime-facade tests opt in by
+// defining a `runtime` slot on ctx.modelRegistry.
+vi.mock("./pi-compat.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./pi-compat.js")>();
+	return {
+		getRuntimeCompleteSimple: actual.getRuntimeCompleteSimple,
+		loadCompleteSimple: vi.fn(),
+		loadIsContextOverflow: vi.fn(),
+	};
+});
+
+import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	assistantMessageText,
 	BTW_STATE_KEY,
 	BTW_SYSTEM_PROMPT,
+	type BtwTurn,
+	buildBtwMessages,
 	CROSS_SESSION_HINT_LIMIT,
 	clearSessionHistory,
 	executeBtw,
@@ -30,11 +58,10 @@ import {
 	registerMessageEndSnapshot,
 	userMessageText,
 } from "./btw.js";
+import { loadCompleteSimple, loadIsContextOverflow } from "./pi-compat.js";
 
-// The exact phrase pi-core's ExtensionRunner throws from an invalidated proxy.
-const STALE_CTX_MESSAGE =
-	"This extension ctx is stale after session replacement or reload. " +
-	"Do not use a captured pi or command ctx after ctx.newSession().";
+// Pins the substring `isStaleCtxError` matches in pi-core's invalidated-proxy error.
+const STALE_CTX_MESSAGE = "This extension ctx is stale after session replacement or reload.";
 
 function makeCompletionResponse(input: {
 	text?: string;
@@ -52,6 +79,14 @@ function makeCompletionResponse(input: {
 
 beforeEach(() => {
 	vi.mocked(completeSimple).mockReset();
+	vi.mocked(loadCompleteSimple).mockReset();
+	vi.mocked(loadIsContextOverflow).mockReset();
+	// Route the loader to the shared completeSimple spy so existing
+	// mockResolvedValueOnce(makeCompletionResponse(...)) chains keep working.
+	vi.mocked(loadCompleteSimple).mockResolvedValue(completeSimple as never);
+	// Default: legacy host (isContextOverflow absent) → no retry. Per-test
+	// overrides set a real overflowFn to exercise the gate.
+	vi.mocked(loadIsContextOverflow).mockResolvedValue(undefined);
 	delete (globalThis as Record<symbol, unknown>)[BTW_STATE_KEY];
 });
 
@@ -143,8 +178,8 @@ describe("executeBtw — ok path", () => {
 		ctx.model = { provider: "a", id: "m" } as never;
 		vi.mocked(completeSimple).mockResolvedValueOnce(makeCompletionResponse({ text: "answer text" }) as never);
 		const r = await executeBtw("question", ctx, new AbortController());
-		expect(r.ok).toBe(true);
-		if (!r.ok) throw new Error("unexpected");
+		expect(r.kind).toBe("success");
+		if (r.kind !== "success") throw new Error("unexpected");
 		expect(r.answer).toBe("answer text");
 		expect(r.userMessage.content).toEqual([{ type: "text", text: "question" }]);
 		expect(r.assistantMessage).toBeDefined();
@@ -156,7 +191,7 @@ describe("executeBtw — error branches", () => {
 		const ctx = createMockCtx();
 		ctx.model = undefined;
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r).toMatchObject({ ok: false, error: "/btw requires an active model" });
+		expect(r).toMatchObject({ kind: "error", error: "/btw requires an active model" });
 	});
 	it("returns error when getApiKeyAndHeaders is not ok", async () => {
 		const ctx = createMockCtx();
@@ -166,12 +201,12 @@ describe("executeBtw — error branches", () => {
 			getApiKeyAndHeaders: vi.fn(async () => ({ ok: false, error: "bad creds" })),
 		} as never;
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r.ok).toBe(false);
-		if (r.ok || "aborted" in r) throw new Error("unexpected");
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
 		expect(r.error).toContain("misconfigured");
 		expect(r.error).toContain("bad creds");
 	});
-	it("returns error when apiKey absent", async () => {
+	it("returns error when apiKey absent and the host has no runtime facade", async () => {
 		const ctx = createMockCtx();
 		ctx.model = { provider: "a", id: "m" } as never;
 		ctx.modelRegistry = {
@@ -179,16 +214,57 @@ describe("executeBtw — error branches", () => {
 			getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "", headers: {} })),
 		} as never;
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r.ok).toBe(false);
-		if (r.ok || "aborted" in r) throw new Error("unexpected");
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
 		expect(r.error).toContain("no API key");
+	});
+	it("proceeds via the runtime facade when OAuth auth resolves ok without an apiKey", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m" } as never;
+		const runtime = {
+			completeSimple: vi.fn((..._args: unknown[]) =>
+				Promise.resolve(makeCompletionResponse({ text: "oauth answer" })),
+			),
+		};
+		// OAuth-backed providers (e.g. kimi-coding) resolve ok with no literal key;
+		// credentials are applied inside Pi's runtime facade. Pi keeps ModelRuntime
+		// behind ModelRegistry's runtime-private slot — keep it non-enumerable to
+		// mirror that host shape.
+		ctx.modelRegistry = {
+			...ctx.modelRegistry,
+			getApiKeyAndHeaders: vi.fn(async () => ({ ok: true })),
+		} as never;
+		Object.defineProperty(ctx.modelRegistry, "runtime", { value: runtime });
+		const r = await executeBtw("q", ctx, new AbortController());
+		expect(r.kind).toBe("success");
+		expect(completeSimple).not.toHaveBeenCalled();
+		expect(runtime.completeSimple).toHaveBeenCalledTimes(1);
+		const options = runtime.completeSimple.mock.calls[0]?.[2] as Record<string, unknown> | undefined;
+		expect(options).not.toHaveProperty("apiKey");
+		expect(options).not.toHaveProperty("headers");
+		expect(options).toHaveProperty("signal");
+	});
+	it("prefers the runtime facade over the legacy path even when an apiKey exists", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m" } as never;
+		const runtime = {
+			completeSimple: vi.fn((..._args: unknown[]) =>
+				Promise.resolve(makeCompletionResponse({ text: "runtime answer" })),
+			),
+		};
+		Object.defineProperty(ctx.modelRegistry, "runtime", { value: runtime });
+		const r = await executeBtw("q", ctx, new AbortController());
+		expect(r.kind).toBe("success");
+		expect(completeSimple).not.toHaveBeenCalled();
+		const options = runtime.completeSimple.mock.calls[0]?.[2] as Record<string, unknown> | undefined;
+		expect(options).not.toHaveProperty("apiKey");
 	});
 	it("returns aborted when stopReason=aborted", async () => {
 		const ctx = createMockCtx();
 		ctx.model = { provider: "a", id: "m" } as never;
 		vi.mocked(completeSimple).mockResolvedValueOnce(makeCompletionResponse({ stopReason: "aborted" }) as never);
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r).toMatchObject({ ok: false, aborted: true });
+		expect(r).toMatchObject({ kind: "aborted" });
 	});
 	it("returns error when stopReason=error", async () => {
 		const ctx = createMockCtx();
@@ -197,8 +273,8 @@ describe("executeBtw — error branches", () => {
 			makeCompletionResponse({ stopReason: "error", errorMessage: "remote 500" }) as never,
 		);
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r.ok).toBe(false);
-		if (r.ok || "aborted" in r) throw new Error("unexpected");
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
 		expect(r.error).toContain("remote 500");
 	});
 	it("returns error when response has no text content", async () => {
@@ -206,8 +282,8 @@ describe("executeBtw — error branches", () => {
 		ctx.model = { provider: "a", id: "m" } as never;
 		vi.mocked(completeSimple).mockResolvedValueOnce(makeCompletionResponse({ stopReason: "done" }) as never);
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r.ok).toBe(false);
-		if (r.ok || "aborted" in r) throw new Error("unexpected");
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
 		expect(r.error).toContain("no text content");
 	});
 	it("translates controller.signal.aborted on thrown error to aborted=true", async () => {
@@ -217,15 +293,15 @@ describe("executeBtw — error branches", () => {
 		controller.abort();
 		vi.mocked(completeSimple).mockRejectedValueOnce(new Error("abort"));
 		const r = await executeBtw("q", ctx, controller);
-		expect(r).toMatchObject({ ok: false, aborted: true });
+		expect(r).toMatchObject({ kind: "aborted" });
 	});
 	it("wraps unknown throws as errCallThrew", async () => {
 		const ctx = createMockCtx();
 		ctx.model = { provider: "a", id: "m" } as never;
 		vi.mocked(completeSimple).mockRejectedValueOnce(new Error("boom"));
 		const r = await executeBtw("q", ctx, new AbortController());
-		expect(r.ok).toBe(false);
-		if (r.ok || "aborted" in r) throw new Error("unexpected");
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
 		expect(r.error).toContain("call threw");
 		expect(r.error).toContain("boom");
 	});
@@ -278,6 +354,170 @@ describe("executeBtw — branch threading", () => {
 			return makeCompletionResponse({ text: "ok" });
 		}) as never);
 		await executeBtw("q", ctx, new AbortController());
+	});
+});
+
+describe("buildBtwMessages — history cap engagement", () => {
+	// createMockCtx's session file key — matches the clearSessionHistory test above.
+	const SESSION_FILE = "/tmp/test-session.jsonl";
+	const histToks = (n: number): string => "x".repeat(n * 4);
+	// Turn of ~`cost` estimated tokens (tag adds a negligible handful of chars) whose
+	// text carries `tag` so presence/absence is assertable on the assembled messages.
+	const histTurn = (cost: number, tag: string): BtwTurn => ({
+		userMessage: makeUserMessage(`${tag} ${histToks(cost)}`),
+		assistantMessage: makeAssistantMessage({}),
+	});
+	// Three ~3000-token turns ≈ 9000 total: over the 8192 cap by exactly one oldest turn.
+	const threeTurns = (): BtwTurn[] => [histTurn(3000, "h-old"), histTurn(3000, "h-mid"), histTurn(3000, "h-new")];
+	function seedHistory(turns: BtwTurn[]): void {
+		(globalThis as Record<symbol, unknown>)[BTW_STATE_KEY] = {
+			histories: new Map([[SESSION_FILE, turns]]),
+			snapshots: new Map(),
+		};
+	}
+
+	it("keeps the FULL history past the 8192 cap when the whole request fits the window", () => {
+		seedHistory(threeTurns());
+		const ctx = createMockCtx({ branch: buildSessionEntries([makeUserMessage("branch-turn")]) });
+		ctx.model = { provider: "a", id: "m", contextWindow: 200000, maxTokens: 8192 } as never;
+		const built = buildBtwMessages(ctx, makeUserMessage("q"));
+		expect(built.droppedTurns).toBe(0);
+		expect(JSON.stringify(built.messages)).toContain("h-old");
+		// 1 branch message + 3×2 history messages + the question — nothing capped away.
+		expect(built.messages).toHaveLength(8);
+	});
+
+	it("caps history (drops the oldest turn) once the full-history request is over budget", () => {
+		seedHistory(threeTurns());
+		// Branch ≈ 4800 estimated tokens (1.2× no-anchor factor). available = 30000 − 1000 −
+		// 16384 = 12616: full history (~9000) leaves ~3400 — branch cannot fit; capped
+		// history (~6000) frees ~6400 — branch fits without trimming.
+		const ctx = createMockCtx({ branch: buildSessionEntries([makeUserMessage(histToks(4000))]) });
+		ctx.model = { provider: "a", id: "m", contextWindow: 30000, maxTokens: 1000 } as never;
+		const built = buildBtwMessages(ctx, makeUserMessage("q"));
+		expect(built.droppedTurns).toBe(1);
+		const text = JSON.stringify(built.messages);
+		expect(text).not.toContain("h-old");
+		expect(text).toContain("h-mid");
+		expect(text).toContain("h-new");
+	});
+
+	it("overflow-retry path (explicit keepBudget) always uses the capped history", () => {
+		seedHistory(threeTurns());
+		const ctx = createMockCtx({ branch: buildSessionEntries([makeUserMessage("branch-turn")]) });
+		ctx.model = { provider: "a", id: "m", contextWindow: 200000, maxTokens: 8192 } as never;
+		// Same window as the parity test above — only the explicit keepBudget differs.
+		const built = buildBtwMessages(ctx, makeUserMessage("q"), 50);
+		expect(built.droppedTurns).toBe(1);
+		expect(built.keepBudget).toBe(50);
+	});
+});
+
+describe("executeBtw — overflow retry", () => {
+	it("retries exactly once on first-call overflow, then succeeds with the retry's answer", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m", contextWindow: 8192 } as never;
+		const overflowFn = vi.fn(() => true);
+		vi.mocked(loadIsContextOverflow).mockResolvedValue(overflowFn as never);
+		vi.mocked(completeSimple)
+			.mockResolvedValueOnce(
+				makeCompletionResponse({ stopReason: "error", errorMessage: "prompt is too long" }) as never,
+			)
+			.mockResolvedValueOnce(makeCompletionResponse({ text: "retry answer" }) as never);
+
+		const r = await executeBtw("q", ctx, new AbortController());
+
+		expect(r.kind).toBe("success");
+		if (r.kind !== "success") throw new Error("unexpected");
+		expect(r.answer).toBe("retry answer");
+		expect(completeSimple).toHaveBeenCalledTimes(2);
+		// The retry rebuilt the context: the second call received a freshly built
+		// messages array (buildBtwMessages returns a new spread each call).
+		const calls = vi.mocked(completeSimple).mock.calls as Array<[unknown, { messages: unknown[] }, unknown]>;
+		expect(calls[1][1].messages).not.toBe(calls[0][1].messages);
+	});
+
+	it("does not retry when the first call is aborted (aborted arm, single call)", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m", contextWindow: 8192 } as never;
+		const overflowFn = vi.fn(() => true);
+		vi.mocked(loadIsContextOverflow).mockResolvedValue(overflowFn as never);
+		vi.mocked(completeSimple).mockResolvedValueOnce(makeCompletionResponse({ stopReason: "aborted" }) as never);
+
+		const r = await executeBtw("q", ctx, new AbortController());
+
+		expect(r).toMatchObject({ kind: "aborted" });
+		expect(completeSimple).toHaveBeenCalledTimes(1);
+		expect(overflowFn).not.toHaveBeenCalled();
+	});
+
+	it("returns the aborted arm when the retry itself is aborted", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m", contextWindow: 8192 } as never;
+		vi.mocked(loadIsContextOverflow).mockResolvedValue(vi.fn(() => true) as never);
+		vi.mocked(completeSimple)
+			.mockResolvedValueOnce(
+				makeCompletionResponse({ stopReason: "error", errorMessage: "prompt is too long" }) as never,
+			)
+			.mockResolvedValueOnce(makeCompletionResponse({ stopReason: "aborted" }) as never);
+
+		const r = await executeBtw("q", ctx, new AbortController());
+
+		expect(r).toMatchObject({ kind: "aborted" });
+		expect(completeSimple).toHaveBeenCalledTimes(2);
+	});
+
+	it("falls through to the error arm when the retry also overflows (no third call)", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m", contextWindow: 8192 } as never;
+		vi.mocked(loadIsContextOverflow).mockResolvedValue(vi.fn(() => true) as never);
+		vi.mocked(completeSimple)
+			.mockResolvedValueOnce(
+				makeCompletionResponse({ stopReason: "error", errorMessage: "prompt is too long" }) as never,
+			)
+			.mockResolvedValueOnce(
+				makeCompletionResponse({ stopReason: "error", errorMessage: "prompt is too long" }) as never,
+			);
+
+		const r = await executeBtw("q", ctx, new AbortController());
+
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
+		expect(r.error).toContain("call failed");
+		expect(completeSimple).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not retry on a non-overflow error (overflowFn returns false)", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m", contextWindow: 8192 } as never;
+		vi.mocked(loadIsContextOverflow).mockResolvedValue(vi.fn(() => false) as never);
+		vi.mocked(completeSimple).mockResolvedValueOnce(
+			makeCompletionResponse({ stopReason: "error", errorMessage: "remote 500" }) as never,
+		);
+
+		const r = await executeBtw("q", ctx, new AbortController());
+
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
+		expect(r.error).toContain("remote 500");
+		expect(completeSimple).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not retry on a legacy host where isContextOverflow is absent (undefined)", async () => {
+		const ctx = createMockCtx();
+		ctx.model = { provider: "a", id: "m", contextWindow: 8192 } as never;
+		vi.mocked(loadIsContextOverflow).mockResolvedValue(undefined);
+		// Even an overflow-looking error does not trigger a retry.
+		vi.mocked(completeSimple).mockResolvedValueOnce(
+			makeCompletionResponse({ stopReason: "error", errorMessage: "prompt is too long" }) as never,
+		);
+
+		const r = await executeBtw("q", ctx, new AbortController());
+
+		expect(r.kind).toBe("error");
+		if (r.kind !== "error") throw new Error("unexpected");
+		expect(r.error).toContain("call failed");
+		expect(completeSimple).toHaveBeenCalledTimes(1);
 	});
 });
 

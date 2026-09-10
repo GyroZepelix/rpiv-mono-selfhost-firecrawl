@@ -80,7 +80,7 @@ export interface ProviderConfigChange {
 // touching the orchestrator.
 //
 //   envVar          — the API-key env var (omit if the provider has no key)
-//   baseUrlEnvVar   — the URL env var (set for self-hosted providers)
+//   baseUrlEnvVar   — the URL env var (set for providers with configurable endpoints)
 //   defaultBaseUrl  — fallback URL when neither env nor config supplies one
 //   configure       — interactive setup; if present, /web-tools
 //                     dispatches here instead of the default single-key prompt

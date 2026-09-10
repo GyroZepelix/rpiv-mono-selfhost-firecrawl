@@ -3,6 +3,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import { displayLabel } from "../../state/i18n-bridge.js";
 import type { QuestionData } from "../../tool/types.js";
 import type { StatefulView } from "../stateful-view.js";
+import { renderInlineInputRow } from "./inline-input.js";
 
 const ACTIVE_POINTER = "❯ ";
 const INACTIVE_POINTER = "  ";
@@ -16,8 +17,19 @@ const CONTINUATION_INDENT = "  ";
 
 export const MULTI_SUBMIT_LABEL = "Submit";
 
+export interface MultiSelectOtherRowProps {
+	/** The "Type something." row is the focused row (optionIndex === options.length). */
+	active: boolean;
+	/** `state.inputMode` — true once the row has focus and keystrokes append to the buffer. */
+	inputMode: boolean;
+	/** Live inline-input buffer (read from `runtime.inputBuffer` / `ctx.inputBuffer`). */
+	inputBuffer: string;
+	inputCursorOffset: number | undefined;
+}
+
 export interface MultiSelectViewProps {
 	rows: ReadonlyArray<{ checked: boolean; active: boolean }>;
+	other: MultiSelectOtherRowProps;
 	nextActive: boolean;
 	nextLabel: string;
 }
@@ -26,108 +38,152 @@ export interface MultiSelectViewProps {
  * Renders the multi-select option list (one row per option — pointer + checkbox + label —
  * plus zero or more wrapped continuation lines per description).
  *
- * `naturalHeight(width)` is state-INDEPENDENT (depends only on theme glyph widths,
- * question.options, and width) so the host can compute a stable globalContentHeight
- * without rendering. `naturalHeight(w) === render(w).length` for every props.
+ * `naturalHeight(width)` is the rendered height for the current props. It grows when
+ * the custom-answer editor contains logical or visually wrapped lines, allowing the
+ * dialog to reserve exactly the space the active draft needs.
  *
- * `setProps(props)` is a pure field reassignment — no render, no invalidate side effects.
+ * One width-keyed layout supplies rendering, height, and focused-row measurement;
+ * `setProps` and `invalidate` discard that derived cache.
  */
+interface MultiSelectLayout {
+	lines: string[];
+	focusedRange: [number, number];
+}
+
+/** Mutable row accumulator threaded through the append helpers during a layout miss. */
+interface MultiSelectBuild {
+	lines: string[];
+	focusedRange: [number, number];
+}
+
 export class MultiSelectView implements StatefulView<MultiSelectViewProps> {
 	private props: MultiSelectViewProps;
+	private cachedLayout: { width: number; value: MultiSelectLayout } | undefined;
 
 	constructor(
 		private readonly theme: Theme,
 		private readonly question: QuestionData,
 	) {
-		this.props = { rows: [], nextActive: false, nextLabel: displayLabel("next") };
+		this.props = {
+			rows: [],
+			other: { active: false, inputMode: false, inputBuffer: "", inputCursorOffset: undefined },
+			nextActive: false,
+			nextLabel: displayLabel("next"),
+		};
 	}
 
 	setProps(props: MultiSelectViewProps): void {
 		this.props = props;
+		this.cachedLayout = undefined;
 	}
 
 	handleInput(_data: string): void {}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.cachedLayout = undefined;
+	}
 
 	render(width: number): string[] {
-		const lines: string[] = [];
-		const prefixWidth = this.prefixVisibleWidth();
-		const contentWidth = Math.max(1, width - prefixWidth);
-		const numberWidth = String(Math.max(1, this.question.options.length)).length;
+		return this.layout(width).lines;
+	}
+
+	focusedItemRowRange(width: number): [number, number] {
+		return this.layout(width).focusedRange;
+	}
+
+	naturalHeight(width: number): number {
+		return this.layout(width).lines.length;
+	}
+
+	private layout(width: number): MultiSelectLayout {
+		if (this.cachedLayout?.width === width) return this.cachedLayout.value;
+
+		const build: MultiSelectBuild = { lines: [], focusedRange: [0, 0] };
+		const contentWidth = Math.max(1, width - this.prefixVisibleWidth());
+		const numberWidth = String(Math.max(1, this.question.options.length + 1)).length;
+
+		this.appendOptionRows(build, width, contentWidth, numberWidth);
+
+		const otherStart = build.lines.length;
+		build.lines.push(...this.renderOtherRow(contentWidth, numberWidth));
+		if (this.props.other.active) build.focusedRange = [otherStart, build.lines.length];
+
+		this.appendNextRow(build, width);
+
+		const value = { lines: build.lines, focusedRange: build.focusedRange };
+		this.cachedLayout = { width, value };
+		return value;
+	}
+
+	private appendOptionRows(build: MultiSelectBuild, width: number, contentWidth: number, numberWidth: number): void {
 		for (let i = 0; i < this.question.options.length; i++) {
 			const opt = this.question.options[i];
 			const row = this.props.rows[i];
 			if (!opt || !row) continue;
+			const start = build.lines.length;
 			const pointer = row.active ? this.theme.fg("accent", ACTIVE_POINTER) : INACTIVE_POINTER;
-			// Checked uses the same `accent` hue as the active-row label so checked rows read
-			// as "selected" rather than "success" — matches the visual rhythm of the rest of
-			// the dialog (active pointer, label, picker rows are all accent).
+			// Checked and active rows share the accent hue, matching the dialog's selection rhythm.
 			const box = row.checked ? this.theme.fg("accent", CHECKED) : this.theme.fg("muted", UNCHECKED);
 			const label = truncateToWidth(opt.label, contentWidth, "…");
 			const styledLabel = row.active ? this.theme.fg("accent", this.theme.bold(label)) : label;
-			const num = String(i + 1).padStart(numberWidth, " ");
-			const line = `${pointer}${num}${NUMBER_SEPARATOR}${box}${BOX_LABEL_GAP}${styledLabel}`;
-			lines.push(truncateToWidth(line, width, ""));
+			const number = String(i + 1).padStart(numberWidth, " ");
+			build.lines.push(
+				truncateToWidth(`${pointer}${number}${NUMBER_SEPARATOR}${box}${BOX_LABEL_GAP}${styledLabel}`, width, ""),
+			);
 			if (opt.description) {
-				const wrapped = wrapTextWithAnsi(opt.description, contentWidth);
-				for (const segment of wrapped) {
-					lines.push(CONTINUATION_INDENT + this.theme.fg("muted", segment));
+				for (const segment of wrapTextWithAnsi(opt.description, contentWidth)) {
+					build.lines.push(CONTINUATION_INDENT + this.theme.fg("muted", segment));
 				}
 			}
+			if (row.active) build.focusedRange = [start, build.lines.length];
 		}
+	}
+
+	private appendNextRow(build: MultiSelectBuild, width: number): void {
+		const nextStart = build.lines.length;
 		const nextPointer = this.props.nextActive ? this.theme.fg("accent", ACTIVE_POINTER) : INACTIVE_POINTER;
 		const nextLabel = this.props.nextActive
 			? this.theme.fg("accent", this.theme.bold(this.props.nextLabel))
 			: this.props.nextLabel;
-		lines.push(truncateToWidth(`${nextPointer}${nextLabel}`, width, ""));
-		return lines;
+		build.lines.push(truncateToWidth(`${nextPointer}${nextLabel}`, width, ""));
+		if (this.props.nextActive) build.focusedRange = [nextStart, build.lines.length];
 	}
 
-	/**
-	 * Returns the [startRow, endRow) range of the active (focused) row within
-	 * `render(width)`. Labels are always 1 row (truncated); descriptions wrap.
-	 */
-	focusedItemRowRange(width: number): [number, number] {
-		const prefixWidth = this.prefixVisibleWidth();
-		const contentWidth = Math.max(1, width - prefixWidth);
-		let row = 0;
-		for (let i = 0; i < this.question.options.length; i++) {
-			const opt = this.question.options[i];
-			const r = this.props.rows[i];
-			if (!opt || !r) continue;
-			const itemHeight = 1 + (opt.description ? wrapTextWithAnsi(opt.description, contentWidth).length : 0);
-			if (r.active) {
-				return [row, row + itemHeight];
-			}
-			row += itemHeight;
-		}
-		if (this.props.nextActive) {
-			return [row, row + 1];
-		}
-		return [0, 0];
-	}
+	private renderOtherRow(contentWidth: number, numberWidth: number): string[] {
+		const other = this.props.other;
+		const pointer = other.active ? this.theme.fg("accent", ACTIVE_POINTER) : INACTIVE_POINTER;
+		const box = this.theme.fg("muted", UNCHECKED);
+		const number = String(this.question.options.length + 1).padStart(numberWidth, " ");
+		const rowPrefix = `${pointer}${number}${NUMBER_SEPARATOR}${box}${BOX_LABEL_GAP}`;
+		const continuationPrefix = " ".repeat(visibleWidth(rowPrefix));
+		const selectedText = (text: string) => this.theme.fg("accent", this.theme.bold(text));
 
-	naturalHeight(width: number): number {
-		const contentWidth = Math.max(1, width - this.prefixVisibleWidth());
-		let total = 0;
-		for (const opt of this.question.options) {
-			if (!opt) continue;
-			total += 1; // row line
-			if (opt.description) {
-				total += wrapTextWithAnsi(opt.description, contentWidth).length;
-			}
+		if (other.active && other.inputMode) {
+			return renderInlineInputRow({
+				buffer: other.inputBuffer,
+				cursorOffset: other.inputCursorOffset,
+				rowPrefix,
+				continuationPrefix,
+				contentWidth,
+				selectedText,
+			});
 		}
-		return total + 1; // Next sentinel row (no description; never wraps).
+
+		return wrapTextWithAnsi(other.inputBuffer || displayLabel("other"), contentWidth).map((segment, index) => {
+			const line = `${index === 0 ? rowPrefix : continuationPrefix}${segment}`;
+			return other.active ? selectedText(line) : line;
+		});
 	}
 
 	private prefixVisibleWidth(): number {
 		// Canonical prefix for OPTION rows: INACTIVE_POINTER + numberWidth digits + NUMBER_SEPARATOR
 		// + UNCHECKED + BOX_LABEL_GAP. State-independent because ACTIVE/INACTIVE pointer share
 		// visibleWidth, CHECKED/UNCHECKED share visibleWidth, and numberWidth is constant per question.
-		// The Next sentinel uses a bare `pointer + "Next"` shape — its width never exceeds this prefix
-		// at any reasonable terminal width, so it's safe to leave it out of the canonical computation.
-		const numberWidth = String(Math.max(1, this.question.options.length)).length;
+		// The number column fits `options.length + 1` so the "Type something." row's N+1 number
+		// is never clipped. The Next sentinel uses a bare `pointer + "Next"` shape — its width
+		// never exceeds this prefix at any reasonable terminal width, so it's safe to leave it
+		// out of the canonical computation.
+		const numberWidth = String(Math.max(1, this.question.options.length + 1)).length;
 		return (
 			visibleWidth(INACTIVE_POINTER) + numberWidth + visibleWidth(`${NUMBER_SEPARATOR}${UNCHECKED}${BOX_LABEL_GAP}`)
 		);

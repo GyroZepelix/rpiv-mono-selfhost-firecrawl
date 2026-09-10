@@ -4,6 +4,14 @@ description: Regenerate the [Unreleased] section of every affected CHANGELOG.md 
 argument-hint: [--since <ref>]
 allowed-tools: Bash(git *), Read, Edit
 shell-timeout: 10
+contract:
+  produces:
+    kind: side-effect
+    meta:
+      effect: changelog-edit
+  consumes:
+    meta:
+      world: git-history
 ---
 
 # Generate CHANGELOG entries
@@ -147,6 +155,7 @@ What this example demonstrates:
 2. Print the proposed `[Unreleased]` body for each affected CHANGELOG, in full.
 3. Call `ask_user_question`:
    - Question: "Apply regenerated `[Unreleased]` to {N} CHANGELOG(s)?"
+   - `Header` is capped at ≤16 characters (`MAX_HEADER_LENGTH = 16` — longer values are rejected).
    - Header: "Changelog"
    - Options:
      - "Apply (Recommended)" — Write the regenerated sections to disk. Refinement, if needed, happens afterward in normal chat (`Edit` tool) or via `git restore` to roll back.

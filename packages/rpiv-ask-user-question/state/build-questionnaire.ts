@@ -1,5 +1,5 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { Input } from "@earendil-works/pi-tui";
+import { Editor, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import type { QuestionData } from "../tool/types.js";
 import {
 	type BoundGlobalBinding,
@@ -7,7 +7,6 @@ import {
 	globalBinding,
 	perTabBinding,
 } from "../view/component-binding.js";
-import { ChatRowView } from "../view/components/chat-row-view.js";
 import { MultiSelectView } from "../view/components/multi-select-view.js";
 import { OptionListView } from "../view/components/option-list-view.js";
 import { PreviewBlockRenderer } from "../view/components/preview/preview-block-renderer.js";
@@ -21,11 +20,9 @@ import { DialogView } from "../view/dialog-builder.js";
 import { QuestionnairePropsAdapter } from "../view/props-adapter.js";
 import type { StatefulView } from "../view/stateful-view.js";
 import type { TabBodyHeights, TabComponents } from "../view/tab-components.js";
-import { displayLabel } from "./i18n-bridge.js";
 import type { PerTabSelector } from "./selectors/contract.js";
 import { selectActivePreviewPaneIndex } from "./selectors/derivations.js";
 import {
-	selectChatRowProps,
 	selectDialogProps,
 	selectMultiSelectProps,
 	selectOptionListProps,
@@ -36,19 +33,26 @@ import {
 import type { QuestionnaireState } from "./state.js";
 
 export interface QuestionnaireBuildConfig {
-	tui: { terminal: { columns: number; rows: number }; requestRender(): void };
+	tui: TUI;
 	theme: Theme;
 	questions: readonly QuestionData[];
 	itemsByTab: ReadonlyArray<readonly WrappingSelectItem[]>;
 	isMulti: boolean;
 	initialState: QuestionnaireState;
 	getCurrentTab: () => number;
+	/**
+	 * Resolved collapse key spec (`"ctrl+]"`, `"alt+o"`, or `"off"`). Threaded to
+	 * `DialogConfig` as construction-time config so the footer hint can name the
+	 * real key — deliberately NOT part of `QuestionnaireState`, which stays free
+	 * of runtime context.
+	 */
+	collapseKey: string;
 }
 
 export interface QuestionnaireBuilt {
 	adapter: QuestionnairePropsAdapter;
-	notesInput: Input;
-	inlineInput: Input;
+	notesInput: Editor;
+	inlineInput: Editor;
 	render: (width: number) => string[];
 	invalidate: () => void;
 }
@@ -59,10 +63,23 @@ interface HeightComputers {
 }
 
 function previewBodyHeights(pane: PreviewPane): (width: number) => TabBodyHeights {
-	return (width) => ({
-		current: pane.naturalHeight(width),
-		max: pane.maxNaturalHeight(width),
-	});
+	return (width) => {
+		const current = pane.naturalHeight(width);
+		return { current, max: Math.max(current, pane.maxNaturalHeight(width)) };
+	};
+}
+
+function editorTheme(theme: Theme): EditorTheme {
+	return {
+		borderColor: (text) => theme.fg("borderMuted", text),
+		selectList: {
+			selectedPrefix: (text) => theme.bg("selectedBg", theme.fg("accent", text)),
+			selectedText: (text) => theme.bg("selectedBg", theme.bold(text)),
+			description: (text) => theme.fg("muted", text),
+			scrollInfo: (text) => theme.fg("dim", text),
+			noMatch: (text) => theme.fg("warning", text),
+		},
+	};
 }
 
 function multiSelectBodyHeights(view: MultiSelectView): (width: number) => TabBodyHeights {
@@ -77,8 +94,8 @@ const isActiveTab: PerTabSelector<boolean> = (s, ctx) =>
 
 /**
  * Pure factory: assembles every TUI component, the props adapter, and a
- * lifecycle handle. Session-state dependencies arrive via `getCurrentTab` and
- * the `inputBuffer` cell. Initial paint is delegated to
+ * lifecycle handle. Session-state dependencies arrive via `getCurrentTab`; live
+ * custom text stays in the headless Editor. Initial paint is delegated to
  * `adapter.apply(initialState)` (called by the session at construction-end);
  * no selector is invoked here.
  */
@@ -99,12 +116,12 @@ class QuestionnaireBuilder {
 	private readonly isMulti: boolean;
 	private readonly initialState: QuestionnaireState;
 	private readonly getCurrentTab: () => number;
+	private readonly collapseKey: string;
 
 	private readonly selectTheme: WrappingSelectTheme;
 	private readonly markdownTheme = getMarkdownTheme();
-	private readonly chatRow: ChatRowView;
-	private readonly notesInput = new Input();
-	private readonly inlineInput = new Input();
+	private readonly notesInput: Editor;
+	private readonly inlineInput: Editor;
 	private readonly getTerminalWidth = () => this.tui.terminal.columns;
 	private readonly getTerminalRows = () => this.tui.terminal.rows;
 
@@ -116,12 +133,19 @@ class QuestionnaireBuilder {
 		this.isMulti = config.isMulti;
 		this.initialState = config.initialState;
 		this.getCurrentTab = config.getCurrentTab;
+		this.collapseKey = config.collapseKey;
 
 		this.selectTheme = this.makeSelectTheme();
-		this.chatRow = new ChatRowView({
-			item: { kind: "chat", label: displayLabel("chat") },
-			theme: this.selectTheme,
-		});
+		const textEditorTheme = editorTheme(this.theme);
+		this.notesInput = new Editor(this.tui, textEditorTheme);
+		this.inlineInput = new Editor(this.tui, textEditorTheme);
+		// The key router owns confirm/submit semantics; keys reaching these headless
+		// editors are text-editing only. Without this, a `tui.input.submit` match inside
+		// Editor.handleInput would run submitValue(), which resets the buffer and
+		// silently destroys the draft — no onSubmit is wired here, so the text is
+		// unrecoverable (#156).
+		this.notesInput.disableSubmit = true;
+		this.inlineInput.disableSubmit = true;
 	}
 
 	build(): QuestionnaireBuilt {
@@ -237,13 +261,13 @@ class QuestionnaireBuilder {
 				questions: this.questions,
 				tabBar,
 				notesInput: this.notesInput,
-				chatRow: this.chatRow,
 				isMulti: this.isMulti,
 				tabsByIndex: tabs,
 				submitPicker,
 				getBodyHeight: heights.global,
 				getCurrentBodyHeight: heights.current,
 				getTerminalRows: this.getTerminalRows,
+				collapseKey: this.collapseKey,
 			},
 			{ state: this.initialState, activePreviewPane: this.pickInitialActivePreview(tabs) },
 		);
@@ -256,7 +280,6 @@ class QuestionnaireBuilder {
 	): ReadonlyArray<BoundGlobalBinding> {
 		return [
 			globalBinding({ component: dialog, select: selectDialogProps }),
-			globalBinding({ component: this.chatRow, select: selectChatRowProps }),
 			...(submitPicker ? [globalBinding({ component: submitPicker, select: selectSubmitPickerProps })] : []),
 			...(tabBar ? [globalBinding({ component: tabBar, select: selectTabBarProps })] : []),
 		];

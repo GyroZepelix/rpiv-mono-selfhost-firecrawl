@@ -16,41 +16,67 @@
  */
 
 import type { StageDef, StageSchema } from "../api.js";
-import { nowIso } from "../audit.js";
+import { allocateStageNumber, currentStageRef } from "../audit.js";
+import { lifecycleCtxFromSession } from "../events.js";
 import type { Artifact } from "../handle.js";
-import { assertNever, withTimeout } from "../internal-utils.js";
-import { buildLifecycleContext, skillStageRef } from "../lifecycle.js";
-import { ERR_SCHEMA_TIMEOUT, MSG_VALIDATION_RETRY, MSG_VALIDATION_RETRY_PROMPT } from "../messages.js";
+import { assertNever, formatError, nowIso, withTimeout } from "../internal-utils.js";
+import {
+	ERR_COLLECTOR_THREW,
+	ERR_PARSER_THREW,
+	ERR_SCHEMA_TIMEOUT,
+	ERR_VALIDATE_RETRY_UNCHANGED,
+} from "../messages.js";
 import { sideEffectOutcome } from "../outcomes/index.js";
-import { finalizeOutput, type Output } from "../output.js";
-import type { CollectCtx, OutputSpec } from "../output-spec.js";
+import { finalizeOutput, type Output, outputMeta } from "../output.js";
+import type { CollectContext, Outcome } from "../output-spec.js";
+import { effectiveOutputSchemaOf } from "../stage-identity.js";
 import { type BranchEntry, readBranch } from "../transcript.js";
-import type { StageSession, WorkflowHostContext } from "../types.js";
+import type { StageSessionContext, WorkflowSessionContext } from "../types.js";
 import {
 	DEFAULT_VALIDATION_RETRIES,
 	DEFAULT_VALIDATION_RETRY_TIMEOUT_MS,
+	describeFailure,
 	MAX_VALIDATION_RETRIES,
 	MAX_VALIDATION_RETRY_TIMEOUT_MS,
 	MIN_VALIDATION_RETRIES,
 	MIN_VALIDATION_RETRY_TIMEOUT_MS,
+	runValidationRetryLoop,
 	type SchemaValidationFailure,
 	type ValidationResult,
 	validateOutputData,
 } from "../validate-output.js";
-import { handlerFor } from "./spawn.js";
+import { clampRange } from "../validation-bounds.js";
+import { resolveDigest } from "../worktree-digest.js";
+import { resendIntoChild } from "./spawn.js";
+
+/**
+ * The fatal arm shared by every extraction-stage outcome — `{ kind: "fatal";
+ * message }`. Declared four times inline before (OutputProduction,
+ * RunOutcomeResult, enforceCompletionContract, validateOrFatal); the ok arms
+ * genuinely differ (OutputProduction carries a validation-exhausted third arm;
+ * validateOrFatal's ok payload is a ValidationResult under `result`, not an
+ * Output under `output`), so a single generic `FatalOr<T>` would force a field
+ * misnomer — the fatal arm is the part that's actually identical, so it's the
+ * thing to name once.
+ */
+type Fatal = { kind: "fatal"; message: string };
 
 export type OutputProduction =
 	| { kind: "ok"; output: Output }
-	| { kind: "fatal"; message: string }
+	| Fatal
 	| { kind: "validation-exhausted"; failureSummary: string };
 
 /** Retry loop re-produces against the latest branch after each fix request. */
 export async function produceAndValidateOutput(
-	ctx: WorkflowHostContext,
-	s: StageSession,
+	ctx: WorkflowSessionContext,
+	s: StageSessionContext,
 	branch: BranchEntry[],
 	branchOffset: number | undefined,
 ): Promise<OutputProduction> {
+	// Allocate the activation's stage number ONCE, before any output envelope
+	// is built — the envelope's `meta.stageNumber`, the eventual audit row
+	// (success or failure), and every lifecycle ref share this value.
+	s.allocatedStageNumber ??= allocateStageNumber(s.state);
 	const outcome = resolveOutcome(s.stage, s.skill);
 	const collectCtx = buildCollectCtx(s, branch, branchOffset);
 	const finalize = (parts: { kind: string; artifacts: readonly Artifact[]; data: unknown }) => wrapOutput(s, parts);
@@ -60,7 +86,7 @@ export async function produceAndValidateOutput(
 	const initialOutput = enforceCompletionContract(s.stage, s.skill, first.output);
 	if (initialOutput.kind === "fatal") return initialOutput;
 
-	if (!shouldValidateOutput(s.stage, initialOutput.output)) return initialOutput;
+	if (!shouldValidateOutput(s, initialOutput.output)) return initialOutput;
 
 	return retryUntilValid(ctx, s, { outcome, collectCtx, finalize }, initialOutput.output);
 }
@@ -74,14 +100,14 @@ export async function produceAndValidateOutput(
  *    load time; the runtime throw is defense-in-depth for programmatic
  *    embedders that bypassed validation.
  */
-function resolveOutcome(stage: StageDef, skill: string): OutputSpec {
+function resolveOutcome(stage: StageDef, skill: string): Outcome {
 	if (stage.outcome) return stage.outcome;
 	switch (stage.kind) {
 		case "side-effect":
 			return sideEffectOutcome;
 		case "produces":
 			throw new Error(
-				`runStage: stage "${skill}" has kind "produces" but no \`outcome\` — ` +
+				`dispatchStage: stage "${skill}" has kind "produces" but no \`outcome\` — ` +
 					"there is no framework default for produces stages (the `.rpiv/artifacts/` layout is " +
 					"an rpiv-pi convention). Either wire `outcome: rpivArtifactMdOutcome` (from @juicesharp/rpiv-pi) " +
 					"or supply your own `{ collector, parser? }`.",
@@ -98,7 +124,11 @@ function resolveOutcome(stage: StageDef, skill: string): OutputSpec {
  * demand via the `branchOffset` field. Initial production and retry
  * production use the same offset value.
  */
-function buildCollectCtx(s: StageSession, branch: BranchEntry[], branchOffset: number | undefined): CollectCtx {
+function buildCollectCtx(
+	s: StageSessionContext,
+	branch: BranchEntry[],
+	branchOffset: number | undefined,
+): CollectContext {
 	return {
 		cwd: s.cwd,
 		runId: s.runId,
@@ -108,32 +138,52 @@ function buildCollectCtx(s: StageSession, branch: BranchEntry[], branchOffset: n
 		branchOffset,
 		snapshot: s.snapshot,
 		skill: s.skill,
+		...(s.unit?.label !== undefined ? { unitLabel: s.unit.label } : {}),
 	};
 }
 
-function wrapOutput(s: StageSession, parts: { kind: string; artifacts: readonly Artifact[]; data: unknown }): Output {
-	return finalizeOutput(parts, {
-		stage: s.stageName,
-		skill: s.skill,
-		stageNumber: s.state.lastAllocatedStageNumber + 1,
-		ts: nowIso(),
-		runId: s.runId,
-	});
+function wrapOutput(
+	s: StageSessionContext,
+	parts: { kind: string; artifacts: readonly Artifact[]; data: unknown },
+): Output {
+	return finalizeOutput(
+		parts,
+		outputMeta({
+			stage: s.stageName,
+			skill: s.skill,
+			// Pre-allocated by `produceAndValidateOutput` before any finalize runs —
+			// no `lastAllocatedStageNumber + 1` peek, no temporal coupling with
+			// recordStage.
+			stageNumber: s.allocatedStageNumber!,
+			ts: nowIso(),
+			runId: s.runId,
+		}),
+	);
 }
 
-type RunOutcomeResult = { kind: "ok"; output: Output } | { kind: "fatal"; message: string };
+type RunOutcomeResult = { kind: "ok"; output: Output } | Fatal;
 
 /**
  * The collector → parser pipeline. When `parser` is omitted, the
  * output emits `kind: "artifacts"` with `data = artifacts` — a stage
  * that only needs to enumerate doesn't have to write a parser.
+ *
+ * `collect`/`parse` are the PRIMARY user extension points, so a throw from
+ * either is guarded here and attributed ("collector threw…"), folding into
+ * the same fatal arm a tagged `{ kind: "fatal" }` return takes — instead of
+ * escaping to the runner's generic catch and reading as a machinery failure.
  */
 async function runOutcome(
-	outcome: OutputSpec,
-	ctx: CollectCtx,
+	outcome: Outcome,
+	ctx: CollectContext,
 	finalize: (parts: { kind: string; artifacts: readonly Artifact[]; data: unknown }) => Output,
 ): Promise<RunOutcomeResult> {
-	const collected = await outcome.collector.collect(ctx);
+	let collected: Awaited<ReturnType<typeof outcome.collector.collect>>;
+	try {
+		collected = await outcome.collector.collect(ctx);
+	} catch (e) {
+		return { kind: "fatal", message: ERR_COLLECTOR_THREW(ctx.skill, formatError(e)) };
+	}
 	if (collected.kind === "fatal") return collected;
 
 	if (!outcome.parser) {
@@ -143,7 +193,12 @@ async function runOutcome(
 		};
 	}
 
-	const parsed = await outcome.parser.parse({ ...ctx, artifacts: collected.artifacts });
+	let parsed: Awaited<ReturnType<typeof outcome.parser.parse>>;
+	try {
+		parsed = await outcome.parser.parse({ ...ctx, artifacts: collected.artifacts });
+	} catch (e) {
+		return { kind: "fatal", message: ERR_PARSER_THREW(ctx.skill, formatError(e)) };
+	}
 	if (parsed.kind === "fatal") return parsed;
 	return {
 		kind: "ok",
@@ -166,7 +221,7 @@ function enforceCompletionContract(
 	stage: StageDef,
 	skill: string,
 	output: Output,
-): { kind: "ok"; output: Output } | { kind: "fatal"; message: string } {
+): { kind: "ok"; output: Output } | Fatal {
 	if (stage.kind === "produces" && output.artifacts.length === 0) {
 		return {
 			kind: "fatal",
@@ -176,78 +231,178 @@ function enforceCompletionContract(
 	return { kind: "ok", output };
 }
 
-function shouldValidateOutput(stage: StageDef, output: Output): boolean {
-	return !!(stage.outputSchema && output.data !== undefined);
+function shouldValidateOutput(s: StageSessionContext, output: Output): boolean {
+	return !!(effectiveOutputSchemaOf(s.stage, s.stageName, s.skillContracts) && output.data !== undefined);
 }
 
-interface RetryDeps {
-	outcome: OutputSpec;
-	collectCtx: CollectCtx;
+export interface RetryDeps {
+	outcome: Outcome;
+	collectCtx: CollectContext;
 	finalize: (parts: { kind: string; artifacts: readonly Artifact[]; data: unknown }) => Output;
 }
 
+/**
+ * Validation-retry mechanism-1 gate: did the worktree stay byte-identical
+ * between the failed validate and the post-fix re-read? An UNCHANGED digest
+ * means the agent's fix touched nothing observable (tracked files OR
+ * gitignored artifacts under `.rpiv/artifacts/`, both hashed by
+ * `computeWorktreeDigest`), so the next `produce` → `validate` cycle would
+ * re-run the same failing validation — fail fast instead of looping.
+ *
+ * An `undefined` baseline (non-repo / git missing — `resolveDigest` degrades
+ * to `undefined`) ALWAYS proceeds: degrade on a missing signal, never skip.
+ */
+export const worktreeUnchangedSince = (baselineDigest: string | undefined, s: StageSessionContext): boolean =>
+	baselineDigest !== undefined && resolveDigest(s.worktreeDigest, s.cwd) === baselineDigest;
+
+/**
+ * The retry-loop `produce` hook: re-production of the stage's output.
+ *
+ * `attempt === 0` is the fast-path — the initial output was already produced
+ * and contract-checked before the retry loop opened (`produceAndValidateOutput`
+ * ran `runOutcome` + `enforceCompletionContract` once), so it returns the
+ * `initial` Output WITHOUT re-collection or re-checking the contract.
+ *
+ * `attempt > 0` re-reads the branch (the agent's fix landed as new messages),
+ * re-runs the collector → parser pipeline (`runOutcome`), and re-checks the
+ * completion contract. A fatal collector/parser/contract result maps onto
+ * the engine's `{ kind: "aborted" }` arm (the loop halts with that message).
+ */
+export async function produceAttempt(
+	ctx: WorkflowSessionContext,
+	s: StageSessionContext,
+	deps: RetryDeps,
+	initial: Output,
+	attempt: number,
+): Promise<{ kind: "ok"; value: Output } | { kind: "aborted"; abort: Fatal }> {
+	if (attempt === 0) return { kind: "ok", value: initial };
+	const retryBranch = readBranch(ctx);
+	const retryCtx: CollectContext = { ...deps.collectCtx, branch: retryBranch };
+	const reRun = await runOutcome(deps.outcome, retryCtx, deps.finalize);
+	if (reRun.kind === "fatal") return { kind: "aborted", abort: reRun };
+	const contract = enforceCompletionContract(s.stage, s.skill, reRun.output);
+	if (contract.kind === "fatal") return { kind: "aborted", abort: contract };
+	return { kind: "ok", value: contract.output };
+}
+
+/**
+ * The retry-loop `validate` hook: run the output schema against the produced
+ * data, guarded by `timeoutMs` (the same `validateTimeoutMs` budget that
+ * bounds `askAgentToFix`). Maps `validateOrFatal`'s `Fatal` outcome (a
+ * thrown/rejected/timed-out schema) onto the engine's `{ kind: "aborted" }`
+ * arm so a schema failure halts the loop instead of re-prompting the agent.
+ */
+export async function validateOutput(
+	schema: StageSchema,
+	skill: string,
+	timeoutMs: number,
+	output: Output,
+): Promise<{ kind: "ok"; result: ValidationResult } | { kind: "aborted"; abort: Fatal }> {
+	const validation = await validateOrFatal(schema, output.data, skill, timeoutMs);
+	if (validation.kind === "fatal") return { kind: "aborted", abort: validation };
+	return { kind: "ok", result: validation.result };
+}
+
+/**
+ * The retry-loop `onRetry` hook: fired between a failed validate and the next
+ * produce (`attempt` is 1-based). Sequence:
+ *   1. Capture the worktree digest AT THE FAILED VALIDATE — nothing mutates
+ *      the tree between `validate` failing and `onRetry` opening, so this
+ *      equals the digest at the failure. Captured per-retry (NOT once before
+ *      the loop): a later retry's "before" state is the tree AFTER the prior
+ *      retry's fix, so a single pre-loop baseline would compare against a
+ *      stale tree and false-abort every later retry.
+ *   2. Fire `onStageRetry` before the agent is re-prompted (the ref shares the
+ *      activation's allocator number via `currentStageRef` so listeners
+ *      correlate retry ↔ end; graph position `stageIndex + 1` diverges past
+ *      any loop).
+ *   3. Re-prompt the agent (`askAgentToFix`); a throw becomes an abort.
+ *   4. Gate on `worktreeUnchangedSince` — if the fix changed nothing
+ *      observable, abort with the unchanged-worktree message instead of
+ *      re-running the same failing validation.
+ */
+export async function handleRetry(
+	ctx: WorkflowSessionContext,
+	s: StageSessionContext,
+	attempt: number,
+	failures: SchemaValidationFailure[],
+	timeoutMs: number,
+): Promise<{ kind: "ok" } | { kind: "aborted"; abort: Fatal }> {
+	const baselineDigest = resolveDigest(s.worktreeDigest, s.cwd);
+	await s.lifecycle.fire(ctx, "onStageRetry", currentStageRef(s), attempt, lifecycleCtxFromSession(s));
+	try {
+		await askAgentToFix(ctx, s, attempt, failures, timeoutMs);
+	} catch (e) {
+		return { kind: "aborted", abort: { kind: "fatal", message: formatError(e) } };
+	}
+	if (worktreeUnchangedSince(baselineDigest, s)) {
+		return {
+			kind: "aborted",
+			abort: { kind: "fatal", message: ERR_VALIDATE_RETRY_UNCHANGED(s.skill) },
+		};
+	}
+	return { kind: "ok" };
+}
+
 async function retryUntilValid(
-	ctx: WorkflowHostContext,
-	s: StageSession,
+	ctx: WorkflowSessionContext,
+	s: StageSessionContext,
 	deps: RetryDeps,
 	initial: Output,
 ): Promise<OutputProduction> {
-	const schema = s.stage.outputSchema!;
-	const maxRetries = Math.max(
+	const schema = effectiveOutputSchemaOf(s.stage, s.stageName, s.skillContracts)!;
+	const maxRetries = clampRange(
+		s.stage.maxRetries,
 		MIN_VALIDATION_RETRIES,
-		Math.min(s.stage.maxRetries ?? DEFAULT_VALIDATION_RETRIES, MAX_VALIDATION_RETRIES),
+		DEFAULT_VALIDATION_RETRIES,
+		MAX_VALIDATION_RETRIES,
 	);
-	const timeoutMs = Math.max(
+	const timeoutMs = clampRange(
+		s.stage.validateTimeoutMs,
 		MIN_VALIDATION_RETRY_TIMEOUT_MS,
-		Math.min(s.stage.validateTimeoutMs ?? DEFAULT_VALIDATION_RETRY_TIMEOUT_MS, MAX_VALIDATION_RETRY_TIMEOUT_MS),
+		DEFAULT_VALIDATION_RETRY_TIMEOUT_MS,
+		MAX_VALIDATION_RETRY_TIMEOUT_MS,
 	);
 
-	let output = initial;
-	const initialValidation = await validateOrFatal(schema, output.data, s.skill, timeoutMs);
-	if (initialValidation.kind === "fatal") return initialValidation;
-	let result = initialValidation.result;
-	let attempts = 0;
+	// The retry policy delegates to the SHARED `runValidationRetryLoop` engine
+	// (validate-output.ts) — the same produce → validate → retry structure the
+	// script path runs. The three hooks are short named delegations:
+	//   - `produceAttempt` — `produce(0)` returns the already-produced `initial`;
+	//     `produce(n>0)` re-reads the branch, re-runs the collector/parser, and
+	//     re-checks the completion contract.
+	//   - `validateOutput` — `validateOrFatal`, mapping its `Fatal` onto the
+	//     engine's `{ kind: "aborted" }` abort arm.
+	//   - `handleRetry` — `onStageRetry` + `askAgentToFix`; a throw becomes an
+	//     abort, and the `worktreeUnchangedSince` gate aborts a no-op fix.
+	// `failFast` mirrors the script path's stop-flag polarity —
+	// `(onInvalid ?? "retry") === "halt"` is byte-identical to today's
+	// `onInvalid !== "halt"` loop-continue condition, just expressed as the
+	// engine's stop flag. Total productions stay bounded by `maxRetries + 1`.
+	const outcome = await runValidationRetryLoop<Output, Fatal>(
+		{ maxRetries, failFast: (s.stage.onInvalid ?? "retry") === "halt" },
+		{
+			produce: (attempt) => produceAttempt(ctx, s, deps, initial, attempt),
+			validate: (output) => validateOutput(schema, s.skill, timeoutMs, output),
+			onRetry: (attempt, failures) => handleRetry(ctx, s, attempt, failures, timeoutMs),
+		},
+	);
 
-	while (!result.valid && attempts < maxRetries && s.stage.onInvalid !== "halt") {
-		attempts++;
-		// onStageRetry fires before the agent is re-prompted; `attempt` is 1-based.
-		await s.lifecycle.fire(
-			ctx,
-			"onStageRetry",
-			skillStageRef(s.stageName, s.stageIndex + 1, s.skill),
-			attempts,
-			buildLifecycleContext({
-				cwd: s.cwd,
-				runId: s.runId,
-				workflow: s.runIdentity.workflow,
-				totalStages: s.runIdentity.totalStages,
-				trigger: s.runIdentity.trigger,
-				state: s.state,
-			}),
-		);
-		try {
-			await askAgentToFix(ctx, s, attempts, result.failures, timeoutMs);
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			return { kind: "fatal", message: msg };
-		}
-
-		const retryBranch = readBranch(ctx);
-		const retryCtx: CollectCtx = { ...deps.collectCtx, branch: retryBranch };
-		const reRun = await runOutcome(deps.outcome, retryCtx, deps.finalize);
-		if (reRun.kind === "fatal") return reRun;
-		const contract = enforceCompletionContract(s.stage, s.skill, reRun.output);
-		if (contract.kind === "fatal") return contract;
-
-		output = contract.output;
-		const reValidation = await validateOrFatal(schema, output.data, s.skill, timeoutMs);
-		if (reValidation.kind === "fatal") return reValidation;
-		result = reValidation.result;
-	}
-
-	if (!result.valid) return validationExhausted(result.failures);
-	return { kind: "ok", output };
+	if (outcome.kind === "aborted") return outcome.abort;
+	if (outcome.kind === "exhausted") return validationExhausted(outcome.failures);
+	return { kind: "ok", output: outcome.value };
 }
+
+/**
+ * Sent to the AGENT as a follow-up message when an output-schema validation
+ * fails — instructs it to re-write the artifact at the same path with a
+ * corrected frontmatter. Lives beside its only consumer (this is
+ * model-facing prompt text, not a UI constant). `errorLines` is a pre-joined
+ * bullet list (one line per failure) so the factory stays single-arg-typed.
+ */
+const MSG_VALIDATION_RETRY_PROMPT = (skill: string, errorLines: string) =>
+	`The ${skill} artifact's frontmatter doesn't satisfy the expected output schema. ` +
+	"Fix only the fields listed below, then re-write the artifact at the same path (don't move it):\n\n" +
+	`${errorLines}`;
 
 /**
  * Translate a thrown `validateOutputData` (user-authored schemas may throw
@@ -261,7 +416,7 @@ async function validateOrFatal(
 	data: unknown,
 	skill: string,
 	timeoutMs: number,
-): Promise<{ kind: "ok"; result: ValidationResult } | { kind: "fatal"; message: string }> {
+): Promise<{ kind: "ok"; result: ValidationResult } | Fatal> {
 	try {
 		const result = await withTimeout(
 			Promise.resolve(validateOutputData(schema, data)),
@@ -270,28 +425,26 @@ async function validateOrFatal(
 		);
 		return { kind: "ok", result };
 	} catch (e) {
-		const reason = e instanceof Error ? e.message : String(e);
-		return { kind: "fatal", message: `${skill}: ${reason}` };
+		return { kind: "fatal", message: `${skill}: ${formatError(e)}` };
 	}
 }
 
 async function askAgentToFix(
-	ctx: WorkflowHostContext,
-	s: StageSession,
+	ctx: WorkflowSessionContext,
+	s: StageSessionContext,
 	attempt: number,
 	failures: SchemaValidationFailure[],
 	timeoutMs: number,
 ): Promise<void> {
-	ctx.ui.notify(MSG_VALIDATION_RETRY(s.skill, attempt), "warning");
-	const errorLines = failures.map((f) => ` • ${f.path} — ${f.message}`).join("\n");
+	const errorLines = failures.map((f) => ` • ${describeFailure(f)}`).join("\n");
 	await withTimeout(
-		handlerFor(s.stage.sessionPolicy).send(ctx, MSG_VALIDATION_RETRY_PROMPT(s.skill, errorLines), s.continueHost),
+		resendIntoChild(ctx, MSG_VALIDATION_RETRY_PROMPT(s.skill, errorLines)),
 		timeoutMs,
 		`${s.skill}: validation retry attempt ${attempt} exceeded ${timeoutMs}ms — agent did not settle`,
 	);
 }
 
 function validationExhausted(failures: SchemaValidationFailure[]): OutputProduction {
-	const failureSummary = failures.map((f) => `${f.path}: ${f.message}`).join("; ");
+	const failureSummary = failures.map(describeFailure).join("; ");
 	return { kind: "validation-exhausted", failureSummary };
 }

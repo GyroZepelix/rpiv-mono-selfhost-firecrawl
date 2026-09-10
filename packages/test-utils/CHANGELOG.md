@@ -4,6 +4,71 @@ All notable changes to this package will be documented in this file.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+## [2.6.0] - 2026-08-15
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+## [2.1.0] - 2026-07-23
+
+## [2.0.0] - 2026-07-21
+
+### Added
+
+- `createFakeConcurrentHost`: a workflow-host double that records every spawned child, tracks peak concurrency, and can gate spawns mid-flight for parallel-dispatch assertions.
+- Mock command contexts and session chains model detached child sessions: `spawnChild` with a `maxConcurrency` option replaces the removed `newSession` mock, and the parent context stays valid across stages.
+- Session-chain steps can script a per-child session file (for continue/fork coverage) and a watchdog tool-timeout reason.
+- Mock context options for session identity and host mode: `sessionId`, `childSessionId`, and `mode`.
+- The mock Pi captures `registerShortcut` registrations, and the mock UI gains `setEditorComponent`.
+
+### Fixed
+
+- Spawned mock children report a distinct child session id by default, so per-session isolation is exercised rather than masked.
+- `verifyShipManifest` treats npm `files` negation patterns as exclusion rules instead of flagging them as stale entries.
+
+### Breaking / Upgrade Notes
+
+- Replace assertions on the `newSession` mock with `spawnChild`; a `cancelled` session-chain step now rejects instead of resolving `{ cancelled: true }`.
+
+## [1.20.0] - 2026-06-15
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
 ## [1.17.1] - 2026-06-01
 
 ## [1.17.0] - 2026-06-01

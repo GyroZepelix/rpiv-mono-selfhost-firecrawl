@@ -13,6 +13,7 @@ import {
 export const FIRECRAWL_API_KEY_ENV_VAR = "FIRECRAWL_API_KEY";
 export const FIRECRAWL_API_URL_ENV_VAR = "FIRECRAWL_API_URL";
 export const FIRECRAWL_DEFAULT_URL = "https://api.firecrawl.dev/v1";
+const FIRECRAWL_CLOUD_HOSTNAME = new URL(FIRECRAWL_DEFAULT_URL).hostname;
 
 // Number of leading + trailing characters preserved when masking an API key
 // in the config prompt. Mirrors API_KEY_MASK_VISIBLE_CHARS in web-tools.ts.
@@ -67,7 +68,7 @@ function stripTrailingSlashes(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
-function assertHttpUrl(url: string): void {
+function assertHttpUrl(url: string): URL {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
@@ -79,6 +80,7 @@ function assertHttpUrl(url: string): void {
 			`${FIRECRAWL_API_URL_ENV_VAR} must use http:// or https:// (got: ${parsed.protocol.replace(":", "")}://)`,
 		);
 	}
+	return parsed;
 }
 
 interface FirecrawlProviderOptions {
@@ -93,12 +95,14 @@ export class FirecrawlProvider implements FullProvider {
 
 	private readonly apiKey?: string;
 	private readonly baseUrl: string;
+	private readonly isCloudEndpoint: boolean;
 
 	constructor(options: FirecrawlProviderOptions) {
 		this.apiKey = options.apiKey?.trim() || undefined;
 		const trimmed = stripTrailingSlashes(options.baseUrl?.trim() || FIRECRAWL_DEFAULT_URL);
-		assertHttpUrl(trimmed);
+		const parsed = assertHttpUrl(trimmed);
 		this.baseUrl = trimmed;
+		this.isCloudEndpoint = parsed.hostname.toLowerCase().replace(/\.$/, "") === FIRECRAWL_CLOUD_HOSTNAME;
 	}
 
 	async search(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResponse> {
@@ -159,7 +163,7 @@ export class FirecrawlProvider implements FullProvider {
 	}
 
 	private requireApiKeyIfHosted(): void {
-		if (!this.apiKey && this.baseUrl === FIRECRAWL_DEFAULT_URL) {
+		if (!this.apiKey && this.isCloudEndpoint) {
 			throw new Error(`${this.envVar} is not set. Run /web-tools to configure, or export the env var.`);
 		}
 	}

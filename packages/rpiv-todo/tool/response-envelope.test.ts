@@ -19,14 +19,20 @@ describe("formatContent", () => {
 
 	it("update — emits transition tuple when statuses differ", () => {
 		const state = stateWith(t({ id: 1, subject: "x", status: "in_progress" }));
-		const op: Op = { kind: "update", id: 1, fromStatus: "pending", toStatus: "in_progress" };
+		const op: Op = { kind: "update", id: 1, fromStatus: "pending", toStatus: "in_progress", changed: true };
 		expect(formatContent(op, state)).toBe("Updated #1 (pending → in_progress)");
 	});
 
-	it("update — omits transition when from === to (e.g. blockedBy-only update)", () => {
+	it("update — omits transition when from === to but fields changed (e.g. blockedBy-only update)", () => {
 		const state = stateWith(t({ id: 1, subject: "x" }));
-		const op: Op = { kind: "update", id: 1, fromStatus: "pending", toStatus: "pending" };
+		const op: Op = { kind: "update", id: 1, fromStatus: "pending", toStatus: "pending", changed: true };
 		expect(formatContent(op, state)).toBe("Updated #1");
+	});
+
+	it("update — reports 'No change' when changed is false (no-effect update)", () => {
+		const state = stateWith(t({ id: 1, subject: "x" }));
+		const op: Op = { kind: "update", id: 1, fromStatus: "pending", toStatus: "pending", changed: false };
+		expect(formatContent(op, state)).toBe("No change: #1 already matches the requested values (status: pending)");
 	});
 
 	it("delete — 'Deleted #id: subject'", () => {
@@ -134,5 +140,23 @@ describe("buildToolResult", () => {
 		});
 		expect(env.details.error).toBe("subject required for create");
 		expect(env.content[0].text).toBe("Error: subject required for create");
+	});
+});
+
+describe("formatContent — control characters in model-controlled fields", () => {
+	it("get — strips escape sequences from subject, description, and owner", () => {
+		const state = stateWith(
+			t({ id: 1, subject: "safe\u001b[2J\u001b[Hsubject", description: "line1\nline2", owner: "who\u009b31mami" }),
+		);
+		const op: Op = { kind: "get", task: state.tasks[0]! };
+		expect(formatContent(op, state)).toBe("#1 [pending] safesubject\n  description: line1 line2\n  owner: whoami");
+	});
+
+	it("create/list — strips escape sequences from the echoed subject and activeForm", () => {
+		const state = stateWith(
+			t({ id: 1, subject: "evil\u001b[31m", status: "in_progress", activeForm: "clear\u001b[2Jing" }),
+		);
+		expect(formatContent({ kind: "create", taskId: 1 }, state)).toBe("Created #1: evil (pending)");
+		expect(formatContent({ kind: "list", includeDeleted: false }, state)).toBe("[in_progress] #1 evil (clearing)");
 	});
 });

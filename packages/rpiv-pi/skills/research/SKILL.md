@@ -3,6 +3,20 @@ name: research
 description: Answer structured research questions about a codebase using targeted parallel analysis agents, then synthesize findings into a research document in .rpiv/artifacts/research/. Internally dispatches the scope-tracer agent to formulate trace-quality research questions, then answers them. Use when the user wants in-depth research on a codebase area, asks to "research X", or needs answers to architecture or behavior questions before designing changes.
 argument-hint: "[free-text research prompt]"
 shell-timeout: 10
+disable-model-invocation: true
+contract:
+  produces:
+    kind: produces
+    meta:
+      artifactKind: research
+    data:
+      type: object
+      properties:
+        status:
+          enum: [in-progress, in-review, ready]
+  consumes:
+    meta:
+      artifactKind: [frd]
 ---
 
 # Research
@@ -57,6 +71,12 @@ The final artifact feeds design or blueprint.
 
 4. **Parse the agent's final message** as the questions artifact body. Extract: Discovery Summary (3-5 sentence file-landscape overview), Questions (numbered dense 3-6 sentence paragraphs).
 
+   Questions formulated — emit:
+
+   ```
+   [Questions]: {N} research questions formulated. Reading shared files and grouping before dispatch.
+   ```
+
 5. **Read key shared files** referenced across multiple questions into main context — especially shared utilities, type definitions, and integration points that multiple questions mention.
 
 6. **Analyze question overlap for grouping:**
@@ -73,7 +93,15 @@ The final artifact feeds design or blueprint.
 
 ### Step 2: Dispatch Analysis Agents
 
-Spawn analysis agents using the Agent tool. All agents run in parallel.
+Spawn analysis agents using the Agent tool — all in a **single assistant message with multiple Agent calls** (concurrent, synchronous). **Never `run_in_background`**: its completion can't re-drive a workflow session, so the skill ends its turn before writing the document and the stage fails with no artifact.
+
+**Launch marker** — in that SAME assistant message, as its text block (it adds no turn, so the one-message parallel dispatch shape stays intact), emit:
+
+```
+[Dispatched]: {N} analysis agents in one batch{ + precedent sweep}. Waiting for returns.
+```
+
+N counts every dispatched agent, including the git-gated precedent-locator when it joins; the ` + precedent sweep` suffix appears only when it does.
 
 **Default agent**: `codebase-analyzer` for all codebase questions. This agent has Read, Grep, Glob, LS — it can trace code paths, find patterns, and analyze integration points.
 
@@ -115,7 +143,19 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
 
 **Wait for ALL agents to complete** before proceeding.
 
+Once every agent has returned, emit:
+
+```
+[Returned]: {N}/{N} agents returned. Proceeding to synthesis.
+```
+
 ### Step 3: Synthesize and Checkpoint
+
+Before compiling, emit:
+
+```
+[Synthesizing]: compiling {N} agent reports.
+```
 
 1. **Compile findings:**
    - Match each agent's response to the question(s) it answered
@@ -123,19 +163,21 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
    - Prioritize live codebase findings as primary source of truth
    - Use `.rpiv/artifacts/` findings as supplementary historical context
    - Include specific file paths and line numbers
+   - **Cite what you actually read.** Every `file:line` comes from a file you opened in this session — never a remembered or guessed range; if you're unsure of the line, cite the path alone and omit the `:line`. Write paths **relative to the repo root** (`packages/billing/src/invoice.ts:NN` — not the subdirectory-relative `src/invoice.ts:NN`, nor the bare `invoice.ts:NN`) — downstream artifacts inherit your citation form. No separate verification pass: citations are compressed addresses for the next stage, and a consumer that finds one drifted locates the symbol itself.
    - Build Code References as jump-table entries for the planner, not narrative (file:startLine-endLine format)
    - No multi-line code blocks (>3 lines) — use file:line refs + prose. No implementation recipes — facts only.
    - No artifact summaries — link plans/designs in Historical Context, don't summarize their contents. Research describes current codebase state.
 
 2. **Developer checkpoint — grounded questions one at a time:**
 
-   Start with grounded questions referencing real findings with file:line evidence. Ask ONE question at a time, waiting for the answer before the next. Use a **❓ Question:** prefix. Each question must pull NEW information from the developer — not confirm what you already found:
+   - Every ambiguity checkpoint MUST be self-contained: state observed behavior, at least one `file:line` evidence reference, why the decision matters, and 2-4 concrete decision options in the question or option descriptions.
+   Start with grounded questions referencing real findings with `file:line` evidence. Ask ONE question at a time, waiting for the answer before the next. Use a **❓ Question:** prefix. Each question must pull NEW information from the developer — not confirm what you already found:
 
    Every question MUST embed at least one `file:line` reference in the question text — not just in surrounding context. Examples:
 
-   - "❓ Question: `src/events/orders.ts:45-67` has 3 event hooks but no error recovery path. Is there a retry mechanism elsewhere I'm not seeing?"
-   - "❓ Question: Pattern-finder found manual mapping at `src/services/OrderService.ts:45` (8 uses) vs AutoMapper at `src/services/UserService.ts:12` (2 uses). Which should new code follow?"
-   - "❓ Question: Precedent commit `abc123` required a follow-up fix at `src/handlers/key.ts:158` for connection leak. Should we account for that pattern in this design?"
+   - "❓ Question: `src/events/orders.ts:NN-NN` has 3 event hooks but no error recovery path. Is there a retry mechanism elsewhere I'm not seeing?"
+   - "❓ Question: Pattern-finder found manual mapping at `src/services/OrderService.ts:NN` (8 uses) vs AutoMapper at `src/services/UserService.ts:NN` (2 uses). Which should new code follow?"
+   - "❓ Question: Precedent commit `abc123` required a follow-up fix at `src/handlers/key.ts:NN` for connection leak. Should we account for that pattern in this design?"
 
    Anti-patterns — NEVER ask these:
    - "Is this research to understand X or prepare for Y?" — confirmatory, pulls zero new information
@@ -147,22 +189,22 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
    - **Pattern conflict**: "Found 2 implementations of {X} — which is canonical?" with options citing `file:line` + occurrence count
    - **Scope boundary**: "Question {N} references files {A,B,C} but analysis shows {D} is the real integration point. Extend scope?" with yes/no + "describe what I missed"
    - **Priority override**: "Questions Q1 and Q2 have competing implications for {area}. Which is load-bearing?" with options
-   - **Integration ambiguity**: "Found no connection between {X} and {Y}. Is there an indirect path?" (free-text — can't predict the answer)
+   - **Integration ambiguity**: "Found no connection between {X} and {Y} at `file:line`. This leaves {impact}. Should the feature wire through {A} or {B}?" — use `ask_user_question`; the automatically appended `Type something.` row captures unexpected custom input.
 
    **Choosing question format:**
 
-   - **`ask_user_question` tool** — when your question has 2-4 concrete options from code analysis (pattern conflicts, integration choices, scope boundaries, priority overrides). The user can always pick "Other" for free-text. Example:
+   - **`ask_user_question` tool** — when your question has 2-4 concrete options from code analysis (pattern conflicts, integration choices, scope boundaries, priority overrides). The automatically appended `Type something.` row captures custom input. Example:
 
-     > Use the `ask_user_question` tool with the following question: "Found 2 patterns for retry logic — which is canonical?". Header: "Pattern". Options: "Event-sourced retry (Recommended)" (`src/events/orders.ts:45-67` — 3 hooks, matches precedent commit `abc123`); "Direct retry loop" (`src/services/OrderService.ts:112` — single use, no event traceability).
+     > `Header` is capped at ≤16 characters (`MAX_HEADER_LENGTH = 16` — longer values are rejected).
+     > Use the `ask_user_question` tool with the following question: "Found 2 patterns for retry logic — which is canonical?". Header: "Pattern". Options: "Event-sourced retry (Recommended)" (`src/events/orders.ts:NN-NN` — 3 hooks, matches precedent commit `abc123`); "Direct retry loop" (`src/services/OrderService.ts:NN` — single use, no event traceability).
 
-   - **Free-text with ❓ Question: prefix** — when the question is open-ended and options can't be predicted (discovery, "what am I missing?", corrections). Example:
-     "❓ Question: `src/events/orders.ts:45-67` has 3 event hooks but no error recovery path. Is there a retry mechanism elsewhere I'm not seeing?"
+   - **Open-ended** (discovery, "what am I missing?", corrections) — still use `ask_user_question`; supply 2-4 concrete hypotheses with behavior, `file:line` evidence, impact, and decision context, then let the automatic `Type something.` row capture unanticipated detail.
 
    **Anti-pattern** — do NOT dump a verbose paragraph mixing analysis with a trailing question:
 
    ❌ "The premise inversion is load-bearing for prioritization — it means Site A is a no-op, and the real bloat only hits general-purpose dispatches. Given this, where is the bloat actually landing? Do your skills dispatch named bundled agents — in which case append-mode is irrelevant — or general-purpose — in which case it IS the dominant source?"
 
-   ✅ Extract the 2 concrete options and call `ask_user_question`: "Where is the prompt bloat landing?". Header: "Bloat source". Options: "Named bundled agents (Recommended)" (Skills dispatch `codebase-analyzer` etc. — `prompt_mode: "replace"`, no parent inheritance); "General-purpose agent" (`default-agents.ts:11-28` — `promptMode: "append"`, inherits full parent prompt).
+   ✅ Extract the 2 concrete options and call `ask_user_question`: "Where is the prompt bloat landing?". Header: "Bloat source". Options: "Named bundled agents (Recommended)" (Skills dispatch `codebase-analyzer` etc. — `prompt_mode: "replace"`, no parent inheritance); "General-purpose agent" (`default-agents.ts:NN-NN` — `promptMode: "append"`, inherits full parent prompt).
 
    **Batching**: When you have 2-15 independent questions (answers don't depend on each other), you MAY batch them in a single `ask_user_question` call. Keep dependent questions sequential.
 
@@ -183,7 +225,7 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
    Inconsistencies: {count} found ({short names})
    ```
 
-   Wait for the developer's response before proceeding.
+   Gate the write with `ask_user_question`. Question: "Scan complete — write the doc, or adjust first?". Header: "Research". Options: "Write the doc (Recommended)"; "Add an area"; "Correct a finding".
 
 4. **Incorporate developer input:**
 
@@ -223,7 +265,7 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
    repository: {Repository name}
    topic: "{User's Research Topic}"
    tags: [research, codebase, relevant-component-names]
-   status: complete
+   status: ready
    last_updated: {Same ISO timestamp as `date:` above}
    last_updated_by: {`author:` from Metadata block}
    ---
@@ -247,8 +289,8 @@ Findings go into Precedents & Lessons. Otherwise skip and note "git history unav
    ...
 
    ## Code References
-   - `path/to/file.py:123` — Description of what's there
-   - `another/file.ts:45-67` — Description of the code block
+   - `path/to/file.py:NN` — Description of what's there
+   - `another/file.ts:NN-NN` — Description of the code block
 
    ## Integration Points
    {All connections to the researched area. Enumerate each consumer, dependency, and wiring point with file:line. Source from the questions artifact's Discovery Summary + new connections found by analysis agents.}
@@ -343,3 +385,4 @@ Please review and let me know if you have follow-up questions.
   - ALWAYS gather metadata before writing (Step 4)
   - NEVER write the document with placeholder values
 - **Frontmatter consistency**: Always include frontmatter, use snake_case fields
+- **Progress markers are transcript text only**: the `[Questions]:` / `[Dispatched]:` / `[Returned]:` / `[Synthesizing]:` lines are one-line status for the lane console's live tail — never artifact content — and NEVER quote the research document's path in a marker, or anywhere else, before the file is written.

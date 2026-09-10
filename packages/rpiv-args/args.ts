@@ -2,17 +2,26 @@
  * rpiv-args — core logic.
  *
  * Intercepts `/skill:<name> <args>` at the input hook and emits a Pi skill
- * wrapper. Pipeline (FR9):
+ * wrapper. Pipeline:
  *   strip frontmatter → $N/$ARGUMENTS substitution (opt-in via TOKEN_REGEX)
- *   → ${SKILL_DIR}/${SESSION_ID} substitution (always-on, FR10)
- *   → shell execution (always-on, FR10 — see executeShellInBody)
+ *   → ${SKILL_DIR}/${SESSION_ID} substitution (always-on)
+ *   → shell execution (always-on — see executeShellInBody)
  *   → wrap in <skill name=… location=…>…</skill> block
  *
- * Emit-path divergence (FR12): the trailing `\n\n${args}` suffix policy is
- * governed by ORIGINAL token presence (`hadTokens`). The no-token path emits
- * byte-identical to Pi's built-in `_expandSkillCommand`; the token path
- * intentionally drops the suffix (substitution consumed the args; bare
- * trailing imperatives hijack LLM attention from the skill body).
+ * Emit-path divergence: the trailing-args policy is governed by
+ * ORIGINAL token presence (`hadTokens`). The no-token path emits
+ * byte-identical to Pi's built-in `_expandSkillCommand` (`\n\n${args}`);
+ * the token path emits the raw args in a `Skill input:`-labeled trailer
+ * instead. Substitution alone is not enough: it weaves the value into
+ * doc-shaped body slots (`` `$ARGUMENTS` — optional path to… ``) where
+ * models misread it as placeholder/example text and take the empty-input
+ * branch (issue #89). A BARE trailing suffix is not the answer either —
+ * trailing imperatives hijack LLM attention from the skill body. The
+ * labeled trailer restores the unambiguous argument signal without
+ * reading as a standalone command. A prose label (not an XML wrapper) is
+ * load-bearing for display: Pi's interactive renderer shows the trailing
+ * text verbatim in a user-message box (interactive-mode.js:2495-2498, no
+ * extension hook), so the trailer must read well to humans as-is.
  *
  * Variable substitution and shell execution always run on BOTH emit paths —
  * `hadTokens` governs the suffix only, not the substitution pipeline.
@@ -165,11 +174,11 @@ export function substituteVariables(body: string, vars: { skillDir: string; sess
 // Number.isFinite is load-bearing — both NaN and Infinity must be rejected:
 //   - NaN  → would silently bypass exec.js:42's `&& options.timeout > 0`
 //            short-circuit (NaN > 0 is false) and disable the timer, hiding
-//            an FR4 violation.
+//            the configured timeout.
 //   - Infinity → Node's setTimeout(fn, Infinity) clamps to 1ms → an immediate
 //                kill (the opposite of "no timeout").
 //
-// `0` is honored as explicit disable (FR4).
+// `0` is honored as explicit disable.
 // ---------------------------------------------------------------------------
 
 export function resolveShellTimeoutMs(frontmatter: { "shell-timeout"?: unknown }): number {
@@ -189,7 +198,7 @@ export function resolveShellTimeoutMs(frontmatter: { "shell-timeout"?: unknown }
 // inside the fence; running inline first would eat backticks from block
 // content and produce malformed bodies.
 //
-// Sequential iteration (FR11) — never Promise.all. Skill authors rely on
+// Sequential iteration — never Promise.all. Skill authors rely on
 // `!`mkdir x`` → `!`ls x`` ordering. The git-context.ts:36-44 Promise.all
 // precedent for parallel read-only git commands is INTENTIONALLY not copied.
 //
@@ -200,7 +209,7 @@ export function resolveShellTimeoutMs(frontmatter: { "shell-timeout"?: unknown }
 // `pi.exec` NEVER rejects (dist/core/exec.js:10-72 — every termination path
 // calls resolve(...)). No try/catch needed here.
 //
-// FR5 branch order: killed → code !== 0 → success. `killed` is checked first
+// Branch order: killed → code !== 0 → success. `killed` is checked first
 // because a timed-out child may also report a non-zero code via `code ?? 0`
 // (exec.js:60) or `1` via the catch (exec.js:71); the timeout message wins.
 // ---------------------------------------------------------------------------
@@ -209,7 +218,7 @@ export function resolveShellTimeoutMs(frontmatter: { "shell-timeout"?: unknown }
  *  with a `[truncated: hit ...]` footer when truncation occurred. Shared
  *  by the success path (`formatShellOutput`) and the non-zero exit path
  *  in `runOneShellCommand` so a multi-MB stderr from a failed `!`npm test``
- *  cannot bypass FR2's budget (per R1). */
+ *  cannot bypass the truncation budget. */
 function truncateForLLM(content: string): string {
 	const trunc: TruncationResult = truncateTail(content, {
 		maxLines: DEFAULT_MAX_LINES,
@@ -363,6 +372,23 @@ function appendArgs(skillBlock: string, args: string): string {
 	return args ? `${skillBlock}\n\n${args}` : skillBlock;
 }
 
+/** Token-path trailer label (FR12, issue #89). A prose label rather than an
+ *  XML wrapper: Pi's interactive renderer displays the post-`</skill>` text
+ *  verbatim in a user-message box, so raw tags would leak into the UI.
+ *  Referenced by SKILL_INVOCATION_PROTOCOL below and stripped for display by
+ *  rpiv-warp's toast summarizer and rpiv-pi's lane transcript — keep all
+ *  three in sync. */
+export const SKILL_INPUT_LABEL = "Skill input:";
+
+/** Token-path trailer (FR12, issue #89): carry the RAW argument string,
+ *  labeled, after `</skill>` so the argument survives as an unambiguous
+ *  signal even when substitution weaves it into doc-shaped body slots.
+ *  Empty args emit no trailer (the empty-input branch of skills keys off
+ *  the absence). */
+function appendSkillInput(skillBlock: string, args: string): string {
+	return args ? `${skillBlock}\n\n${SKILL_INPUT_LABEL} ${args}` : skillBlock;
+}
+
 // ---------------------------------------------------------------------------
 // Input handler — async pipeline (FR9 ordering).
 //
@@ -403,8 +429,8 @@ export async function handleInput(
 	const body = stripFrontmatter(content).trim();
 	const timeoutMs = resolveShellTimeoutMs(frontmatter);
 
-	// FR12: emit-path divergence (token-path drops the trailing `\n\n${args}`
-	// suffix) is governed by ORIGINAL token presence only. FR10: variable
+	// Emit-path divergence (token-path drops the trailing `\n\n${args}`
+	// suffix) is governed by ORIGINAL token presence only. Variable
 	// substitution and shell execution run on BOTH paths regardless.
 	const hadTokens = TOKEN_REGEX.test(body);
 
@@ -416,7 +442,10 @@ export async function handleInput(
 	processed = await executeShellInBody(processed, pi, process.cwd(), timeoutMs);
 
 	const block = buildSkillBlock(entry, processed);
-	return { action: "transform", text: hadTokens ? block : appendArgs(block, argsString) };
+	return {
+		action: "transform",
+		text: hadTokens ? appendSkillInput(block, argsString) : appendArgs(block, argsString),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -430,7 +459,7 @@ export const SKILL_INVOCATION_PROTOCOL = `## Skill invocation protocol (CRITICAL
 A \`<skill name="..." location="...">...</skill>\` block in a user message is a structured invocation. Handle it as follows:
 
 1. The block body defines the workflow you must execute. Follow it.
-2. Any text after \`</skill>\` is the user's argument input to that skill — never a separate command, even when it reads as an imperative ("create X", "update Y", "delete Z").
+2. Any text after \`</skill>\` is the user's argument input to that skill — never a separate command, even when it reads as an imperative ("create X", "update Y", "delete Z"). A \`Skill input:\` label there marks the raw argument string; the same value may also appear substituted into slots inside the skill body — treat those occurrences as this real user input, not as example or placeholder text.
 3. Do not bypass the skill's workflow to act on trailing text directly. The user invoked the skill because they want the skill's workflow applied to that input.
 
 `;

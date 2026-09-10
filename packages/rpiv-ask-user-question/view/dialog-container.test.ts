@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, Input } from "@earendil-works/pi-tui";
+import type { Component, Editor } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { makeTheme } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it } from "vitest";
@@ -8,21 +8,23 @@ import {
 	makeSubmitPickerPropsFromState as submitPickerPropsFromState,
 } from "../test-fixtures.js";
 import type { QuestionAnswer, QuestionData } from "../tool/types.js";
-import { ChatRowView } from "./components/chat-row-view.js";
 import { MultiSelectView } from "./components/multi-select-view.js";
 import type { OptionListView } from "./components/option-list-view.js";
 import type { PreviewPane } from "./components/preview/preview-pane.js";
 import { CANCEL_LABEL, SUBMIT_LABEL, SubmitPicker } from "./components/submit-picker.js";
 import type { TabBar } from "./components/tab-bar.js";
-import type { WrappingSelectTheme } from "./components/wrapping-select.js";
 import {
 	type DialogConfig,
 	type DialogProps,
 	type DialogState,
 	DialogView,
 	HINT_MULTI,
-	HINT_MULTISELECT_SUFFIX,
-	HINT_NOTES_SUFFIX,
+	HINT_PART_CLEAR,
+	HINT_PART_COLLAPSE,
+	HINT_PART_ENTER,
+	HINT_PART_NEW_LINE,
+	HINT_PART_NOTES,
+	HINT_PART_TOGGLE,
 	HINT_SINGLE,
 	INCOMPLETE_WARNING_PREFIX,
 	READY_PROMPT,
@@ -51,11 +53,10 @@ function stubOptionList(): OptionListView {
 	return stubComponent(["<OPTION_LIST>"]) as unknown as OptionListView;
 }
 
-type MakeConfigOverrides = Partial<Omit<DialogConfig, "chatRow" | "tabsByIndex">> & {
+type MakeConfigOverrides = Partial<Omit<DialogConfig, "tabsByIndex">> & {
 	state?: DialogState;
 	previewPane?: PreviewPane;
 	initialProps?: DialogProps;
-	chatList?: DialogConfig["chatRow"];
 	tabsByIndex?: ReadonlyArray<TabComponents>;
 	multiSelectByTab?: ReadonlyArray<MultiSelectView | undefined>;
 };
@@ -91,11 +92,10 @@ function makeConfig(over: MakeConfigOverrides = {}): DialogParts {
 		optionIndex: 0,
 		notesVisible: false,
 		inputMode: false,
-		chatFocused: false,
 		answers: new Map(),
 		multiSelectChecked: new Set(),
+		customDraftsByTab: new Map(),
 		notesByTab: new Map(),
-		focusedOptionHasPreview: false,
 		submitChoiceIndex: 0,
 		notesDraft: "",
 		collapsed: false,
@@ -113,8 +113,7 @@ function makeConfig(over: MakeConfigOverrides = {}): DialogParts {
 		theme: over.theme ?? theme,
 		questions,
 		tabBar: over.tabBar ?? (stubComponent(["<TABBAR>", ""]) as unknown as TabBar),
-		notesInput: over.notesInput ?? (stubComponent(["<NOTES_INPUT>"]) as unknown as Input),
-		chatRow: over.chatList ?? (stubComponent(["<CHAT_ROW>"]) as unknown as DialogConfig["chatRow"]),
+		notesInput: over.notesInput ?? (stubComponent(["<NOTES_INPUT>"]) as unknown as Editor),
 		isMulti: over.isMulti ?? questions.length > 1,
 		tabsByIndex,
 		submitPicker: over.submitPicker,
@@ -129,6 +128,7 @@ function makeConfig(over: MakeConfigOverrides = {}): DialogParts {
 				return (previewPane as unknown as Component).render(w).length;
 			}),
 		getTerminalRows: over.getTerminalRows ?? (() => 24),
+		collapseKey: over.collapseKey ?? "ctrl+]",
 	};
 	const initialProps: DialogProps = over.initialProps ?? { state, activePreviewPane: previewPane };
 	return { config, initialProps };
@@ -160,7 +160,6 @@ describe("makeDialog — single-question mode", () => {
 		const joined = dlg.render(80).join("\n");
 		expect(joined).not.toContain("<TABBAR>");
 		expect(joined).toContain("<PREVIEW>");
-		expect(joined).toContain("<CHAT_ROW>");
 		expect(joined).toContain(HINT_SINGLE);
 	});
 
@@ -186,13 +185,12 @@ describe("makeDialog — single-question mode", () => {
 });
 
 describe("makeDialog — multi-question (question tab)", () => {
-	it("includes TabBar + PreviewPane + chat row + multi hint", () => {
+	it("includes TabBar + PreviewPane + multi hint", () => {
 		const dlg = makeDialog(makeConfig());
 		const joined = dlg.render(80).join("\n");
 		expect(joined).toContain("<TABBAR>");
 		expect(joined).toContain("<PREVIEW>");
-		expect(joined).toContain("<CHAT_ROW>");
-		expect(joined).toContain(HINT_MULTI);
+		expect(joined).toContain(HINT_PART_NOTES);
 	});
 
 	it("does NOT render the inner header badge inside the dialog body in multi-question mode", () => {
@@ -217,11 +215,10 @@ describe("makeDialog — multi-question (question tab)", () => {
 			optionIndex: 0,
 			notesVisible: false,
 			inputMode: false,
-			chatFocused: false,
 			answers: new Map(),
 			multiSelectChecked: new Set(),
+			customDraftsByTab: new Map(),
 			notesByTab: new Map(),
-			focusedOptionHasPreview: false,
 			submitChoiceIndex: 0,
 			notesDraft: "",
 			collapsed: false,
@@ -247,10 +244,10 @@ describe("makeDialog — multi-question (question tab)", () => {
 			}),
 		);
 		const joined = dlg.render(120).join("\n");
-		expect(joined).toContain(HINT_MULTISELECT_SUFFIX.trim());
+		expect(joined).toContain(HINT_PART_TOGGLE);
 	});
 
-	it("appends 'n for notes' when focused option carries a preview", () => {
+	it("renders 'n to add notes' in the resting hint (universal — no preview required)", () => {
 		const answer: QuestionAnswer = { questionIndex: 0, question: "Q1?", kind: "option", answer: "A" };
 		const dlg = makeDialog(
 			makeConfig({
@@ -259,11 +256,10 @@ describe("makeDialog — multi-question (question tab)", () => {
 					optionIndex: 0,
 					notesVisible: false,
 					inputMode: false,
-					chatFocused: false,
 					answers: new Map([[0, answer]]),
 					multiSelectChecked: new Set(),
+					customDraftsByTab: new Map(),
 					notesByTab: new Map(),
-					focusedOptionHasPreview: true,
 					submitChoiceIndex: 0,
 					notesDraft: "",
 					collapsed: false,
@@ -271,29 +267,74 @@ describe("makeDialog — multi-question (question tab)", () => {
 			}),
 		);
 		const joined = dlg.render(80).join("\n");
-		expect(joined).toContain(HINT_NOTES_SUFFIX.trim());
+		expect(joined).toContain(HINT_PART_NOTES);
 	});
 
-	it("notesVisible adds the notes Input below the preview (line count grows)", () => {
-		const hidden = makeDialog(makeConfig()).render(80);
+	it("footer hint names the configured collapseKey instead of the default (#176)", () => {
+		const joined = makeDialog(makeConfig({ collapseKey: "alt+o" }))
+			.render(160)
+			.join("\n");
+		expect(joined).toContain("Alt+O to collapse");
+		expect(joined).not.toContain("Ctrl+]");
+	});
+
+	it("footer hint drops the collapse part when collapseKey is 'off' (#176)", () => {
+		const joined = makeDialog(makeConfig({ collapseKey: "off" }))
+			.render(160)
+			.join("\n");
+		expect(joined).not.toContain("to collapse");
+		expect(joined).toContain(HINT_PART_ENTER);
+		expect(joined).toContain("Esc to cancel");
+	});
+
+	it("shows multiline controls at the right and drops notes while inputMode captures text", () => {
+		const dlg = makeDialog(
+			makeConfig({
+				state: {
+					currentTab: 0,
+					optionIndex: 0,
+					notesVisible: false,
+					inputMode: true,
+					answers: new Map(),
+					multiSelectChecked: new Set(),
+					customDraftsByTab: new Map(),
+					notesByTab: new Map(),
+					submitChoiceIndex: 0,
+					notesDraft: "",
+					collapsed: false,
+				},
+			}),
+		);
+		const joined = dlg.render(160).join("\n");
+		expect(joined).toContain(HINT_PART_ENTER);
+		expect(joined).toContain(HINT_PART_NEW_LINE);
+		expect(joined).toContain(HINT_PART_CLEAR);
+		expect(joined.indexOf(HINT_PART_NEW_LINE)).toBeGreaterThan(joined.indexOf(HINT_PART_COLLAPSE));
+		expect(joined.indexOf(HINT_PART_CLEAR)).toBeGreaterThan(joined.indexOf(HINT_PART_NEW_LINE));
+		expect(joined).not.toContain("Ctrl+G to edit");
+		expect(joined).not.toContain(HINT_PART_NOTES);
+	});
+
+	it("notesVisible adds the notes editor below the preview (line count grows)", () => {
+		const hidden = makeDialog(makeConfig()).render(160);
 		const visibleCfg = makeConfig({
 			state: {
 				currentTab: 0,
 				optionIndex: 0,
 				notesVisible: true,
 				inputMode: false,
-				chatFocused: false,
 				answers: new Map(),
 				multiSelectChecked: new Set(),
+				customDraftsByTab: new Map(),
 				notesByTab: new Map(),
-				focusedOptionHasPreview: false,
 				submitChoiceIndex: 0,
 				notesDraft: "",
 				collapsed: false,
 			},
 		});
-		const visible = makeDialog(visibleCfg).render(80);
+		const visible = makeDialog(visibleCfg).render(160);
 		expect(visible.length).toBeGreaterThan(hidden.length);
+		expect(visible.join("\n")).toContain(HINT_PART_NEW_LINE);
 		expect(visible.join("\n")).toContain("<NOTES_INPUT>");
 		expect(hidden.join("\n")).not.toContain("<NOTES_INPUT>");
 	});
@@ -313,11 +354,10 @@ describe("makeDialog — multi-question (question tab)", () => {
 			optionIndex: 1,
 			notesVisible: false,
 			inputMode: false,
-			chatFocused: false,
 			answers: new Map(),
 			multiSelectChecked: new Set([0]),
+			customDraftsByTab: new Map(),
 			notesByTab: new Map(),
-			focusedOptionHasPreview: false,
 			submitChoiceIndex: 0,
 			notesDraft: "",
 			collapsed: false,
@@ -367,11 +407,10 @@ describe("makeDialog — Submit tab", () => {
 			optionIndex: 0,
 			notesVisible: false,
 			inputMode: false,
-			chatFocused: false,
 			answers,
 			multiSelectChecked: new Set(),
+			customDraftsByTab: new Map(),
 			notesByTab: new Map(),
-			focusedOptionHasPreview: false,
 			submitChoiceIndex: 0,
 			notesDraft: "",
 			collapsed: false,
@@ -578,11 +617,10 @@ describe("makeDialog — width safety", () => {
 							optionIndex: 0,
 							notesVisible: ct === 0,
 							inputMode: false,
-							chatFocused: false,
 							answers: new Map([[0, { questionIndex: 0, question: "q", kind: "option", answer: "A" }]]),
 							multiSelectChecked: new Set(),
+							customDraftsByTab: new Map(),
 							notesByTab: new Map(),
-							focusedOptionHasPreview: false,
 							submitChoiceIndex: 0,
 							notesDraft: "",
 							collapsed: false,
@@ -606,23 +644,17 @@ describe("makeDialog — body residual padding", () => {
 
 	it("residual rows live AFTER the controls hint (very bottom of the dialog)", () => {
 		// Residual = (getBodyHeight + maxFooterRowCount) - (currentBodyHeight + footerRowCount)
-		//          = (6 + 5) - (1 + 4) = 6
+		//          = (6 + 5) - (1 + 2) = 8  (footerRowCount dropped 4→2 after chat-row removal)
 		const lines = makeDialog(makeConfig({ getBodyHeight: () => 6, getCurrentBodyHeight: () => 1 })).render(80);
-		const chatIdx = lines.findIndex((l) => l.includes("<CHAT_ROW>"));
-		const hintIdx = lines.findIndex((l) => l.includes(HINT_MULTI));
-		expect(chatIdx).toBeGreaterThan(0);
-		expect(hintIdx).toBeGreaterThan(chatIdx);
+		const hintIdx = lines.findIndex((l) => l.includes(HINT_PART_ENTER));
+		expect(hintIdx).toBeGreaterThan(0);
 		const tail = lines.slice(hintIdx + 1);
-		expect(tail.length).toBe(6);
+		expect(tail.length).toBe(8);
 		expect(tail.every((l) => l.trim() === "")).toBe(true);
-		const previewIdx = lines.findIndex((l) => l.includes("<PREVIEW>"));
-		const between = lines.slice(previewIdx + 1, chatIdx);
-		const blanksBetween = between.filter((l) => l.trim() === "").length;
-		expect(blanksBetween).toBeLessThanOrEqual(2);
 	});
 
 	it("dialog total line count is identical across tab switches with mixed single/multi fixture", () => {
-		// Render at width 120 so HINT_MULTI (+ HINT_MULTISELECT_SUFFIX) doesn't wrap on either tab.
+		// Render at width 120 so the full hint (all HINT_PART_* incl. toggle) doesn't wrap on either tab.
 		const multiQ: QuestionData = {
 			question: "areas?",
 			header: "H2",
@@ -649,11 +681,10 @@ describe("makeDialog — body residual padding", () => {
 			optionIndex: 0,
 			notesVisible: false,
 			inputMode: false,
-			chatFocused: false,
 			answers: new Map(),
 			multiSelectChecked: new Set(),
+			customDraftsByTab: new Map(),
 			notesByTab: new Map(),
-			focusedOptionHasPreview: false,
 			submitChoiceIndex: 0,
 			notesDraft: "",
 			collapsed: false,
@@ -664,37 +695,17 @@ describe("makeDialog — body residual padding", () => {
 		const multiSelectByTab: ReadonlyArray<MultiSelectView | undefined> = [undefined, mso];
 		const getBodyHeight = (w: number) => Math.max(1, (mso as unknown as Component).render(w).length);
 
-		const dlgTab0 = makeDialog(makeConfig({ questions, state: stateTab0, multiSelectByTab, getBodyHeight }));
-		const dlgTab1 = makeDialog(makeConfig({ questions, state: stateTab1, multiSelectByTab, getBodyHeight }));
+		// The "Type something." row on multi-select tabs adds (+1 to MultiSelectView
+		// height), pushing this 5-option multi tab's body from 11 → 12 and the full dialog past
+		// the prior 24-row default into the overflow regime (which disables the residual spacer
+		// that equalizes cross-tab height). Give the dialog enough rows that both tabs render
+		// without overflow so the residual spacer stays active and the heights match.
+		const dlgTab0 = makeDialog(
+			makeConfig({ questions, state: stateTab0, multiSelectByTab, getBodyHeight, getTerminalRows: () => 32 }),
+		);
+		const dlgTab1 = makeDialog(
+			makeConfig({ questions, state: stateTab1, multiSelectByTab, getBodyHeight, getTerminalRows: () => 32 }),
+		);
 		expect(dlgTab0.render(120).length).toBe(dlgTab1.render(120).length);
-	});
-});
-
-describe("makeDialog — chatRow focus visual", () => {
-	it("chatRow shows active ❯ pointer when focused: true; inactive when focused: false", () => {
-		const theme: WrappingSelectTheme = {
-			selectedText: (t) => t,
-			description: (t) => t,
-			scrollInfo: (t) => t,
-		};
-		const focusedChat = new ChatRowView({
-			item: { kind: "chat", label: "Chat about this" },
-			theme,
-		});
-		focusedChat.setProps({ focused: true, numbering: { offset: 0, total: 1 } });
-		const focused = makeDialog(makeConfig({ chatList: focusedChat })).render(80);
-		const focusedChatLine = focused.find((l) => l.includes("Chat about this"));
-		expect(focusedChatLine).toBeDefined();
-		expect(focusedChatLine?.includes("❯ ")).toBe(true);
-
-		const blurredChat = new ChatRowView({
-			item: { kind: "chat", label: "Chat about this" },
-			theme,
-		});
-		blurredChat.setProps({ focused: false, numbering: { offset: 0, total: 1 } });
-		const blurred = makeDialog(makeConfig({ chatList: blurredChat })).render(80);
-		const blurredChatLine = blurred.find((l) => l.includes("Chat about this"));
-		expect(blurredChatLine).toBeDefined();
-		expect(blurredChatLine?.includes("❯ ")).toBe(false);
 	});
 });

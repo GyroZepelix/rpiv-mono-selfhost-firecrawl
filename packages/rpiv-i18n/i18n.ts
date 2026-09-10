@@ -20,7 +20,7 @@
  * Config persists at ~/.config/rpiv-i18n/locale.json (chmod 0o600, best-effort writes).
  */
 
-import { configPath, loadJsonConfig, saveJsonConfig } from "@juicesharp/rpiv-config";
+import { configPath, loadJsonConfigWithLegacyFallback, saveJsonConfig } from "@juicesharp/rpiv-config";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,6 +63,7 @@ export const SUPPORTED_LOCALES: readonly { code: string; label: string }[] = [
 	{ code: "pt-BR", label: "Português (Brasil)" },
 	{ code: "ru", label: "Русский" },
 	{ code: "uk", label: "Українська" },
+	{ code: "zh", label: "中文" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -181,7 +182,7 @@ export function getActiveLocale(): string | undefined {
 // ---------------------------------------------------------------------------
 
 export function loadLocaleConfig(): LocaleConfig {
-	return loadJsonConfig<LocaleConfig>(LOCALE_CONFIG_PATH);
+	return loadJsonConfigWithLegacyFallback<LocaleConfig>("rpiv-i18n", "locale.json");
 }
 
 /**

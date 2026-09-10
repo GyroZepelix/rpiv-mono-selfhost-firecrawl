@@ -45,6 +45,7 @@ beforeEach(() => {
 	delete process.env.OLLAMA_API_KEY;
 	delete process.env.OLLAMA_HOST;
 	delete process.env.GITHUB_TOKEN;
+	delete process.env.WEB_SEARCH_PROVIDER;
 	rmSync(CONFIG_PATH, { force: true });
 });
 
@@ -113,11 +114,9 @@ const PROVIDER_MATRIX = [
 			JSON.stringify({
 				code: 200,
 				status: 20000,
-				data: {
-					results: [{ title: "T", url: "https://x", description: "snip" }],
-				},
+				data: [{ title: "T", url: "https://x", description: "snip" }],
 			}),
-		emptyResponse: () => JSON.stringify({ code: 200, status: 20000, data: { results: [] } }),
+		emptyResponse: () => JSON.stringify({ code: 200, status: 20000, data: [] }),
 		authHeader: "Authorization" as string | null,
 	},
 	{
@@ -142,112 +141,114 @@ const PROVIDER_MATRIX = [
 	},
 ] as const;
 
-describe.each(PROVIDER_MATRIX)("web_search.execute — $provider", ({
-	provider,
-	envVar,
-	urlMatcher,
-	buildResponse,
-	emptyResponse,
-	authHeader,
-}) => {
-	it(`uses env key for ${provider}`, async () => {
-		process.env[envVar] = "env-key";
-		writeConfig({ provider });
-		const stub = stubFetch([
-			{
-				match: urlMatcher,
-				response: () => new Response(buildResponse(), { status: 200 }),
-			},
-		]);
-		const { captured } = registerAndCapture();
-		const r = await captured.tools
-			.get("web_search")
-			?.execute?.("tc", { query: "hello", max_results: 3 }, undefined as never, undefined as never, createMockCtx());
-		expect(r?.content[0]).toMatchObject({ type: "text" });
-		if (authHeader) {
-			const headers = stub.calls[0].init?.headers as Record<string, string>;
-			const headerVal = headers[authHeader];
-			if (provider === "jina" || provider === "firecrawl" || provider === "perplexity") {
-				expect(headerVal).toBe("Bearer env-key");
-			} else {
-				expect(headerVal).toBe("env-key");
-			}
-		} else {
-			const body = JSON.parse(stub.calls[0].init?.body as string);
-			expect(body.api_key).toBe("env-key");
-		}
-	});
-
-	it(`falls back to config key for ${provider}`, async () => {
-		writeConfig({ provider, apiKeys: { [provider]: "config-key" } });
-		const stub = stubFetch([
-			{
-				match: urlMatcher,
-				response: () => new Response(buildResponse(), { status: 200 }),
-			},
-		]);
-		const { captured } = registerAndCapture();
-		await captured.tools
-			.get("web_search")
-			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
-		if (authHeader) {
-			const headers = stub.calls[0].init?.headers as Record<string, string>;
-			const headerVal = headers[authHeader];
-			if (provider === "jina" || provider === "firecrawl" || provider === "perplexity") {
-				expect(headerVal).toBe("Bearer config-key");
-			} else {
-				expect(headerVal).toBe("config-key");
-			}
-		} else {
-			const body = JSON.parse(stub.calls[0].init?.body as string);
-			expect(body.api_key).toBe("config-key");
-		}
-	});
-
-	it(`throws when no key configured for ${provider}`, async () => {
-		writeConfig({ provider });
-		const { captured } = registerAndCapture();
-		await expect(
-			captured.tools
+describe.each(PROVIDER_MATRIX)(
+	"web_search.execute — $provider",
+	({ provider, envVar, urlMatcher, buildResponse, emptyResponse, authHeader }) => {
+		it(`uses env key for ${provider}`, async () => {
+			process.env[envVar] = "env-key";
+			writeConfig({ provider });
+			const stub = stubFetch([
+				{
+					match: urlMatcher,
+					response: () => new Response(buildResponse(), { status: 200 }),
+				},
+			]);
+			const { captured } = registerAndCapture();
+			const r = await captured.tools
 				.get("web_search")
-				?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx()),
-		).rejects.toThrow(new RegExp(`${envVar} is not set`));
-	});
+				?.execute?.(
+					"tc",
+					{ query: "hello", max_results: 3 },
+					undefined as never,
+					undefined as never,
+					createMockCtx(),
+				);
+			expect(r?.content[0]).toMatchObject({ type: "text" });
+			if (authHeader) {
+				const headers = stub.calls[0].init?.headers as Record<string, string>;
+				const headerVal = headers[authHeader];
+				if (provider === "jina" || provider === "firecrawl" || provider === "perplexity") {
+					expect(headerVal).toBe("Bearer env-key");
+				} else {
+					expect(headerVal).toBe("env-key");
+				}
+			} else {
+				const body = JSON.parse(stub.calls[0].init?.body as string);
+				expect(body.api_key).toBe("env-key");
+			}
+		});
 
-	it(`returns no-results envelope for ${provider}`, async () => {
-		process.env[envVar] = "k";
-		writeConfig({ provider });
-		stubFetch([
-			{
-				match: urlMatcher,
-				response: () => new Response(emptyResponse(), { status: 200 }),
-			},
-		]);
-		const { captured } = registerAndCapture();
-		const r = await captured.tools
-			.get("web_search")
-			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
-		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("No results found") });
-	});
-
-	it(`wraps non-2xx as '${provider} Search API error (status)'`, async () => {
-		const label = provider.charAt(0).toUpperCase() + provider.slice(1);
-		process.env[envVar] = "k";
-		writeConfig({ provider });
-		stubFetch([
-			{
-				match: urlMatcher,
-				response: () => new Response("rate limit", { status: 429 }),
-			},
-		]);
-		const { captured } = registerAndCapture();
-		await expect(
-			captured.tools
+		it(`falls back to config key for ${provider}`, async () => {
+			writeConfig({ provider, apiKeys: { [provider]: "config-key" } });
+			const stub = stubFetch([
+				{
+					match: urlMatcher,
+					response: () => new Response(buildResponse(), { status: 200 }),
+				},
+			]);
+			const { captured } = registerAndCapture();
+			await captured.tools
 				.get("web_search")
-				?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx()),
-		).rejects.toThrow(new RegExp(`${label} Search API error \\(429\\)`));
-	});
-});
+				?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+			if (authHeader) {
+				const headers = stub.calls[0].init?.headers as Record<string, string>;
+				const headerVal = headers[authHeader];
+				if (provider === "jina" || provider === "firecrawl" || provider === "perplexity") {
+					expect(headerVal).toBe("Bearer config-key");
+				} else {
+					expect(headerVal).toBe("config-key");
+				}
+			} else {
+				const body = JSON.parse(stub.calls[0].init?.body as string);
+				expect(body.api_key).toBe("config-key");
+			}
+		});
+
+		it(`throws when no key configured for ${provider}`, async () => {
+			writeConfig({ provider });
+			const { captured } = registerAndCapture();
+			await expect(
+				captured.tools
+					.get("web_search")
+					?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx()),
+			).rejects.toThrow(new RegExp(`${envVar} is not set`));
+		});
+
+		it(`returns no-results envelope for ${provider}`, async () => {
+			process.env[envVar] = "k";
+			writeConfig({ provider });
+			stubFetch([
+				{
+					match: urlMatcher,
+					response: () => new Response(emptyResponse(), { status: 200 }),
+				},
+			]);
+			const { captured } = registerAndCapture();
+			const r = await captured.tools
+				.get("web_search")
+				?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+			expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("No results found") });
+		});
+
+		it(`wraps non-2xx as '${provider} Search API error (status)'`, async () => {
+			const label = provider.charAt(0).toUpperCase() + provider.slice(1);
+			process.env[envVar] = "k";
+			writeConfig({ provider });
+			stubFetch([
+				{
+					match: urlMatcher,
+					response: () => new Response("rate limit", { status: 429 }),
+				},
+			]);
+			const { captured } = registerAndCapture();
+			await expect(
+				captured.tools
+					.get("web_search")
+					?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx()),
+			).rejects.toThrow(new RegExp(`${label} Search API error \\(429\\)`));
+		});
+	},
+);
 
 describe("web_search.execute — provider-independent behavior", () => {
 	it("clamps max_results to [1,10]", async () => {
@@ -284,7 +285,7 @@ describe("web_search.execute — provider-independent behavior", () => {
 		const r = await captured.tools
 			.get("web_search")
 			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
-		expect((r?.details as { backend: string }).backend).toBe("brave");
+		expect((r!.details as { backend: string }).backend).toBe("brave");
 		expect(stub.calls[0].url).toContain("api.search.brave.com");
 	});
 
@@ -493,7 +494,7 @@ describe("web_fetch.execute — happy path", () => {
 		const r = await captured.tools
 			.get("web_fetch")
 			?.execute?.("tc", { url: "https://x.com" }, undefined as never, undefined as never, createMockCtx());
-		expect((r?.details as { contentLength: number }).contentLength).toBe(100);
+		expect((r!.details as { contentLength: number }).contentLength).toBe(100);
 	});
 
 	it("falls back to defaults when config file is malformed JSON", async () => {
@@ -509,7 +510,7 @@ describe("web_fetch.execute — happy path", () => {
 		const r = await captured.tools
 			.get("web_fetch")
 			?.execute?.("tc", { url: "https://x.com" }, undefined as never, undefined as never, createMockCtx());
-		expect((r?.content[0] as { text: string }).text).toContain("hi");
+		expect((r!.content[0] as { text: string }).text).toContain("hi");
 	});
 
 	it("decodes numeric HTML entities in text/html bodies", async () => {
@@ -524,7 +525,7 @@ describe("web_fetch.execute — happy path", () => {
 		const r = await captured.tools
 			.get("web_fetch")
 			?.execute?.("tc", { url: "https://x.com" }, undefined as never, undefined as never, createMockCtx());
-		expect((r?.content[0] as { text: string }).text).toContain("ABC");
+		expect((r!.content[0] as { text: string }).text).toContain("ABC");
 	});
 
 	it("spills full body to temp file and appends truncation footer when truncated", async () => {
@@ -540,7 +541,7 @@ describe("web_fetch.execute — happy path", () => {
 			.get("web_fetch")
 			?.execute?.("tc", { url: "https://big.com" }, undefined as never, undefined as never, createMockCtx());
 
-		const text = (r?.content[0] as { text: string }).text;
+		const text = (r!.content[0] as { text: string }).text;
 		expect(text).toContain("Content truncated:");
 		expect(text).toContain("Full content saved to:");
 
@@ -589,39 +590,49 @@ const FETCH_ERROR_MATRIX: ReadonlyArray<{
 	},
 ];
 
-describe.each(FETCH_ERROR_MATRIX)("web_fetch.execute — $provider error paths", ({
-	provider,
-	envVar,
-	fetchUrlMatcher,
-	label,
-}) => {
-	it(`fetch throws when no key configured for ${provider}`, async () => {
-		writeConfig({ provider });
-		const { captured } = registerAndCapture();
-		await expect(
-			captured.tools
-				.get("web_fetch")
-				?.execute?.("tc", { url: "https://example.com" }, undefined as never, undefined as never, createMockCtx()),
-		).rejects.toThrow(new RegExp(`${envVar} is not set`));
-	});
+describe.each(FETCH_ERROR_MATRIX)(
+	"web_fetch.execute — $provider error paths",
+	({ provider, envVar, fetchUrlMatcher, label }) => {
+		it(`fetch throws when no key configured for ${provider}`, async () => {
+			writeConfig({ provider });
+			const { captured } = registerAndCapture();
+			await expect(
+				captured.tools
+					.get("web_fetch")
+					?.execute?.(
+						"tc",
+						{ url: "https://example.com" },
+						undefined as never,
+						undefined as never,
+						createMockCtx(),
+					),
+			).rejects.toThrow(new RegExp(`${envVar} is not set`));
+		});
 
-	it(`fetch wraps non-2xx as '${label} Fetch API error (429)'`, async () => {
-		process.env[envVar] = "k";
-		writeConfig({ provider });
-		stubFetch([
-			{
-				match: fetchUrlMatcher,
-				response: () => new Response("rate limit", { status: 429 }),
-			},
-		]);
-		const { captured } = registerAndCapture();
-		await expect(
-			captured.tools
-				.get("web_fetch")
-				?.execute?.("tc", { url: "https://example.com" }, undefined as never, undefined as never, createMockCtx()),
-		).rejects.toThrow(new RegExp(`${label} Fetch API error \\(429\\)`));
-	});
-});
+		it(`fetch wraps non-2xx as '${label} Fetch API error (429)'`, async () => {
+			process.env[envVar] = "k";
+			writeConfig({ provider });
+			stubFetch([
+				{
+					match: fetchUrlMatcher,
+					response: () => new Response("rate limit", { status: 429 }),
+				},
+			]);
+			const { captured } = registerAndCapture();
+			await expect(
+				captured.tools
+					.get("web_fetch")
+					?.execute?.(
+						"tc",
+						{ url: "https://example.com" },
+						undefined as never,
+						undefined as never,
+						createMockCtx(),
+					),
+			).rejects.toThrow(new RegExp(`${label} Fetch API error \\(429\\)`));
+		});
+	},
+);
 
 // Brave/Serper/SearXNG are SearchProvider-only after the role split: the
 // orchestrator falls through to `fetchViaGenericHtml`. The dispatch is
@@ -1295,6 +1306,19 @@ describe("web_search.execute — firecrawl configurable URL", () => {
 		expect(stub.calls[0].url).toContain(`${FIRECRAWL_DEFAULT_URL}/search`);
 	});
 
+	it.each(["https://api.firecrawl.dev:443/v1", "https://api.firecrawl.dev./v1"])(
+		"requires a key for equivalent Firecrawl Cloud URL %s",
+		async (baseUrl) => {
+			writeConfig({ provider: "firecrawl", baseUrls: { firecrawl: baseUrl } });
+			const { captured } = registerAndCapture();
+			await expect(
+				captured.tools
+					.get("web_search")
+					?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx()),
+			).rejects.toThrow(/FIRECRAWL_API_KEY is not set/);
+		},
+	);
+
 	it("omits Authorization for self-hosted URL when no key is configured", async () => {
 		writeConfig({ provider: "firecrawl", baseUrls: { firecrawl: "http://self-hosted:3002/v1" } });
 		const stub = stubFetch([
@@ -1585,7 +1609,7 @@ describe("web_search.execute — searxng", () => {
 		const r = await captured.tools
 			.get("web_search")
 			?.execute?.("tc", { query: "x", max_results: 3 }, undefined as never, undefined as never, createMockCtx());
-		expect((r?.details as { results: Array<{ title: string; url: string; snippet: string }> }).results).toHaveLength(
+		expect((r!.details as { results: Array<{ title: string; url: string; snippet: string }> }).results).toHaveLength(
 			3,
 		);
 	});
@@ -2031,7 +2055,7 @@ describe("web_search.execute — ollama", () => {
 		const r = await captured.tools
 			.get("web_search")
 			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
-		const result = (r?.details as { results: Array<{ title: string; url: string; snippet: string }> }).results[0];
+		const result = (r!.details as { results: Array<{ title: string; url: string; snippet: string }> }).results[0];
 		expect(result.title).toBe("");
 		expect(result.url).toBe("");
 		expect(result.snippet).toBe("");
@@ -2432,5 +2456,354 @@ describe("formatShowConfigMessage — URL interceptors block", () => {
 		expect(msg).toContain("github: enabled");
 		expect(msg).toContain("GITHUB_TOKEN: ghp_");
 		expect(msg).toContain("clonePath:");
+	});
+});
+
+// Per-call provider override — web_search accepts an optional `provider` param
+// that routes the call to a different backend than `config.provider` without
+// mutating persisted state. Key/URL resolution still reads from env/config
+// under the named provider, so the override must have its own credentials.
+describe("web_search.execute — per-call provider override", () => {
+	it("routes to the override provider when its key is configured", async () => {
+		// Active provider is brave (with key), but the call asks for tavily.
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		process.env.TAVILY_API_KEY = "tavily-key";
+		writeConfig({ provider: "brave" });
+		const stub = stubFetch([
+			{
+				match: (u) => u.includes("api.tavily.com"),
+				response: () =>
+					new Response(JSON.stringify({ results: [{ title: "T", url: "https://x", content: "snip" }] }), {
+						status: 200,
+					}),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.(
+				"tc",
+				{ query: "hello", provider: "tavily" },
+				undefined as never,
+				undefined as never,
+				createMockCtx(),
+			);
+		expect((r!.details as { backend: string }).backend).toBe("tavily");
+		expect(stub.calls[0].url).toContain("api.tavily.com");
+		const body = JSON.parse(stub.calls[0].init?.body as string);
+		expect(body.api_key).toBe("tavily-key");
+	});
+
+	it("override works with config-file key (no env var)", async () => {
+		writeConfig({ provider: "brave", apiKeys: { brave: "brave-key", exa: "exa-config-key" } });
+		const stub = stubFetch([
+			{
+				match: (u) => u.includes("api.exa.ai"),
+				response: () =>
+					new Response(JSON.stringify({ results: [{ title: "T", url: "https://x", text: "snip" }] }), {
+						status: 200,
+					}),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x", provider: "exa" }, undefined as never, undefined as never, createMockCtx());
+		expect((r!.details as { backend: string }).backend).toBe("exa");
+		const headers = stub.calls[0].init?.headers as Record<string, string>;
+		expect(headers["x-api-key"]).toBe("exa-config-key");
+	});
+
+	it("override resolves baseUrl for self-hosted providers (searxng)", async () => {
+		process.env.SEARXNG_URL = "http://override-host:9090";
+		// Active provider is brave; override to searxng should pick up SEARXNG_URL.
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		const stub = stubFetch([
+			{
+				match: (u) => u.startsWith("http://override-host:9090/"),
+				response: () =>
+					new Response(
+						JSON.stringify({
+							results: [{ title: "T", url: "https://x", content: "snip" }],
+						}),
+						{ status: 200 },
+					),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.(
+				"tc",
+				{ query: "x", provider: "searxng" },
+				undefined as never,
+				undefined as never,
+				createMockCtx(),
+			);
+		expect((r!.details as { backend: string }).backend).toBe("searxng");
+		expect(new URL(stub.calls[0].url).host).toBe("override-host:9090");
+	});
+
+	it("override throws when the named provider has no key configured (no silent fallback)", async () => {
+		// Active provider brave has a key, but the override (exa) does not.
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		const { captured } = registerAndCapture();
+		await expect(
+			captured.tools
+				.get("web_search")
+				?.execute?.("tc", { query: "x", provider: "exa" }, undefined as never, undefined as never, createMockCtx()),
+		).rejects.toThrow(/EXA_API_KEY is not set/);
+	});
+
+	it("override with an unknown provider name throws a clear error", async () => {
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		const { captured } = registerAndCapture();
+		await expect(
+			captured.tools
+				.get("web_search")
+				?.execute?.(
+					"tc",
+					{ query: "x", provider: "nonexistent" },
+					undefined as never,
+					undefined as never,
+					createMockCtx(),
+				),
+		).rejects.toThrow(/Unknown web_search provider: "nonexistent"/);
+	});
+
+	it("override omitted falls back to config.provider (default path unchanged)", async () => {
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		const stub = stubFetch([
+			{
+				match: (u) => u.includes("api.search.brave.com"),
+				response: () =>
+					new Response(
+						JSON.stringify({
+							web: { results: [{ title: "T", url: "https://x", description: "snip" }] },
+						}),
+						{ status: 200 },
+					),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		expect((r!.details as { backend: string }).backend).toBe("brave");
+		expect(stub.calls[0].url).toContain("api.search.brave.com");
+	});
+
+	it("schema declares the provider enum with all known names", () => {
+		const { captured } = registerAndCapture();
+		const params = captured.tools.get("web_search")?.parameters as unknown as {
+			properties: { provider: { anyOf: Array<{ const: string }> } };
+		};
+		const literals = params.properties.provider?.anyOf?.map((e) => e.const) ?? [];
+		expect(literals).toEqual(
+			expect.arrayContaining([
+				"brave",
+				"tavily",
+				"serper",
+				"exa",
+				"youcom",
+				"jina",
+				"firecrawl",
+				"perplexity",
+				"searxng",
+				"ollama",
+			]),
+		);
+		expect(literals).toHaveLength(10);
+	});
+});
+
+// WEB_SEARCH_PROVIDER — middle precedence tier between the per-call override
+// and config.provider. Lets an operator pin a backend via env without editing
+// config.json; validated like the override so a bogus name throws (no silent
+// fallback) rather than degrading to default.
+describe("web_search.execute — WEB_SEARCH_PROVIDER precedence", () => {
+	it("WEB_SEARCH_PROVIDER beats config.provider", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "tavily";
+		process.env.TAVILY_API_KEY = "tavily-key";
+		writeConfig({ provider: "brave" });
+		stubFetch([
+			{
+				match: (u) => u.includes("api.tavily.com"),
+				response: () =>
+					new Response(JSON.stringify({ results: [{ title: "T", url: "https://x", content: "snip" }] }), {
+						status: 200,
+					}),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		expect((r!.details as { backend: string }).backend).toBe("tavily");
+	});
+
+	it("per-call provider override beats WEB_SEARCH_PROVIDER", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "tavily";
+		process.env.TAVILY_API_KEY = "tavily-key";
+		process.env.EXA_API_KEY = "exa-key";
+		writeConfig({ provider: "brave" });
+		stubFetch([
+			{
+				match: (u) => u.includes("api.exa.ai"),
+				response: () =>
+					new Response(JSON.stringify({ results: [{ title: "T", url: "https://x", text: "snip" }] }), {
+						status: 200,
+					}),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x", provider: "exa" }, undefined as never, undefined as never, createMockCtx());
+		expect((r!.details as { backend: string }).backend).toBe("exa");
+	});
+
+	it("valid per-call override succeeds even when WEB_SEARCH_PROVIDER is bogus", async () => {
+		// The override is the documented per-call escape hatch: when present it
+		// wins without consulting the env tier, so a misconfigured env var must
+		// not abort the call. (Regression guard for the unconditional-validation
+		// interaction — env is validated only when it actually resolves.)
+		process.env.WEB_SEARCH_PROVIDER = "bogus";
+		process.env.EXA_API_KEY = "exa-key";
+		writeConfig({ provider: "brave" });
+		stubFetch([
+			{
+				match: (u) => u.includes("api.exa.ai"),
+				response: () =>
+					new Response(JSON.stringify({ results: [{ title: "T", url: "https://x", text: "snip" }] }), {
+						status: 200,
+					}),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x", provider: "exa" }, undefined as never, undefined as never, createMockCtx());
+		expect((r!.details as { backend: string }).backend).toBe("exa");
+	});
+
+	it("whitespace-only WEB_SEARCH_PROVIDER is treated as unset (config wins)", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "   ";
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		stubFetch([
+			{
+				match: (u) => u.includes("api.search.brave.com"),
+				response: () =>
+					new Response(
+						JSON.stringify({ web: { results: [{ title: "T", url: "https://x", description: "snip" }] } }),
+						{ status: 200 },
+					),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		expect((r!.details as { backend: string }).backend).toBe("brave");
+	});
+
+	it("unknown WEB_SEARCH_PROVIDER name throws (no silent fallback)", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "bogus";
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		const { captured } = registerAndCapture();
+		await expect(
+			captured.tools
+				.get("web_search")
+				?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx()),
+		).rejects.toThrow(/Unknown web_search provider: "bogus"/);
+	});
+});
+
+// --show surfaces the active provider's source so an env pin is discoverable
+// rather than invisible. Mirrors the URL-line `source: env|config|default`
+// pattern already used for self-hosted base URLs.
+describe("/web-tools --show — active provider source", () => {
+	it("reports source: env when WEB_SEARCH_PROVIDER is set", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "tavily";
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		await captured.commands.get("web-tools")?.handler("--show", ctx as never);
+		const msg = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		expect(msg).toContain("active provider: tavily (source: env)");
+	});
+
+	it("reports source: config when config.provider is set and no env", async () => {
+		writeConfig({ provider: "brave" });
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		await captured.commands.get("web-tools")?.handler("--show", ctx as never);
+		const msg = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		expect(msg).toContain("active provider: brave (source: config)");
+	});
+
+	it("reports source: default when neither env nor config is set", async () => {
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		await captured.commands.get("web-tools")?.handler("--show", ctx as never);
+		const msg = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		expect(msg).toContain("active provider: brave (source: default)");
+	});
+});
+
+// Picker honors WEB_SEARCH_PROVIDER: the env-named provider sorts first and is
+// the only one carrying ✓. With no key configured it shows no "(configured)".
+describe("/web-tools picker — WEB_SEARCH_PROVIDER drives ordering", () => {
+	it("lists the env-named provider first and marks only it ✓ when no config", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "tavily";
+		const { captured } = registerAndCapture();
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+		const labels = (ctx.ui.select as ReturnType<typeof vi.fn>).mock.calls[0][1] as string[];
+		expect(labels[0]).toBe("Tavily ✓");
+		expect(labels.filter((l) => l.includes("✓"))).toHaveLength(1);
+	});
+});
+
+// web_fetch has no per-call override, so WEB_SEARCH_PROVIDER is its winning
+// tier whenever set: the env-pinned provider's fetch path is used, and a
+// bogus name throws exactly as it does for web_search.
+describe("web_fetch.execute — WEB_SEARCH_PROVIDER precedence", () => {
+	it("WEB_SEARCH_PROVIDER beats config.provider (env-pinned tavily fetch)", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "tavily";
+		process.env.TAVILY_API_KEY = "k";
+		writeConfig({ provider: "brave" });
+		stubFetch([
+			{
+				match: (u) => u.includes("api.tavily.com/extract"),
+				response: () =>
+					new Response(JSON.stringify({ results: [{ url: "https://x.com", raw_content: "extracted text" }] }), {
+						status: 200,
+					}),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		const r = await captured.tools
+			.get("web_fetch")
+			?.execute?.("tc", { url: "https://x.com" }, undefined as never, undefined as never, createMockCtx());
+		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("extracted text") });
+	});
+
+	it("unknown WEB_SEARCH_PROVIDER name throws (no silent fallback)", async () => {
+		process.env.WEB_SEARCH_PROVIDER = "bogus";
+		process.env.BRAVE_SEARCH_API_KEY = "brave-key";
+		writeConfig({ provider: "brave" });
+		const { captured } = registerAndCapture();
+		await expect(
+			captured.tools
+				.get("web_fetch")
+				?.execute?.("tc", { url: "https://x.com" }, undefined as never, undefined as never, createMockCtx()),
+		).rejects.toThrow(/Unknown web_search provider: "bogus"/);
 	});
 });

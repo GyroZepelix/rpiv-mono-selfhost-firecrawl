@@ -1,9 +1,9 @@
 /**
  * rpiv-web-tools — body
  *
- * Provides `web_search` and `web_fetch` tools backed by configurable search
- * providers (Brave, Tavily, Serper, Exa), plus the `/web-tools`
- * slash command for provider and API key configuration.
+ * Provides `web_search` and `web_fetch` tools backed by ten configurable
+ * providers, plus the `/web-tools` slash command for provider, API key, and
+ * endpoint configuration.
  *
  * API key resolution precedence per provider (first wins):
  *   1. Per-provider environment variable (e.g. BRAVE_SEARCH_API_KEY, TAVILY_API_KEY)
@@ -65,8 +65,6 @@ const LEGACY_TOP_LEVEL_KEY_PROVIDER = "brave";
 
 // ---------------------------------------------------------------------------
 // Config persistence — schema + reader/writer live in providers/config.ts.
-// The two local aliases keep the call-site shape identical to pre-refactor
-// (loadConfig / saveConfig) so the rest of this file reads unchanged.
 // ---------------------------------------------------------------------------
 
 const loadConfig = readConfig;
@@ -130,13 +128,68 @@ function resolveProviderBaseUrl(meta: ProviderMeta, config: WebToolsConfig): str
 	return meta.defaultBaseUrl ?? "";
 }
 
-// Centralized instantiation: load active provider name + creds, build via
-// the factory. Called by both registerWebSearchTool and registerWebFetchTool.
-function instantiateActiveProvider(config: WebToolsConfig): {
+// Known provider names — derived once from PROVIDERS so the schema enum,
+// the per-call override validation, and the error messages all stay in sync
+// when a provider is added or removed.
+const KNOWN_PROVIDER_NAMES = PROVIDERS.map((p) => p.name) as readonly string[];
+
+// Uniform "unknown provider" error for both the per-call override path and the
+// WEB_SEARCH_PROVIDER env path so misconfiguration surfaces the same shape.
+function assertKnownProvider(name: string): void {
+	if (!KNOWN_PROVIDER_NAMES.includes(name)) {
+		throw new Error(`Unknown web_search provider: "${name}". Valid providers: ${KNOWN_PROVIDER_NAMES.join(", ")}.`);
+	}
+}
+
+// Active-provider resolution for display + selection surfaces (env over config
+// over default). Returns the raw name + its source — does NOT validate. A bogus
+// WEB_SEARCH_PROVIDER renders in --show/picker (honest display) and only throws
+// on the next web_search, via instantiateProvider's assertKnownProvider.
+function resolveActiveProviderName(config: WebToolsConfig): {
+	name: string;
+	source: "env" | "config" | "default";
+} {
+	const envProvider = process.env.WEB_SEARCH_PROVIDER?.trim();
+	if (envProvider) return { name: envProvider, source: "env" };
+	if (config.provider) return { name: config.provider, source: "config" };
+	return { name: DEFAULT_PROVIDER_NAME, source: "default" };
+}
+
+// Centralized instantiation: resolve provider name + creds, build via the
+// factory. Called by both registerWebSearchTool and registerWebFetchTool.
+//
+// `override` lets a single tool call target a different provider than the
+// active one without mutating persisted state. Resolution (4-tier, first wins):
+//   providerName = override ?? WEB_SEARCH_PROVIDER ?? config.provider ?? DEFAULT_PROVIDER_NAME
+//   1. override (per-call `provider` param) — validated against PROVIDERS;
+//      unknown names throw so callers can detect misconfiguration.
+//   2. WEB_SEARCH_PROVIDER env var — validated like the override, but ONLY
+//      when it is the resolving tier: an override wins without consulting
+//      (or validating) the env, so a bogus env var cannot defeat a valid
+//      per-call override. Lets an operator pin a backend without editing
+//      config.json.
+//   3. config.provider (the /web-tools-selected default)
+//   4. DEFAULT_PROVIDER_NAME ("brave")
+// Key/baseURL resolution always reads from env/config under the resolved
+// provider name, so an override/env pin still needs its own credentials.
+function instantiateProvider(
+	config: WebToolsConfig,
+	override?: string,
+): {
 	providerName: string;
 	provider: SearchProvider | FullProvider;
 } {
-	const providerName = config.provider ?? DEFAULT_PROVIDER_NAME;
+	let providerName: string;
+	if (override !== undefined) {
+		assertKnownProvider(override);
+		providerName = override;
+	} else {
+		// Single env read via the shared resolver (one snapshot — no double
+		// read), validated only when env actually won the resolution.
+		const active = resolveActiveProviderName(config);
+		if (active.source === "env") assertKnownProvider(active.name);
+		providerName = active.name;
+	}
 	const apiKey = resolveProviderApiKey(providerName, config);
 	const meta = PROVIDERS.find((p) => p.name === providerName);
 	const baseUrl = meta?.baseUrlEnvVar ? resolveProviderBaseUrl(meta, config) : undefined;
@@ -275,12 +328,23 @@ export function registerWebSearchTool(pi: ExtensionAPI): void {
 					maximum: MAX_SEARCH_RESULTS,
 				}),
 			),
+			provider: Type.Optional(
+				Type.Union(
+					KNOWN_PROVIDER_NAMES.map((name) => Type.Literal(name)),
+					{
+						description:
+							"Search provider to use for this call only, overriding the active provider set via /web-tools. " +
+							`Valid values: ${KNOWN_PROVIDER_NAMES.join(", ")}. ` +
+							"Omit to use the configured active provider. The named provider must have its API key/URL configured (via env var or /web-tools) or the call throws — there is no silent fallback.",
+					},
+				),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
 			const maxResults = clampSearchResultCount(params.max_results);
 			const config = loadConfig();
-			const { providerName, provider } = instantiateActiveProvider(config);
+			const { providerName, provider } = instantiateProvider(config, params.provider);
 
 			onUpdate?.({
 				content: [{ type: "text", text: `Searching ${provider.label} for: "${params.query}"...` }],
@@ -307,6 +371,9 @@ export function registerWebSearchTool(pi: ExtensionAPI): void {
 		renderCall(args, theme, _context) {
 			let text = theme.fg("toolTitle", theme.bold("WebSearch "));
 			text += theme.fg("accent", `"${args.query}"`);
+			if (args.provider) {
+				text += theme.fg("dim", ` via ${args.provider}`);
+			}
 			return new Text(text, 0, 0);
 		},
 
@@ -368,14 +435,14 @@ export function registerWebFetchTool(pi: ExtensionAPI): void {
 			});
 
 			const config = loadConfig();
-			const { provider } = instantiateActiveProvider(config);
+			const { provider } = instantiateProvider(config);
 
 			// Three-way capability dispatch:
 			//   1. URL interceptors (currently just GitHub) — opt-in URL specialists
 			//      that handle their own host pattern. Cheap-reject to null for
 			//      unrelated URLs; empty chain (interceptor disabled) is a no-op.
-			//   2. Provider's native fetch — full providers (Tavily, Exa, Jina,
-			//      Firecrawl, Ollama) have vendor endpoints worth using.
+			//   2. Provider's native fetch — full providers (Tavily, Exa, You.com,
+			//      Jina, Firecrawl, Ollama) have vendor endpoints worth using.
 			//   3. Generic HTML fallback — for search-only providers (Brave, Serper,
 			//      SearXNG) or any provider that doesn't carry a `fetch` method.
 			let fetchResponse: FetchResponse | undefined;
@@ -465,8 +532,8 @@ function renderFetchedContentPreview(content: string, theme: Theme): string {
 function formatShowConfigMessage(current: WebToolsConfig): string {
 	const lines = ["Web search config:", `  config file: ${CONFIG_PATH}`];
 
-	const providerName = current.provider ?? DEFAULT_PROVIDER_NAME;
-	lines.push(`  active provider: ${providerName}`);
+	const { name: providerName, source: providerSource } = resolveActiveProviderName(current);
+	lines.push(`  active provider: ${providerName} (source: ${providerSource})`);
 
 	for (const meta of PROVIDERS) {
 		const envKey = meta.envVar ? process.env[meta.envVar]?.trim() : undefined;
@@ -478,9 +545,9 @@ function formatShowConfigMessage(current: WebToolsConfig): string {
 		);
 	}
 
-	// One URL line per provider that declares baseUrlEnvVar. Today this is
-	// only SearXNG, but a second self-hosted provider lands without touching
-	// this loop.
+	// One URL line per provider that declares baseUrlEnvVar. Today this covers
+	// Firecrawl, SearXNG, and Ollama; future configurable endpoints need no
+	// changes to this loop.
 	for (const meta of PROVIDERS) {
 		if (!meta.baseUrlEnvVar) continue;
 		const envUrl = process.env[meta.baseUrlEnvVar]?.trim();
@@ -524,7 +591,7 @@ export function registerWebSearchConfigCommand(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const activeProvider = current.provider ?? DEFAULT_PROVIDER_NAME;
+			const activeProvider = resolveActiveProviderName(current).name;
 			const orderedMetas = [
 				...PROVIDERS.filter((p) => p.name === activeProvider),
 				...PROVIDERS.filter((p) => p.name !== activeProvider),
@@ -567,7 +634,7 @@ export function registerWebSearchConfigCommand(pi: ExtensionAPI): void {
 			const selectedProvider = selectedMeta.name;
 
 			// Providers that declare a `configure` callback own their prompt flow
-			// (e.g. SearXNG: URL prompt then optional Bearer key). The orchestrator
+			// (Firecrawl/SearXNG/Ollama: URL prompt then optional key). The orchestrator
 			// dispatches generically and owns persistence + notifications.
 			if (selectedMeta.configure) {
 				const result = await selectedMeta.configure(ctx.ui, {

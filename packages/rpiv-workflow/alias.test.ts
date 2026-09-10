@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import type { StageDef, Workflow } from "./api.js";
 import { aliasSkills, applySkillAliases } from "./load/alias.js";
 import type { LayerOutcome, LoadAccumulator } from "./load/merge.js";
+import { fanout, iterate } from "./loop-constructors.js";
 
 // Minimal stage builders — `aliasSkills` only reads `run`, `prompt`, `skill`.
 const skillStage = (skill?: string): StageDef => ({
@@ -19,8 +20,12 @@ const skillStage = (skill?: string): StageDef => ({
 });
 const runStage = (): StageDef => ({ kind: "side-effect", sessionPolicy: "fresh", run: (async () => {}) as never });
 const promptStage = (): StageDef => ({ kind: "side-effect", sessionPolicy: "fresh", prompt: "do the thing" });
-const fanoutStage = (): StageDef => ({ kind: "produces", sessionPolicy: "fresh", fanout: (() => []) as never });
-const iterateStage = (): StageDef => ({ kind: "produces", sessionPolicy: "fresh", iterate: (() => null) as never });
+const fanoutStage = (): StageDef => ({ kind: "produces", sessionPolicy: "fresh", loop: fanout({ units: () => [] }) });
+const iterateStage = (): StageDef => ({
+	kind: "produces",
+	sessionPolicy: "fresh",
+	loop: iterate({ next: () => null }),
+});
 
 const wf = (stages: Record<string, StageDef>): Workflow => ({
 	name: "w",
@@ -95,7 +100,7 @@ describe("aliasSkills", () => {
 		expect(out.stages.commit?.skill).toBe("attributed-commit");
 	});
 
-	it("is reachable from the package barrel (locks the L2-01 public-surface contract)", async () => {
+	it("is reachable from the package barrel (locks the public-surface contract)", async () => {
 		// Reference identity ratifies (a) the export exists on the main barrel and
 		// (b) it points at the same function as the deep-path import — catches a
 		// future barrel-clean PR that silently drops the export. Workspaces resolve

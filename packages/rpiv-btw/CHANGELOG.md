@@ -7,6 +7,72 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- Package card cover on pi.dev: `package.json` now declares `pi.image` pointing at the package's `docs/cover.png`.
+
+### Fixed
+
+- `/btw` now prefers Pi's auth-aware runtime completion facade when the host exposes one, so OAuth-backed models (e.g. `kimi-coding`) no longer fail with "has no API key available" and credential-derived endpoints (e.g. GitHub Copilot's OAuth `baseUrl`) are preserved. Legacy hosts without the facade keep the explicit key/headers path. ([#166](https://github.com/juicesharp/rpiv-mono/issues/166))
+
+## [2.6.0] - 2026-08-15
+
+## [2.5.2] - 2026-08-14
+
+## [2.5.1] - 2026-08-14
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+### Added
+- Context budgeting for `/btw` side calls: when the full request exceeds `contextWindow − maxTokens − BTW_CONTEXT_RESERVE`, the `/btw` history is capped to a token budget (`BTW_HISTORY_TOKEN_BUDGET`) and the conversation branch is trimmed/stubbed to fit; a fitting request is sent byte-identical to the previous behavior (full history, reference-identical branch). Branch accounting anchors on the last provider-reported usage plus estimates for unmetered turns after it. A single overflow retry halves the branch budget, and a trim notice is shown in the overlay when the context was trimmed.
+
+## [2.1.0] - 2026-07-23
+
+### Changed
+- README rewritten to follow the documentation standard shared across all packages.
+- npm tarball now includes the versioned `docs/` reference and no longer ships cover or screenshot art.
+
+## [2.0.0] - 2026-07-21
+
+### Fixed
+- Side-call completions now work on both older and newer Pi hosts (0.80+), and genuine initialization failures surface clearly instead of being masked by the compatibility fallback.
+
+## [1.20.0] - 2026-06-15
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
 ### Fixed
 - Stale extension context after auto-compaction no longer causes spurious warnings during snapshot replay.
 

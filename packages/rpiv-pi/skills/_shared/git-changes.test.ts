@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const GIT_CHANGES_MJS = fileURLToPath(new URL("./git-changes.mjs", import.meta.url));
 
-const run = (cwd: string) =>
-	execFileSync("node", [GIT_CHANGES_MJS], {
+const run = (cwd: string, ...args: string[]) =>
+	execFileSync("node", [GIT_CHANGES_MJS, ...args], {
 		cwd,
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "ignore"],
@@ -103,5 +103,41 @@ describe("git-changes.mjs", () => {
 		const out = run(dir);
 		const diffstatBlock = out.slice(out.indexOf("---diffstat---"));
 		expect(diffstatBlock).toContain("more files truncated ...)");
+	});
+
+	// Finding 9 — a workflow must commit only the work it produced. Files that were
+	// ALREADY dirty before the run (recorded in the run-start baseline) are fenced
+	// out of the in-scope status so the commit skill never sweeps them into a commit.
+	it("excludes a pre-existing (baseline-recorded) file from ---status--- and fences it off", () => {
+		initRepo(dir);
+		writeFileSync(join(dir, ".gitignore"), "");
+		gitIn(dir, "add", ".gitignore");
+		gitIn(dir, "commit", "-m", "init", "-q");
+		// `blog.md` was dirty BEFORE the run; `src.ts` is the run's own work.
+		writeFileSync(join(dir, "blog.md"), "unrelated edit\n");
+		writeFileSync(join(dir, "src.ts"), "the run's own change\n");
+		mkdirSync(join(dir, ".rpiv/artifacts/goal"), { recursive: true });
+		writeFileSync(join(dir, ".rpiv/artifacts/goal/baseline-t1.json"), JSON.stringify({ paths: ["blog.md"] }));
+
+		const out = run(dir, "--baseline", ".rpiv/artifacts/goal/baseline-t1.json");
+		const statusBlock = out.slice(out.indexOf("---status---"), out.indexOf("---pre-existing"));
+		// In-scope status carries the run's own file, NOT the pre-existing one.
+		expect(statusBlock).toMatch(/src\.ts/);
+		expect(statusBlock).not.toMatch(/blog\.md/);
+		// The pre-existing file is surfaced under a fenced "do NOT commit" section.
+		expect(out).toContain("---pre-existing (do NOT commit");
+		const preBlock = out.slice(out.indexOf("---pre-existing"));
+		expect(preBlock).toMatch(/blog\.md/);
+	});
+
+	it("without a --baseline flag, fences nothing (no pre-existing section)", () => {
+		initRepo(dir);
+		writeFileSync(join(dir, ".gitignore"), "");
+		gitIn(dir, "add", ".gitignore");
+		gitIn(dir, "commit", "-m", "init", "-q");
+		writeFileSync(join(dir, "src.ts"), "x\n");
+		const out = run(dir);
+		expect(out).not.toContain("---pre-existing");
+		expect(out.slice(out.indexOf("---status---"))).toMatch(/src\.ts/);
 	});
 });

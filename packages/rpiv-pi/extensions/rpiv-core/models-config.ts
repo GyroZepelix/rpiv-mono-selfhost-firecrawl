@@ -12,7 +12,8 @@
  * take effect on the next session start or /rpiv-update-agents.
  */
 
-import { configPath, loadJsonConfig, validateConfig } from "@juicesharp/rpiv-config";
+import type { ModelThinkingLevel, ThinkingLevel } from "@earendil-works/pi-ai";
+import { configPath, loadJsonConfigWithLegacyFallback, validateConfig } from "@juicesharp/rpiv-config";
 import { type Static, Type } from "typebox";
 
 // ---------------------------------------------------------------------------
@@ -21,19 +22,48 @@ import { type Static, Type } from "typebox";
 // The host's setThinkingLevel (pi-agent-core ThinkingLevel) AND agent
 // frontmatter both accept "off" — "off" is a first-class level meaning "no
 // reasoning" (it's even the session default). models.json therefore persists
-// all SIX values. Note the distinction from ABSENCE: a missing `thinking`
+// every value. Note the distinction from ABSENCE: a missing `thinking`
 // field means "inherit the session/baseline level"; an explicit "off" means
-// "disable reasoning". THINKING_LEVEL_VALUES (the 5 reasoning levels) is kept
-// for surfaces that list only the graded levels (e.g. the picker).
+// "disable reasoning". THINKING_LEVEL_VALUES (the graded reasoning levels) is
+// kept for surfaces that list only the graded levels (e.g. the picker).
 // ---------------------------------------------------------------------------
 
-/** The 5 graded reasoning levels (excludes "off"). */
-export const THINKING_LEVEL_VALUES = ["minimal", "low", "medium", "high", "xhigh"] as const;
+/** The graded reasoning levels (excludes "off"). */
+export const THINKING_LEVEL_VALUES = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevelValue = (typeof THINKING_LEVEL_VALUES)[number];
 
-/** All 6 persistable thinking values, including the explicit "off" (disable reasoning). */
+/** All persistable thinking values, including the explicit "off" (disable reasoning). */
 export const MODEL_THINKING_LEVEL_VALUES = ["off", ...THINKING_LEVEL_VALUES] as const;
 export type ModelThinkingLevelValue = (typeof MODEL_THINKING_LEVEL_VALUES)[number];
+
+// Guards: the local vocabulary must stay in lockstep with pi-ai's thinking-level
+// universe (type-only imports — erased at runtime, no runtime dep). If pi-ai
+// adds or removes a level, the bidirectional extends checks fail and this file
+// won't compile until the arrays follow. They also make casts of
+// pi.getThinkingLevel() to the local types provably safe.
+type _GradedLevelsMatchPiAi = ThinkingLevelValue extends ThinkingLevel
+	? ThinkingLevel extends ThinkingLevelValue
+		? true
+		: never
+	: never;
+const _gradedLevelsMatchPiAi: _GradedLevelsMatchPiAi = true;
+type _PersistableLevelsMatchPiAi = ModelThinkingLevelValue extends ModelThinkingLevel
+	? ModelThinkingLevel extends ModelThinkingLevelValue
+		? true
+		: never
+	: never;
+const _persistableLevelsMatchPiAi: _PersistableLevelsMatchPiAi = true;
+
+/**
+ * Background-lane concurrency cap fallback. The fail-soft default applied by
+ * `resolveMaxConcurrency` when `~/.config/rpiv-pi/models.json` is absent or
+ * carries no valid `maxConcurrency`. Rate limits, not CPU, are the real cap —
+ * 6 lanes clears the widest built-in fanout batch (the 5-dimension grade
+ * panel, which a cap of 4 split into a 4+1 second batch on every panel) with
+ * one lane of headroom; no rate-limit events were observed at 4. Re-exported from
+ * packages/rpiv-pi/extensions/rpiv-core/workflow-execution-host.ts to preserve the tested public surface.
+ */
+export const DEFAULT_MAX_CONCURRENCY = 6;
 
 // ---------------------------------------------------------------------------
 // TypeBox schemas
@@ -47,8 +77,9 @@ const ThinkingLevelSchema = Type.Union(
 		Type.Literal("medium"),
 		Type.Literal("high"),
 		Type.Literal("xhigh"),
+		Type.Literal("max"),
 	] as const,
-	{ description: "Effort/thinking level: off | minimal | low | medium | high | xhigh" },
+	{ description: "Effort/thinking level: off | minimal | low | medium | high | xhigh | max" },
 );
 
 // Guard: schema literals must stay in lockstep with MODEL_THINKING_LEVEL_VALUES.
@@ -77,6 +108,18 @@ const ModelEntrySchema = Type.Union(
 					}),
 				),
 				thinking: Type.Optional(ThinkingLevelSchema),
+				extensions: Type.Optional(
+					Type.Array(Type.String(), {
+						description:
+							"Sibling extension names the agent may load when installed (per-agent axis only — ignored in defaults)",
+					}),
+				),
+				tools: Type.Optional(
+					Type.Array(Type.String(), {
+						description:
+							"Tool selectors appended to the agent's tools frontmatter (per-agent axis only — ignored in defaults)",
+					}),
+				),
 			},
 			{ additionalProperties: false },
 		),
@@ -85,7 +128,7 @@ const ModelEntrySchema = Type.Union(
 );
 
 /**
- * Per-preset block: stages-only. Per Decision 4, per-preset agent overrides are
+ * Per-preset block: stages-only. Per-preset agent overrides are
  * a non-goal — the agent-sync seam at `agents.ts:processSourceEntries` has no
  * workflow context at frontmatter-injection time. `additionalProperties: false`
  * rejects per-preset `defaults` or `agents` blocks at validation.
@@ -109,7 +152,7 @@ const PresetSchema = Type.Object(
  * names within that workflow.
  *
  * `Type.Record(Type.String(), …)` wrappers are structurally dynamic and cannot
- * stamp `additionalProperties: false` — record-key typos (`presets.shipp`,
+ * stamp `additionalProperties: false` — record-key typos (`presets.buildd`,
  * `skills.committ`) pass schema validation by design and fall through to the
  * defaults cascade at lookup. `findUnknownModelKeys` (wired into session_start
  * by models-config-validate.ts) is the runtime warn-on-miss safety net.
@@ -121,6 +164,13 @@ const ModelsConfigSchema = Type.Object(
 		stages: Type.Optional(Type.Record(Type.String(), ModelEntrySchema)),
 		skills: Type.Optional(Type.Record(Type.String(), ModelEntrySchema)),
 		presets: Type.Optional(Type.Record(Type.String(), PresetSchema)),
+		maxConcurrency: Type.Optional(
+			Type.Integer({
+				minimum: 1,
+				description:
+					"Background-lane concurrency cap (fail-soft default applied by resolveMaxConcurrency when absent/invalid)",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -136,6 +186,10 @@ export interface ResolvedModelConfig {
 	model?: string;
 	/** Explicit level incl. "off" (disable). Absent ⇒ inherit session/baseline. */
 	thinking?: ModelThinkingLevelValue;
+	/** Sibling extensions the agent may load when installed (per-agent axis only). */
+	extensions?: string[];
+	/** Tool selectors appended to the agent's tools frontmatter (per-agent axis only). */
+	tools?: string[];
 }
 
 /** The resolved config shape returned by loadModelsConfig. */
@@ -145,11 +199,31 @@ export interface ModelsConfig {
 	stages?: Record<string, ResolvedModelConfig>;
 	skills?: Record<string, ResolvedModelConfig>;
 	presets?: Record<string, { stages?: Record<string, ResolvedModelConfig> }>;
+	/** Background-lane concurrency cap. Absent/invalid ⇒ DEFAULT_MAX_CONCURRENCY (via resolveMaxConcurrency). */
+	maxConcurrency?: number;
 }
 
 // ---------------------------------------------------------------------------
 // Helper — resolve a ModelEntry (string or object) to ResolvedModelConfig.
 // ---------------------------------------------------------------------------
+
+/**
+ * String-filter salvage for the agent-axis arrays, hardened against
+ * frontmatter-line injection: keeps strings, drops non-strings silently (the
+ * standing salvage contract), and drops any string carrying `\n`/`\r` with a
+ * console.warn naming the field — such an entry would smuggle extra physical
+ * lines into a synced agent's frontmatter (see the call-site comment).
+ */
+function filterFrontmatterSafeStrings(values: readonly unknown[], field: "tools" | "extensions"): string[] {
+	const strings = values.filter((v): v is string => typeof v === "string");
+	const safe = strings.filter((v) => !/[\r\n]/.test(v));
+	if (safe.length !== strings.length) {
+		console.warn(
+			`[rpiv-pi] models.json: dropped ${strings.length - safe.length} \`${field}\` entr${strings.length - safe.length === 1 ? "y" : "ies"} containing newline characters — a multi-line entry would inject frontmatter lines into synced agent definitions`,
+		);
+	}
+	return safe;
+}
 
 /** Resolve a raw ModelEntry value to a ResolvedModelConfig. */
 function resolveModelEntry(entry: unknown): ResolvedModelConfig {
@@ -171,6 +245,21 @@ function resolveModelEntry(entry: unknown): ResolvedModelConfig {
 				);
 			}
 		}
+		// Agent-axis fields: per-field string-filter salvage — an array value
+		// survives with non-string elements dropped (an explicit [] is meaningful:
+		// it suppresses the map default downstream); a non-array value drops the
+		// field entirely (falls back to map defaults). Entries carrying \n/\r are
+		// dropped LOUDLY: these strings land on one logical frontmatter line of
+		// ~/.pi/agent/agents/*.md, where an interior newline becomes a physical
+		// line the Pi runtime reads as agent capability config — a copy-paste
+		// artifact like "x\nisolated: false" would silently un-isolate an agent
+		// (review 2026-08-31 S1).
+		if (Array.isArray(obj.tools)) {
+			result.tools = filterFrontmatterSafeStrings(obj.tools, "tools");
+		}
+		if (Array.isArray(obj.extensions)) {
+			result.extensions = filterFrontmatterSafeStrings(obj.extensions, "extensions");
+		}
 		return result;
 	}
 	return {};
@@ -189,10 +278,33 @@ let modelsConfigCache: ModelsConfig | undefined;
 export function loadModelsConfig(): ModelsConfig {
 	if (modelsConfigCache !== undefined) return modelsConfigCache;
 
-	const raw = loadJsonConfig<ModelsConfigSchema>(CONFIG_PATH);
+	const raw = loadJsonConfigWithLegacyFallback<ModelsConfigSchema>("rpiv-pi", "models.json");
 	const validated = validateConfig(ModelsConfigSchema, raw);
 
 	const defaults = resolvedEntry(validated.defaults);
+	// Agent-axis-only fields never cascade: strip them from `defaults` (one
+	// warn) so the {...defaults, ...resolved} cascade and the
+	// getAgentModelConfig defaults fallback cannot leak enablement to every
+	// configured agent.
+	if (defaults && (defaults.extensions !== undefined || defaults.tools !== undefined)) {
+		console.warn("[rpiv-pi] models.json: `extensions`/`tools` in `defaults` are ignored — they are per-agent fields");
+		delete defaults.extensions;
+		delete defaults.tools;
+	}
+	// The SAME strip on every other non-agents axis (review 2026-08-31 I3):
+	// the shared ModelEntrySchema admits `tools`/`extensions` everywhere, but
+	// only the agents-axis lookup consumes them — a stages/skills/preset entry
+	// carrying them passed validation and silently granted nothing. One warn
+	// per load, naming the offending axes.
+	const strippedAxes = new Set<string>();
+	const stripAgentAxisFields = (entry: ResolvedModelConfig, axis: string): ResolvedModelConfig => {
+		if (entry.extensions !== undefined || entry.tools !== undefined) {
+			strippedAxes.add(axis);
+			delete entry.extensions;
+			delete entry.tools;
+		}
+		return entry;
+	};
 	const agents: Record<string, ResolvedModelConfig> = {};
 	const stages: Record<string, ResolvedModelConfig> = {};
 	const skills: Record<string, ResolvedModelConfig> = {};
@@ -206,13 +318,13 @@ export function loadModelsConfig(): ModelsConfig {
 
 	if (validated.stages && typeof validated.stages === "object") {
 		for (const [name, entry] of Object.entries(validated.stages)) {
-			stages[name] = resolvedEntryWithCascade(entry, defaults);
+			stages[name] = stripAgentAxisFields(resolvedEntryWithCascade(entry, defaults), "stages");
 		}
 	}
 
 	if (validated.skills && typeof validated.skills === "object") {
 		for (const [name, entry] of Object.entries(validated.skills)) {
-			skills[name] = resolvedEntryWithCascade(entry, defaults);
+			skills[name] = stripAgentAxisFields(resolvedEntryWithCascade(entry, defaults), "skills");
 		}
 	}
 
@@ -222,7 +334,7 @@ export function loadModelsConfig(): ModelsConfig {
 			const presetStages: Record<string, ResolvedModelConfig> = {};
 			if (presetBlock.stages && typeof presetBlock.stages === "object") {
 				for (const [stageName, entry] of Object.entries(presetBlock.stages)) {
-					presetStages[stageName] = resolvedEntryWithCascade(entry, defaults);
+					presetStages[stageName] = stripAgentAxisFields(resolvedEntryWithCascade(entry, defaults), "presets");
 				}
 			}
 			if (Object.keys(presetStages).length > 0) {
@@ -231,12 +343,19 @@ export function loadModelsConfig(): ModelsConfig {
 		}
 	}
 
+	if (strippedAxes.size > 0) {
+		console.warn(
+			`[rpiv-pi] models.json: \`extensions\`/\`tools\` in ${[...strippedAxes].sort().join("/")} entries are ignored — they are per-agent fields (only \`agents.<name>\` consumes them)`,
+		);
+	}
+
 	const result: ModelsConfig = {
 		defaults,
 		agents: Object.keys(agents).length > 0 ? agents : undefined,
 		stages: Object.keys(stages).length > 0 ? stages : undefined,
 		skills: Object.keys(skills).length > 0 ? skills : undefined,
 		presets: Object.keys(presets).length > 0 ? presets : undefined,
+		maxConcurrency: validated.maxConcurrency,
 	};
 	modelsConfigCache = result;
 	return result;
@@ -276,10 +395,10 @@ export function getAgentModelConfig(config: ModelsConfig, agentName: string): Re
 }
 
 /**
- * Per-stage cascade lookup, used by the workflow lifecycle path (Slice 3) and
- * the standalone-skill bracket (Slice 4). Object-arg shape supersedes
- * positional widening as new axes land (positional
- * `(config, stage, workflow?, skill?)` doesn't scale).
+ * Per-stage cascade lookup, used by the workflow lifecycle path and the
+ * standalone-skill bracket. Object-arg shape supersedes positional widening
+ * as new axes land (positional `(config, stage, workflow?, skill?)` doesn't
+ * scale).
  *
  * Cascade (most-specific first):
  *   1. presets[workflow].stages[stage]   — preset-stage authored
@@ -318,6 +437,22 @@ export function resolveStageModel(
 	return config.defaults;
 }
 
+/**
+ * Resolve the background-lane concurrency cap from `~/.config/rpiv-pi/models.json`.
+ * Returns `DEFAULT_MAX_CONCURRENCY` (6) when the key is absent OR holds an invalid
+ * value (non-integer, < 1).
+ *
+ * NOTE: `Value.Clean` (typebox@1.3.6) does NOT strip invalid scalars — it only
+ * strips unknown keys, leaving `null` in place — so a configured
+ * `maxConcurrency: 0` / `-1` / `4.5` / `"4"` / `null` survives schema
+ * validation. This guard is therefore the fail-soft boundary, not the schema's
+ * `minimum: 1`. (`undefined` reaches the guard only from an absent key.)
+ */
+export function resolveMaxConcurrency(config: ModelsConfig): number {
+	const v = config.maxConcurrency;
+	return v !== undefined && Number.isInteger(v) && v >= 1 ? v : DEFAULT_MAX_CONCURRENCY;
+}
+
 // ---------------------------------------------------------------------------
 // Warn-on-miss — surface record-key typos that schema validation can't catch.
 // ---------------------------------------------------------------------------
@@ -339,8 +474,8 @@ export interface KnownModelKeys {
 
 /**
  * Return dotted paths of configured models.json keys that match no known key —
- * e.g. `skills.committ`, `agents.codebase-analzyer`, `presets.shipp`,
- * `presets.ship.stages.plann`. Record-key typos pass TypeBox validation
+ * e.g. `skills.committ`, `agents.codebase-analzyer`, `presets.buildd`,
+ * `presets.build.stages.plann`. Record-key typos pass TypeBox validation
  * (records are structurally dynamic) and silently fall through to the defaults
  * cascade; this surfaces them. Axes with an `undefined` known-list are skipped;
  * an unknown preset workflow short-circuits (its inner stages aren't validated

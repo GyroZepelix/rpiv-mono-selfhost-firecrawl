@@ -3,6 +3,14 @@ name: resume-handoff
 description: Resume work from a handoff document produced by create-handoff. Reads the handoff, verifies current repo, branch, and state, and continues from where the previous session left off. Use at the start of a new session when the user references a handoff file, says "resume from handoff", "continue from where we left off", or invokes /resume-handoff.
 argument-hint: [handoff-path]
 shell-timeout: 10
+contract:
+  produces:
+    kind: side-effect
+    meta:
+      effect: work-continuation
+  consumes:
+    meta:
+      artifactKind: handoff
 ---
 
 # Resume Handoff
@@ -41,7 +49,7 @@ When this command is invoked:
 2. **If no parameters provided**, branch on the `recent handoffs:` listing in the Metadata block:
    - **Empty** — no handoffs exist; tell the user and ask for a path in prose.
    - **Exactly one entry** — confirm with `ask_user_question`: "Resume this handoff?" with options "Resume `<filename>` (Recommended)" and "Pick a different path". Do NOT call `ask_user_question` with a single option (the tool requires ≥2).
-   - **Two or more entries** — present the top 4 filenames as `ask_user_question` options (a free-text "Other" row is appended automatically by the tool; do not list it manually).
+   - **Two or more entries** — present the top 4 filenames as `ask_user_question` options. The tool automatically appends a `Type something.` free-text row; do not list it manually.
 
    Direct invocation alternative: `/skill:resume-handoff .rpiv/artifacts/handoffs/<filename>`
 
@@ -114,6 +122,7 @@ When this command is invoked:
 
    ```
 
+   `Header` is capped at ≤16 characters (`MAX_HEADER_LENGTH = 16` — longer values are rejected).
    Use the `ask_user_question` tool to confirm the approach. Question: "{Summary of recommended next action}. Proceed?". Header: "Resume". Options: "Proceed (Recommended)" (Begin with {recommended action 1}); "Adjust approach" (Change the order or scope of next steps); "Re-analyze" (The codebase has changed — re-verify state first).
 
 ### Step 4: Create Action Plan

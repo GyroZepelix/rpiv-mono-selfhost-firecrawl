@@ -14,7 +14,7 @@ import { detectCycle } from "./task-graph.js";
  */
 export type Op =
 	| { kind: "create"; taskId: number }
-	| { kind: "update"; id: number; fromStatus: TaskStatus; toStatus: TaskStatus }
+	| { kind: "update"; id: number; fromStatus: TaskStatus; toStatus: TaskStatus; changed: boolean }
 	| { kind: "delete"; id: number; subject: string }
 	| { kind: "list"; statusFilter?: TaskStatus; includeDeleted: boolean }
 	| { kind: "get"; task: Task }
@@ -30,16 +30,48 @@ function errorResult(state: TaskState, message: string): ApplyResult {
 	return { state, op: { kind: "error", message } };
 }
 
+function sameNumberList(a: number[] | undefined, b: number[] | undefined): boolean {
+	const x = a ?? [];
+	const y = b ?? [];
+	return x.length === y.length && x.every((v, i) => v === y[i]);
+}
+
+function sameRecord(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+	return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
 /**
- * Pure reducer: (state, action, params) → (state, op). Mirrors the
- * `applyTaskMutation` of pre-refactor `todo.ts` minus content/details
- * formatting; the response envelope (`tool/response-envelope.ts`) owns
+ * Did this `update` change anything? Compares the task before/after the params
+ * are applied. A no-effect update — `status` set to its current value, or any
+ * field re-sent unchanged — returns false, letting the response envelope say
+ * "No change" instead of "Updated #N". Without this, a no-op update is
+ * indistinguishable from a real mutation, which can drive a model to re-issue
+ * the same call in a loop.
+ *
+ * blockedBy is order-sensitive (the reducer preserves insertion order);
+ * metadata round-trips through JSON persistence, so JSON-equality is the
+ * operative notion of "changed".
+ */
+function taskChanged(before: Task, after: Task): boolean {
+	return (
+		before.subject !== after.subject ||
+		before.status !== after.status ||
+		before.description !== after.description ||
+		before.activeForm !== after.activeForm ||
+		before.owner !== after.owner ||
+		!sameNumberList(before.blockedBy, after.blockedBy) ||
+		!sameRecord(before.metadata, after.metadata)
+	);
+}
+
+/**
+ * Pure reducer: (state, action, params) → (state, op). The response envelope (`tool/response-envelope.ts`) owns
  * formatting, the store (`state/store.ts`) owns commit.
  *
  * Validation is in-line: structural guards (`subject required`, `id required`,
  * `at least one mutable field`) plus state-aware checks (transition legality,
  * dangling/deleted blockedBy, self-block, cycles). Decision: validation stays
- * in-reducer — see Plan §Decisions §Decision 2.
+ * in-reducer.
  */
 export function applyTaskMutation(state: TaskState, action: TaskAction, params: TaskMutationParams): ApplyResult {
 	switch (action) {
@@ -87,7 +119,11 @@ export function applyTaskMutation(state: TaskState, action: TaskAction, params: 
 				params.metadata !== undefined ||
 				(params.addBlockedBy && params.addBlockedBy.length > 0) ||
 				(params.removeBlockedBy && params.removeBlockedBy.length > 0);
-			if (!hasMutation) return errorResult(state, "update requires at least one mutable field");
+			if (!hasMutation)
+				return errorResult(
+					state,
+					"update requires at least one mutable field: subject, description, activeForm, status, owner, metadata, addBlockedBy, or removeBlockedBy",
+				);
 
 			let newStatus = current.status;
 			if (params.status !== undefined) {
@@ -139,7 +175,13 @@ export function applyTaskMutation(state: TaskState, action: TaskAction, params: 
 			newTasks[idx] = updated;
 			return {
 				state: { tasks: newTasks, nextId: state.nextId },
-				op: { kind: "update", id: updated.id, fromStatus: current.status, toStatus: newStatus },
+				op: {
+					kind: "update",
+					id: updated.id,
+					fromStatus: current.status,
+					toStatus: newStatus,
+					changed: taskChanged(current, updated),
+				},
 			};
 		}
 

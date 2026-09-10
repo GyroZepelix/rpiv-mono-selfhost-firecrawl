@@ -8,7 +8,13 @@ const KEY = {
 	UP: "tui.select.up",
 	DOWN: "tui.select.down",
 	CONFIRM: "tui.select.confirm",
+	SUBMIT: "tui.input.submit",
 	CANCEL: "tui.select.cancel",
+	NEW_LINE: "tui.input.newLine",
+	EDITOR_UP: "tui.editor.cursorUp",
+	EDITOR_DOWN: "tui.editor.cursorDown",
+	CLEAR: "tui.editor.deleteToLineStart",
+	EXTERNAL_EDITOR: "app.editor.external",
 };
 const sentinel = (name: string) => `<KEY:${name}>`;
 const keybindings = { matches: (data: string, name: string) => data === sentinel(name) };
@@ -47,11 +53,10 @@ function makeState(over: Partial<QuestionnaireState> = {}): QuestionnaireState {
 		optionIndex: 0,
 		inputMode: false,
 		notesVisible: false,
-		chatFocused: false,
 		answers: new Map<number, QuestionAnswer>(),
 		multiSelectChecked: new Set<number>(),
+		customDraftsByTab: new Map<number, string>(),
 		notesByTab: new Map<number, string>(),
-		focusedOptionHasPreview: false,
 		submitChoiceIndex: 0,
 		notesDraft: "",
 		collapsed: false,
@@ -67,10 +72,13 @@ function makeRuntime(over: Partial<QuestionnaireRuntime> = {}): QuestionnaireRun
 	return {
 		keybindings,
 		inputBuffer: "",
+		canMoveInputUp: false,
+		canMoveInputDown: false,
 		questions,
 		isMulti: questions.length > 1,
 		currentItem: items[0],
 		items,
+		collapseKey: "ctrl+]",
 		...over,
 	};
 }
@@ -104,18 +112,37 @@ describe("wrapTab + allAnswered", () => {
 });
 
 describe("routeKey — nav", () => {
-	// Boundary case (UP at optionIndex 0 → focus_chat) is exercised by the chat-inclusive
-	// cycle suite below. Above the top boundary, UP simply decrements.
 	it("UP from a non-zero index decrements by 1", () => {
 		expect(routeKey(sentinel(KEY.UP), makeState({ optionIndex: 2 }), makeRuntime())).toEqual({
 			kind: "nav",
 			nextIndex: 1,
+			inputValue: "",
 		});
 	});
 	it("DOWN advances by 1", () => {
 		expect(routeKey(sentinel(KEY.DOWN), makeState(), makeRuntime())).toEqual({
 			kind: "nav",
 			nextIndex: 1,
+			inputValue: "",
+		});
+	});
+	// With the chat row gone, UP/DOWN wrap within [option0 … optionLast] via wrapTab.
+	// DOWN at the last item wraps to 0; UP at the first item wraps to the last.
+	it("DOWN at the last item wraps to 0 (no chat row, wrapTab clamp)", () => {
+		// makeRuntime default items length === 3 (questions[0].options)
+		expect(routeKey(sentinel(KEY.DOWN), makeState({ optionIndex: 2 }), makeRuntime())).toEqual({
+			kind: "nav",
+			nextIndex: 0,
+			inputValue: "",
+		});
+	});
+	it("UP at the first item wraps to the last (no chat row, wrapTab clamp)", () => {
+		const runtime = makeRuntime();
+		const last = runtime.items.length - 1;
+		expect(routeKey(sentinel(KEY.UP), makeState({ optionIndex: 0 }), runtime)).toEqual({
+			kind: "nav",
+			nextIndex: last,
+			inputValue: "",
 		});
 	});
 });
@@ -192,11 +219,13 @@ describe("routeKey — confirm (single-select)", () => {
 		}
 	});
 
-	it("chat sentinel item -> answer.kind === 'chat'", () => {
-		const chat: WrappingSelectItem = { kind: "chat", label: "Chat about this" };
-		const action = routeKey(sentinel(KEY.CONFIRM), makeState(), makeRuntime({ currentItem: chat }));
-		expect(action.kind).toBe("confirm");
-		if (action.kind === "confirm") expect(action.answer.kind).toBe("chat");
+	it("a key matching only tui.input.submit confirms (second confirm source)", () => {
+		const action = routeKey(sentinel(KEY.SUBMIT), makeState({ currentTab: 0 }), makeRuntime());
+		expect(action).toMatchObject({
+			kind: "confirm",
+			answer: { questionIndex: 0, answer: "A", kind: "option" },
+			autoAdvanceTab: 1,
+		});
 	});
 
 	it("inline-input mode: Enter confirms with the buffered text + kind:'custom'", () => {
@@ -378,6 +407,94 @@ describe("routeKey — multiSelect", () => {
 	});
 });
 
+describe("routeKey — multiSelect free-text ('Type something.')", () => {
+	const multiQ = makeQuestion({
+		multiSelect: true,
+		options: [
+			{ label: "FE", description: "FE" },
+			{ label: "BE", description: "BE" },
+			{ label: "Tests", description: "T" },
+		],
+	});
+	// Post-Phase-2 items: 3 options + other + next.
+	const items: WrappingSelectItem[] = [
+		{ kind: "option", label: "FE" },
+		{ kind: "option", label: "BE" },
+		{ kind: "option", label: "Tests" },
+		{ kind: "other", label: "Type something." },
+		{ kind: "next", label: "Next" },
+	];
+
+	it("Enter on the 'Type something.' row (inputMode) → confirm kind:'custom' with the buffer", () => {
+		const action = routeKey(
+			sentinel(KEY.CONFIRM),
+			makeState({ optionIndex: 3, inputMode: true }),
+			makeRuntime({
+				questions: [multiQ],
+				isMulti: false,
+				items,
+				currentItem: items[3],
+				inputBuffer: "typed answer",
+			}),
+		);
+		expect(action.kind).toBe("confirm");
+		if (action.kind === "confirm") {
+			expect(action.answer.kind).toBe("custom");
+			expect(action.answer.answer).toBe("typed answer");
+		}
+	});
+
+	it("Space on the 'Type something.' row (defensive, !inputMode) → ignore (no phantom toggle)", () => {
+		expect(
+			routeKey(
+				BYTE_SPACE,
+				makeState({ optionIndex: 3 }),
+				makeRuntime({ questions: [multiQ], isMulti: false, items, currentItem: items[3] }),
+			),
+		).toEqual({ kind: "ignore" });
+	});
+
+	it("Enter on the 'Type something.' row (defensive, !inputMode) → ignore (no toggle/multi_confirm)", () => {
+		expect(
+			routeKey(
+				sentinel(KEY.CONFIRM),
+				makeState({ optionIndex: 3 }),
+				makeRuntime({ questions: [multiQ], isMulti: false, items, currentItem: items[3] }),
+			),
+		).toEqual({ kind: "ignore" });
+	});
+
+	it("DOWN from last option (index 2) → nav to the other row (index 3)", () => {
+		expect(
+			routeKey(
+				sentinel(KEY.DOWN),
+				makeState({ optionIndex: 2 }),
+				makeRuntime({ questions: [multiQ], isMulti: false, items, currentItem: items[2] }),
+			),
+		).toEqual({ kind: "nav", nextIndex: 3, inputValue: "" });
+	});
+
+	it("DOWN from the other row (index 3) → nav to Next (index 4)", () => {
+		expect(
+			routeKey(
+				sentinel(KEY.DOWN),
+				makeState({ optionIndex: 3 }),
+				makeRuntime({ questions: [multiQ], isMulti: false, items, currentItem: items[3] }),
+			),
+		).toEqual({ kind: "nav", nextIndex: 4, inputValue: "" });
+	});
+
+	it("UP from Next (index 4) → nav back to the other row (index 3)", () => {
+		expect(
+			routeKey(
+				sentinel(KEY.UP),
+				makeState({ optionIndex: 4 }),
+				makeRuntime({ questions: [multiQ], isMulti: false, items, currentItem: items[4] }),
+			),
+		).toEqual({ kind: "nav", nextIndex: 3, inputValue: "" });
+	});
+});
+
 describe("routeKey — cancel + submit", () => {
 	it("Esc cancels the entire questionnaire from any tab", () => {
 		expect(routeKey(sentinel(KEY.CANCEL), makeState(), makeRuntime())).toEqual({ kind: "cancel" });
@@ -464,27 +581,46 @@ describe("routeKey — cancel + submit", () => {
 });
 
 describe("routeKey — notes", () => {
-	it("'n' when focused option has preview emits notes_enter", () => {
-		expect(routeKey("n", makeState({ focusedOptionHasPreview: true }), makeRuntime())).toEqual({
+	it("'n' emits notes_enter regardless of preview (universal gate)", () => {
+		expect(routeKey("n", makeState(), makeRuntime())).toEqual({
 			kind: "notes_enter",
 		});
 	});
 
-	it("'n' when focused option has no preview is ignored", () => {
-		expect(routeKey("n", makeState({ focusedOptionHasPreview: false }), makeRuntime())).toEqual({
-			kind: "ignore",
+	it("'n' emits notes_enter on multiSelect questions even with preview (universal gate)", () => {
+		const multiQ = makeQuestion({ multiSelect: true });
+		expect(routeKey("n", makeState(), makeRuntime({ questions: [multiQ, makeQuestion()] }))).toEqual({
+			kind: "notes_enter",
 		});
 	});
 
-	it("'n' is ignored on multiSelect questions even with preview", () => {
-		const multiQ = makeQuestion({ multiSelect: true });
+	// goal §7 / FR-3: the universal gate is row-agnostic and sits ABOVE the
+	// multi-select toggle block, so `n` reaches notes_enter even when the Next
+	// sentinel row is focused. The Next sentinel does not activate inputMode (only
+	// the "Type something." other row does, per ROW_INTENT_META), so `n` is neither
+	// swallowed by an earlier block nor blocked by `blocksMultiToggle`.
+	it("'n' emits notes_enter when the multi-select Next sentinel row is focused", () => {
+		const multiQ = makeQuestion({
+			multiSelect: true,
+			options: [
+				{ label: "FE", description: "FE" },
+				{ label: "BE", description: "BE" },
+				{ label: "Tests", description: "T" },
+			],
+		});
+		const items: WrappingSelectItem[] = [
+			{ kind: "option", label: "FE" },
+			{ kind: "option", label: "BE" },
+			{ kind: "option", label: "Tests" },
+			{ kind: "next", label: "Next" },
+		];
 		expect(
 			routeKey(
 				"n",
-				makeState({ focusedOptionHasPreview: true }),
-				makeRuntime({ questions: [multiQ, makeQuestion()] }),
+				makeState({ optionIndex: 3 }),
+				makeRuntime({ questions: [multiQ], isMulti: false, items, currentItem: items[3] }),
 			),
-		).toEqual({ kind: "ignore" });
+		).toEqual({ kind: "notes_enter" });
 	});
 
 	it("notesMode: Esc -> notes_exit", () => {
@@ -512,6 +648,70 @@ describe("routeKey — notes", () => {
 			data: "a",
 		});
 	});
+
+	it("notesMode: configured newline is forwarded instead of closing the editor", () => {
+		const data = sentinel(KEY.NEW_LINE);
+		expect(routeKey(data, makeState({ notesVisible: true }), makeRuntime())).toEqual({
+			kind: "notes_forward",
+			data,
+		});
+	});
+});
+
+describe("routeKey — global note on the Submit tab", () => {
+	// The Submit tab lives at the pseudo-index currentTab === questions.length (2 for the
+	// default two-question runtime). #182: `n` there opens the notes editor scoped to the
+	// whole questionnaire instead of a single question.
+	const submitTab = (over: Partial<QuestionnaireState> = {}) =>
+		makeState({ currentTab: 2, notesVisible: false, ...over });
+
+	it("'n' with the editor closed emits notes_enter at the pseudo-index", () => {
+		expect(routeKey("n", submitTab(), makeRuntime())).toEqual({ kind: "notes_enter" });
+	});
+
+	it("while open, the Tab byte forwards to the notes editor — NOT tab_switch", () => {
+		expect(routeKey(BYTE_TAB, submitTab({ notesVisible: true }), makeRuntime())).toEqual({
+			kind: "notes_forward",
+			data: BYTE_TAB,
+		});
+	});
+
+	it("while open, a printable byte forwards into the editor (typing captured)", () => {
+		expect(routeKey("z", submitTab({ notesVisible: true }), makeRuntime())).toEqual({
+			kind: "notes_forward",
+			data: "z",
+		});
+	});
+
+	it("while open, a second 'n' forwards as a literal character instead of re-entering notes", () => {
+		expect(routeKey("n", submitTab({ notesVisible: true }), makeRuntime())).toEqual({
+			kind: "notes_forward",
+			data: "n",
+		});
+	});
+
+	it("while open, Esc commits the note (notes_exit)", () => {
+		expect(routeKey(sentinel(KEY.CANCEL), submitTab({ notesVisible: true }), makeRuntime())).toEqual({
+			kind: "notes_exit",
+		});
+	});
+
+	it("while open, Enter commits the note (notes_exit) — it does NOT submit", () => {
+		expect(routeKey(sentinel(KEY.CONFIRM), submitTab({ notesVisible: true }), makeRuntime())).toEqual({
+			kind: "notes_exit",
+		});
+	});
+
+	it("with the editor closed, Enter still submits/cancels per submitChoiceIndex (the n branch shadows nothing)", () => {
+		// D1-revised Enter-submit preserved: the notes branch sits AFTER the confirm branch
+		// inside routeSubmitTab, so Enter keeps its submit/cancel meaning on the Submit tab.
+		expect(routeKey(sentinel(KEY.CONFIRM), submitTab({ submitChoiceIndex: 0 }), makeRuntime())).toEqual({
+			kind: "submit",
+		});
+		expect(routeKey(sentinel(KEY.CONFIRM), submitTab({ submitChoiceIndex: 1 }), makeRuntime())).toEqual({
+			kind: "cancel",
+		});
+	});
 });
 
 describe("routeKey — inputMode (Type something)", () => {
@@ -529,6 +729,54 @@ describe("routeKey — inputMode (Type something)", () => {
 		});
 	});
 
+	it("configured newline is forwarded to the multiline editor", () => {
+		expect(
+			routeKey(sentinel(KEY.NEW_LINE), makeState({ inputMode: true }), makeRuntime({ currentItem: other })),
+		).toEqual({ kind: "ignore" });
+	});
+
+	it("forwards vertical editor movement while the cursor is between logical lines", () => {
+		const editing = makeState({ inputMode: true, optionIndex: 1 });
+		expect(
+			routeKey(
+				sentinel(KEY.EDITOR_UP),
+				editing,
+				makeRuntime({ currentItem: other, canMoveInputUp: true, canMoveInputDown: true }),
+			),
+		).toEqual({ kind: "ignore" });
+		expect(
+			routeKey(
+				sentinel(KEY.EDITOR_DOWN),
+				editing,
+				makeRuntime({ currentItem: other, canMoveInputUp: true, canMoveInputDown: true }),
+			),
+		).toEqual({ kind: "ignore" });
+	});
+
+	// FR-3: the inputMode block intercepts BEFORE the universal notes gate, so `n`
+	// inserts a literal character into the inline buffer instead of opening notes.
+	it("'n' under inputMode returns ignore (types a literal 'n'), NOT notes_enter", () => {
+		expect(routeKey("n", makeState({ inputMode: true }), makeRuntime({ currentItem: other }))).toEqual({
+			kind: "ignore",
+		});
+	});
+
+	it("Pi's Ctrl+U line-kill binding clears the whole custom answer", () => {
+		expect(
+			routeKey(sentinel(KEY.CLEAR), makeState({ inputMode: true }), makeRuntime({ currentItem: other })),
+		).toEqual({ kind: "input_clear" });
+	});
+
+	it("the app.editor.external binding opens the editor with the current draft", () => {
+		expect(
+			routeKey(
+				sentinel(KEY.EXTERNAL_EDITOR),
+				makeState({ inputMode: true }),
+				makeRuntime({ currentItem: other, inputBuffer: "draft" }),
+			),
+		).toEqual({ kind: "input_edit", value: "draft" });
+	});
+
 	it("Esc cancels the questionnaire even in inputMode", () => {
 		expect(
 			routeKey(sentinel(KEY.CANCEL), makeState({ inputMode: true }), makeRuntime({ currentItem: other })),
@@ -536,129 +784,79 @@ describe("routeKey — inputMode (Type something)", () => {
 	});
 });
 
-describe("routeKey — chat focus", () => {
-	const chatItem: WrappingSelectItem = { kind: "chat", label: "Chat about this" };
+describe("routeKey — remapped submit key as the confirm source (#156)", () => {
+	// Models a Slack/Discord-style ~/.pi/agent/keybindings.json:
+	//   { "tui.input.submit": ["ctrl+enter"], "tui.input.newLine": ["enter", ...] }
+	// `tui.select.confirm` keeps its default `enter`, so `enter` matches BOTH the
+	// user's newline override and confirm. The newline checks win that collision by
+	// design; the remapped submit key must therefore act as confirm everywhere, or
+	// notes and custom answers become impossible to commit.
+	const REMAPPED_ENTER = "<REMAPPED:ENTER>";
+	const REMAPPED_CTRL_ENTER = "<REMAPPED:CTRL_ENTER>";
+	const remapped = {
+		matches(data: string, name: string): boolean {
+			switch (name) {
+				case KEY.SUBMIT:
+					return data === REMAPPED_CTRL_ENTER;
+				case KEY.NEW_LINE:
+					return data === REMAPPED_ENTER;
+				case KEY.CONFIRM:
+					// Default binding — the user's config does not touch tui.select.confirm.
+					return data === REMAPPED_ENTER;
+				default:
+					return false;
+			}
+		},
+	};
+	const other: WrappingSelectItem = { kind: "other", label: "Type something." };
 
-	it("DOWN-on-last single-select → focus_chat (no optionIndex mutation)", () => {
-		// items.length === 3
-		expect(routeKey(sentinel(KEY.DOWN), makeState({ optionIndex: 2 }), makeRuntime())).toEqual({
-			kind: "focus_chat",
-		});
-	});
-
-	it("DOWN-on-last multi-select → focus_chat", () => {
-		const multiQ = makeQuestion({
-			multiSelect: true,
-			options: [
-				{ label: "FE", description: "FE" },
-				{ label: "BE", description: "BE" },
-				{ label: "DB", description: "DB" },
-			],
-		});
-		const items: WrappingSelectItem[] = multiQ.options.map((o) => ({ kind: "option" as const, label: o.label }));
+	it("inputMode: Enter is consumed as a newline (collision resolves to newline)", () => {
 		expect(
 			routeKey(
-				sentinel(KEY.DOWN),
-				makeState({ optionIndex: 2 }),
-				makeRuntime({
-					questions: [multiQ],
-					isMulti: false,
-					items,
-					currentItem: items[2],
-				}),
-			),
-		).toEqual({ kind: "focus_chat" });
-	});
-
-	it("DOWN-on-last + inputMode (last item is kind:'other') → focus_chat", () => {
-		const other: WrappingSelectItem = { kind: "other", label: "Type something." };
-		const items: WrappingSelectItem[] = [{ kind: "option", label: "A" }, { kind: "option", label: "B" }, other];
-		expect(
-			routeKey(
-				sentinel(KEY.DOWN),
-				makeState({ inputMode: true, optionIndex: 2 }),
-				makeRuntime({ items, currentItem: other }),
-			),
-		).toEqual({ kind: "focus_chat" });
-	});
-
-	it.each<[string, string, number]>([
-		["Tab", BYTE_TAB, 1],
-		["Right", BYTE_RIGHT, 1],
-		["Shift+Tab", BYTE_SHIFT_TAB, 2],
-		["Left", BYTE_LEFT, 2],
-	])("%s while chatFocused → tab_switch → tab %i", (_label, byte, expected) => {
-		expect(routeKey(byte, makeState({ chatFocused: true }), makeRuntime({ currentItem: chatItem }))).toEqual({
-			kind: "tab_switch",
-			nextTab: expected,
-		});
-	});
-
-	it("Enter while chatFocused single-select → confirm kind:'chat'", () => {
-		const action = routeKey(
-			sentinel(KEY.CONFIRM),
-			makeState({ chatFocused: true }),
-			makeRuntime({ currentItem: chatItem }),
-		);
-		expect(action.kind).toBe("confirm");
-		if (action.kind === "confirm") {
-			expect(action.answer.kind).toBe("chat");
-			expect(action.answer.answer).toBe("Chat about this");
-		}
-	});
-
-	it("Enter while chatFocused multi-select → confirm kind:'chat' (overrides multi_confirm)", () => {
-		const multiQ = makeQuestion({ multiSelect: true });
-		const action = routeKey(
-			sentinel(KEY.CONFIRM),
-			makeState({ currentTab: 0, chatFocused: true, multiSelectChecked: new Set([0, 1]) }),
-			makeRuntime({ questions: [multiQ, makeQuestion()], currentItem: chatItem }),
-		);
-		expect(action.kind).toBe("confirm");
-		if (action.kind === "confirm") {
-			expect(action.answer.kind).toBe("chat");
-		}
-	});
-
-	it("Esc while chatFocused → cancel", () => {
-		expect(
-			routeKey(sentinel(KEY.CANCEL), makeState({ chatFocused: true }), makeRuntime({ currentItem: chatItem })),
-		).toEqual({ kind: "cancel" });
-	});
-
-	it("Space while chatFocused (multi) → ignore", () => {
-		const multiQ = makeQuestion({ multiSelect: true });
-		expect(
-			routeKey(
-				BYTE_SPACE,
-				makeState({ chatFocused: true }),
-				makeRuntime({ questions: [multiQ, makeQuestion()], currentItem: chatItem }),
+				REMAPPED_ENTER,
+				makeState({ inputMode: true }),
+				makeRuntime({ keybindings: remapped, currentItem: other }),
 			),
 		).toEqual({ kind: "ignore" });
 	});
 
-	it("'n' while chatFocused → ignore", () => {
+	it("inputMode: the submit key confirms with the buffered text instead of falling through to the editor", () => {
+		const action = routeKey(
+			REMAPPED_CTRL_ENTER,
+			makeState({ inputMode: true }),
+			makeRuntime({ keybindings: remapped, currentItem: other, inputBuffer: "typed answer" }),
+		);
+		expect(action).toMatchObject({ kind: "confirm", answer: { kind: "custom", answer: "typed answer" } });
+	});
+
+	it("notes: Enter forwards as a newline; the submit key exits the notes editor", () => {
+		expect(
+			routeKey(REMAPPED_ENTER, makeState({ notesVisible: true }), makeRuntime({ keybindings: remapped })),
+		).toEqual({ kind: "notes_forward", data: REMAPPED_ENTER });
+		// Regression: before #156 this fell through to notes_forward, reaching the
+		// headless editor's own tui.input.submit handling and wiping the notes draft.
+		expect(
+			routeKey(REMAPPED_CTRL_ENTER, makeState({ notesVisible: true }), makeRuntime({ keybindings: remapped })),
+		).toEqual({ kind: "notes_exit" });
+	});
+
+	it("single-select option row: the submit key confirms", () => {
+		expect(
+			routeKey(REMAPPED_CTRL_ENTER, makeState({ currentTab: 0 }), makeRuntime({ keybindings: remapped })),
+		).toMatchObject({ kind: "confirm", answer: { answer: "A", kind: "option" } });
+	});
+
+	it("Submit tab: the submit key submits the questionnaire", () => {
 		expect(
 			routeKey(
-				"n",
-				makeState({ chatFocused: true, focusedOptionHasPreview: true }),
-				makeRuntime({ currentItem: chatItem }),
+				REMAPPED_CTRL_ENTER,
+				makeState({ currentTab: 2, submitChoiceIndex: 0 }),
+				makeRuntime({ keybindings: remapped }),
 			),
-		).toEqual({ kind: "ignore" });
-	});
-});
-
-// UP/DOWN form a single cycle through `[chat, option0, …, optionLast]` in both directions.
-describe("routeKey — chat-inclusive cycle", () => {
-	const chatItem: WrappingSelectItem = { kind: "chat", label: "Chat about this" };
-
-	it("UP at optionIndex 0 (single-select) emits focus_chat — wraps UP into the chat row", () => {
-		expect(routeKey(sentinel(KEY.UP), makeState({ optionIndex: 0 }), makeRuntime())).toEqual({
-			kind: "focus_chat",
-		});
+		).toEqual({ kind: "submit" });
 	});
 
-	it("UP at optionIndex 0 (multi-select with Next sentinel) emits focus_chat", () => {
+	it("multi-select: the submit key toggles a regular row and commits on the Next sentinel (matches Enter)", () => {
 		const multiQ = makeQuestion({
 			multiSelect: true,
 			options: [
@@ -673,41 +871,18 @@ describe("routeKey — chat-inclusive cycle", () => {
 		];
 		expect(
 			routeKey(
-				sentinel(KEY.UP),
-				makeState({ optionIndex: 0 }),
-				makeRuntime({
-					questions: [multiQ],
-					isMulti: false,
-					items,
-					currentItem: items[0],
-				}),
+				REMAPPED_CTRL_ENTER,
+				makeState({ optionIndex: 1 }),
+				makeRuntime({ keybindings: remapped, questions: [multiQ], isMulti: false, items, currentItem: items[1] }),
 			),
-		).toEqual({ kind: "focus_chat" });
-	});
-
-	it("DOWN while chatFocused returns to options at index 0 (continuous cycle, not a no-op)", () => {
-		// Carries the target index so the host can land on option 0 (top of the cycle)
-		// rather than restoring whatever optionIndex the user left chat from.
+		).toEqual({ kind: "toggle", index: 1 });
 		expect(
 			routeKey(
-				sentinel(KEY.DOWN),
-				makeState({ chatFocused: true, optionIndex: 2 }),
-				makeRuntime({ currentItem: chatItem }),
+				REMAPPED_CTRL_ENTER,
+				makeState({ optionIndex: 2, multiSelectChecked: new Set([0]) }),
+				makeRuntime({ keybindings: remapped, questions: [multiQ], isMulti: false, items, currentItem: items[2] }),
 			),
-		).toEqual({
-			kind: "focus_options",
-			optionIndex: 0,
-		});
-	});
-
-	it("UP while chatFocused returns to options at the LAST item (continuous cycle)", () => {
-		// items.length - 1 is the last navigable row (Type-something on single-select,
-		// Next sentinel on multi-select). Symmetric with DOWN-from-last → focus_chat.
-		const runtime = makeRuntime({ currentItem: chatItem });
-		expect(routeKey(sentinel(KEY.UP), makeState({ chatFocused: true, optionIndex: 0 }), runtime)).toEqual({
-			kind: "focus_options",
-			optionIndex: runtime.items.length - 1,
-		});
+		).toEqual({ kind: "multi_confirm", selected: ["FE"], autoAdvanceTab: undefined });
 	});
 });
 
@@ -744,8 +919,8 @@ describe("routeKey — collapse/expand (Ctrl+] toggle + collapsed-mode lockout)"
 	});
 
 	it("while collapsed, navigation keys are swallowed as ignore (no state mutation behind the one-line footer)", () => {
-		// Arrow keys would otherwise navigate options or wrap to chat; collapsed mode is
-		// a read-the-transcript pause, so non-cancel keys must not advance any focus.
+		// Arrow keys would otherwise navigate options; collapsed mode is a read-the-
+		// transcript pause, so non-cancel keys must not advance any focus.
 		expect(routeKey(sentinel(KEY.UP), makeState({ collapsed: true, optionIndex: 2 }), makeRuntime())).toEqual({
 			kind: "ignore",
 		});
@@ -770,5 +945,42 @@ describe("routeKey — collapse/expand (Ctrl+] toggle + collapsed-mode lockout)"
 				makeRuntime({ questions: [makeQuestion({ multiSelect: true })] }),
 			),
 		).toEqual({ kind: "ignore" });
+	});
+
+	it("uses the runtime's collapseKey for the toggle (default `ctrl+]`, configurable for non-US layouts)", () => {
+		// Latin American keyboards, Dvorak, and several European layouts put `]` on a
+		// shifted layer. Users override via the `collapseKey` config field; the router
+		// matches whatever spec the runtime carries, not a hardcoded literal. Note that
+		// on legacy terminals (no Kitty keyboard protocol), `Ctrl+]` and `Ctrl+}` both
+		// send the same 0x1D control byte and are not distinguishable by the parser
+		// alone — users on such terminals should pick a key whose spec resolves
+		// unambiguously (e.g. `alt+o`, `ctrl+shift+h`).
+		const BYTE_ALT_O = "\x1bo"; // ESC + 'o' — legacy encoding for Alt+O
+		expect(routeKey(BYTE_ALT_O, makeState(), makeRuntime({ collapseKey: "alt+o" }))).toEqual({
+			kind: "toggle_collapsed",
+		});
+		// When the override is `alt+o`, sending the Ctrl+] byte should NOT match
+		expect(routeKey("\x1d", makeState(), makeRuntime({ collapseKey: "alt+o" }))).toEqual({ kind: "ignore" });
+	});
+	it("`collapseKey: 'off'` disables the toggle entirely (the key is never matched)", () => {
+		// Disable the collapse shortcut via config: the key router must not emit
+		// toggle_collapsed for any key. With the toggle disabled, Ctrl+] falls through
+		// to the normal state branches (no-op here, but the same flow as any other
+		// non-handled key).
+		const runtime = makeRuntime({ collapseKey: "off" });
+		expect(routeKey(BYTE_CTRL_RBRACKET, makeState(), runtime)).not.toEqual({ kind: "toggle_collapsed" });
+	});
+
+	it("treats a missing collapseKey as disabled instead of throwing after an in-process package update", () => {
+		// A Pi process can retain the pre-collapse outer module while a package update
+		// replaces the lazily imported QuestionnaireSession graph on disk. The old
+		// constructor call has no collapseKey field, so runtime receives undefined at
+		// runtime despite the TypeScript contract. Never pass that value to matchesKey:
+		// pi-tui's parseKeyId calls toLowerCase() and would terminate the whole process.
+		const runtime = makeRuntime() as unknown as { collapseKey?: string };
+		delete runtime.collapseKey;
+
+		expect(() => routeKey(BYTE_CTRL_RBRACKET, makeState(), runtime as QuestionnaireRuntime)).not.toThrow();
+		expect(routeKey(BYTE_CTRL_RBRACKET, makeState(), runtime as QuestionnaireRuntime)).toEqual({ kind: "ignore" });
 	});
 });

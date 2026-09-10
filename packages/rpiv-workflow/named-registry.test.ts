@@ -1,5 +1,5 @@
 /**
- * Named-publish registry tests — `state.named`, `OutputSpec.name`,
+ * Named-publish registry tests — `state.named`, `Outcome.name`,
  * `reads:`, the labelled-flag prompt format, accumulation across loops,
  * and the validator's catch for unresolved reads.
  *
@@ -13,9 +13,19 @@ import { join } from "node:path";
 import { createMockSessionChain, mockAssistantMessage } from "@juicesharp/rpiv-test-utils";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { acts, defineWorkflow, gate, produces, type StageDef, type Workflow } from "./api.js";
-import { fs as fsHandle } from "./handle.js";
-import type { OutputSpec } from "./output.js";
+import {
+	acts,
+	defineRoute,
+	defineWorkflow,
+	type EdgeFn,
+	fanin,
+	gate,
+	produces,
+	type StageDef,
+	type Workflow,
+} from "./api.js";
+import { fs as fsHandle, opaque } from "./handle.js";
+import type { Outcome } from "./output-spec.js";
 import { eq, gt } from "./predicates.js";
 import { runWorkflow } from "./runner/index.js";
 import { typeboxSchema } from "./typebox-adapter.js";
@@ -28,7 +38,7 @@ import { validateWorkflow } from "./validate-workflow.js";
 const PATTERN = /\.rpiv\/artifacts\/[\w.-]+\/[\w.-]+\.md/g;
 
 /** Outcome that scans the assistant transcript for `.rpiv/artifacts/<bucket>/<file>.md` paths. */
-const makeOutcome = (name?: string): OutputSpec<unknown, "artifact-md", Record<string, unknown>> => ({
+const makeOutcome = (name?: string): Outcome<unknown, "artifact-md", Record<string, unknown>> => ({
 	...(name !== undefined ? { name } : {}),
 	collector: {
 		collect: (ctx) => {
@@ -140,7 +150,7 @@ describe("state.named — publish key resolution + accumulation", () => {
 		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p3.md", "---\nblockers_count: 0\n---\n");
 
 		// Use a frontmatter-reading outcome so the gate routes deterministically.
-		const fmOutcome: OutputSpec<unknown, "artifact-md", Record<string, unknown>> = {
+		const fmOutcome: Outcome<unknown, "artifact-md", Record<string, unknown>> = {
 			name: "plans",
 			collector: makeOutcome("plans").collector,
 			parser: {
@@ -179,7 +189,7 @@ describe("state.named — publish key resolution + accumulation", () => {
 				done: acts(),
 			},
 			edges: {
-				produce: gate("blockers_count", { produce: gt(0), done: eq(0) }),
+				produce: gate("blockers_count", { produce: gt(0), done: eq(0) }, "done"),
 				done: "stop",
 			},
 		});
@@ -284,7 +294,7 @@ describe("reads: prompt format", () => {
 		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p1.md", "---\nblockers_count: 1\n---\n");
 		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p2.md", "---\nblockers_count: 0\n---\n");
 
-		const fmOutcome: OutputSpec<unknown, "artifact-md", Record<string, unknown>> = {
+		const fmOutcome: Outcome<unknown, "artifact-md", Record<string, unknown>> = {
 			name: "plans",
 			collector: makeOutcome("plans").collector,
 			parser: {
@@ -322,7 +332,156 @@ describe("reads: prompt format", () => {
 				consume: acts({ reads: ["plans"] }),
 			},
 			edges: {
-				produce: gate("blockers_count", { produce: gt(0), consume: eq(0) }),
+				produce: gate("blockers_count", { produce: gt(0), consume: eq(0) }, "consume"),
+				consume: "stop",
+			},
+		});
+
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p1.md")] },
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p2.md")] },
+				{ branch: [mockAssistantMessage("consumed")] },
+			],
+		});
+
+		const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+		expect(result.success).toBe(true);
+		expect(chain.sentMessages.at(-1)).toBe("/skill:consume --plans .rpiv/artifacts/plans/p2.md");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// reads: fanin() all-entries projection (fanout-and-synthesize)
+// ---------------------------------------------------------------------------
+
+describe("reads: fanin() all-entries projection", () => {
+	let tmpDir: string;
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "rpiv-fanin-"));
+	});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	/** A frontmatter-reading "plans" outcome so the loop-back gate routes deterministically. */
+	const fmPlansOutcome = (): Outcome<unknown, "artifact-md", Record<string, unknown>> => ({
+		name: "plans",
+		collector: makeOutcome("plans").collector,
+		parser: {
+			parse: (ctx) => {
+				const primary = ctx.artifacts[0];
+				if (primary?.handle.kind !== "fs") {
+					return { kind: "ok", payload: { kind: "artifact-md", data: {} } };
+				}
+				const abs = primary.handle.path.startsWith("/") ? primary.handle.path : join(ctx.cwd, primary.handle.path);
+				if (!existsSync(abs)) {
+					return { kind: "ok", payload: { kind: "artifact-md", data: {} } };
+				}
+				const text = readFileSync(abs, "utf-8");
+				const m = text.match(/blockers_count:\s*(\d+)/);
+				return { kind: "ok", payload: { kind: "artifact-md", data: { blockers_count: Number(m?.[1] ?? 0) } } };
+			},
+		},
+	});
+
+	it("reads EVERY accumulated entry when the read is wrapped in fanin()", async () => {
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p1.md", "---\nblockers_count: 1\n---\n");
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p2.md", "---\nblockers_count: 1\n---\n");
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p3.md", "---\nblockers_count: 0\n---\n");
+
+		const workflow = defineWorkflow({
+			name: "wf",
+			start: "produce",
+			stages: {
+				produce: produces({
+					outcome: fmPlansOutcome(),
+					outputSchema: typeboxSchema(Type.Object({ blockers_count: Type.Number() })),
+				}),
+				synthesize: acts({ reads: [fanin("plans")] }),
+			},
+			edges: {
+				produce: gate("blockers_count", { produce: gt(0), synthesize: eq(0) }, "synthesize"),
+				synthesize: "stop",
+			},
+		});
+
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p1.md")] },
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p2.md")] },
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p3.md")] },
+				{ branch: [mockAssistantMessage("synthesized")] },
+			],
+		});
+
+		const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+		expect(result.success).toBe(true);
+		// The synthesize barrier sees all three plan handles, in run order.
+		expect(chain.sentMessages.at(-1)).toBe(
+			"/skill:synthesize --plans .rpiv/artifacts/plans/p1.md --plans .rpiv/artifacts/plans/p2.md --plans .rpiv/artifacts/plans/p3.md",
+		);
+	});
+
+	it("mixes fanin (all) and bare (latest) reads in declared order", async () => {
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p1.md", "---\nblockers_count: 1\n---\n");
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p2.md", "---\nblockers_count: 0\n---\n");
+		writeArtifact(tmpDir, ".rpiv/artifacts/reviews/r.md");
+
+		const workflow = defineWorkflow({
+			name: "wf",
+			start: "produce",
+			stages: {
+				produce: produces({
+					outcome: fmPlansOutcome(),
+					outputSchema: typeboxSchema(Type.Object({ blockers_count: Type.Number() })),
+				}),
+				review: produces({ outcome: makeOutcome("reviews") }),
+				synthesize: acts({ reads: [fanin("plans"), "reviews"] }),
+			},
+			edges: {
+				produce: gate("blockers_count", { produce: gt(0), review: eq(0) }, "review"),
+				review: "synthesize",
+				synthesize: "stop",
+			},
+		});
+
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p1.md")] },
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/plans/p2.md")] },
+				{ branch: [mockAssistantMessage("wrote .rpiv/artifacts/reviews/r.md")] },
+				{ branch: [mockAssistantMessage("synthesized")] },
+			],
+		});
+
+		const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+		expect(result.success).toBe(true);
+		// All of plans (run order), then the latest of reviews — declared order.
+		expect(chain.sentMessages.at(-1)).toBe(
+			"/skill:synthesize --plans .rpiv/artifacts/plans/p1.md --plans .rpiv/artifacts/plans/p2.md --reviews .rpiv/artifacts/reviews/r.md",
+		);
+	});
+
+	it("treats an explicit { all: false } read as latest-wins", async () => {
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p1.md", "---\nblockers_count: 1\n---\n");
+		writeArtifact(tmpDir, ".rpiv/artifacts/plans/p2.md", "---\nblockers_count: 0\n---\n");
+
+		const workflow = defineWorkflow({
+			name: "wf",
+			start: "produce",
+			stages: {
+				produce: produces({
+					outcome: fmPlansOutcome(),
+					outputSchema: typeboxSchema(Type.Object({ blockers_count: Type.Number() })),
+				}),
+				consume: acts({ reads: [{ name: "plans", all: false }] }),
+			},
+			edges: {
+				produce: gate("blockers_count", { produce: gt(0), consume: eq(0) }, "consume"),
 				consume: "stop",
 			},
 		});
@@ -388,6 +547,35 @@ describe("reads: validation + preflight", () => {
 		});
 		expect(validateWorkflow(workflow).filter((i) => i.severity === "error")).toEqual([]);
 	});
+
+	it("accepts a fanin() read of a published channel", () => {
+		const workflow = defineWorkflow({
+			name: "wf",
+			start: "p",
+			stages: {
+				p: produces({ outcome: makeOutcome("plans") }),
+				c: acts({ reads: [fanin("plans")] }),
+			},
+			edges: { p: "c", c: "stop" },
+		});
+		expect(validateWorkflow(workflow).filter((i) => i.severity === "error")).toEqual([]);
+	});
+
+	it("rejects a fanin() read of a non-published name (normalized channel in the message)", () => {
+		const workflow = defineWorkflow({
+			name: "wf",
+			start: "consume",
+			stages: {
+				consume: acts({ reads: [fanin("does-not-exist")] }),
+			},
+			edges: { consume: "stop" },
+		});
+		const issues = validateWorkflow(workflow);
+		const err = issues.find((i) => /does-not-exist/.test(i.message));
+		expect(err?.severity).toBe("error");
+		// Proves the object read is normalized — never "[object Object]".
+		expect(issues.some((i) => /\[object Object\]/.test(i.message))).toBe(false);
+	});
 });
 
 describe("reads: runtime preflight halts when slot is empty", () => {
@@ -423,5 +611,100 @@ describe("reads: runtime preflight halts when slot is empty", () => {
 		expect(result.success).toBe(false);
 		expect(result.error).toMatch(/reads "produce"/);
 		expect(result.error).toMatch(/state.named\["produce"\] is empty/);
+	});
+
+	it("halts naming the normalized channel for a fanin() read with an empty slot", async () => {
+		// Same shape as above but the read is wrapped in fanin() — proves the
+		// preflight normalizes the object read (no "[object Object]" key regression).
+		const workflow: Workflow = {
+			name: "wf",
+			start: "consume",
+			stages: {
+				consume: acts({ reads: [fanin("produce")] }) as StageDef,
+				produce: produces({ outcome: makeOutcome() }),
+			},
+			edges: { consume: "stop", produce: "stop" },
+		};
+
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [{ branch: [mockAssistantMessage("should never run")] }],
+		});
+
+		const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+		expect(result.success).toBe(false);
+		expect(result.error).toMatch(/reads "produce"/);
+		expect(result.error).toMatch(/state.named\["produce"\] is empty/);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Side-effect outcome publishing — an acts stage with a NAMED outcome writes
+// its channel too (the Outcome.name contract), so a gate can fold an acts
+// arm's digest: the remediation fix-round cap and the unchanged-tree stop both
+// read `state.named.<name>`, which the produces-only write gate previously
+// left unwritten for the very stage kind that carries them.
+// ---------------------------------------------------------------------------
+
+describe("state.named — side-effect outcome publishing (the remediation-digest seam)", () => {
+	let tmpDir: string;
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "rpiv-named-acts-"));
+	});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	/** An acts outcome shaped like `remediationOutcome`: opaque artifact + parsed `{ changed }` data. */
+	const digestOutcome = (changed: boolean): Outcome<unknown, "digest", { changed: boolean }> => ({
+		name: "digest",
+		collector: {
+			collect: () => ({
+				kind: "ok",
+				artifacts: [{ handle: opaque(changed ? "digest-changed" : "digest-unchanged"), role: "digest" }],
+			}),
+		},
+		parser: { parse: () => ({ kind: "ok", payload: { kind: "digest", data: { changed } } }) },
+	});
+
+	it("a channel-length cap over an acts outcome stops the fix loop after exactly ONE round (e2e, real runner)", async () => {
+		// The ship-preset cap shape end to end: a judge that always fails, a fix
+		// arm publishing one digest per round, and a gate whose budget IS the
+		// digest channel's length. Round 1: no digest yet → fix. Round 2: one
+		// digest → the cap trips and the run stops. Without the acts publish the
+		// channel stays empty forever and only the backward-jump guard ends the
+		// loop — the exact inert-cap defect this seam regressed into.
+		const capGate: EdgeFn = defineRoute(
+			["fix", "stop"],
+			({ state }) => ((state.named.digest?.length ?? 0) >= 1 ? "stop" : "fix"),
+			{ readsData: false },
+		);
+		const workflow = defineWorkflow({
+			name: "wf",
+			start: "judge",
+			stages: {
+				judge: produces.script({
+					run: () => ({
+						kind: "artifacts",
+						artifacts: [{ handle: fsHandle(".rpiv/artifacts/validation/report.md"), role: "primary" }],
+						data: { verdict: "fail" },
+					}),
+				}),
+				fix: acts({ skill: "fix", outcome: digestOutcome(true) }),
+			},
+			edges: { judge: capGate, fix: "judge" },
+		});
+		writeArtifact(tmpDir, ".rpiv/artifacts/validation/report.md");
+
+		const chain = createMockSessionChain({
+			cwd: tmpDir,
+			steps: [{ branch: [mockAssistantMessage("applied one localized fix")] }],
+		});
+
+		const result = await runWorkflow(chain.ctx, { workflow, input: "x" });
+		// The cap's stop is a noteless decision stop — a deliberate completion.
+		expect(result.error).toBeUndefined();
+		expect(result.success).toBe(true);
+		expect(chain.sentMessages.filter((m) => m.startsWith("/skill:fix"))).toHaveLength(1);
 	});
 });

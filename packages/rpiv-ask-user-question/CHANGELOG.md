@@ -7,6 +7,140 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Bare carriage returns in model-supplied text (`question`, `header`, `options[].label`, `options[].description`, `options[].preview`) no longer fragment option rows or corrupt the terminal line: line terminators are normalized once at tool entry — `\r\n` becomes `\n`, a lone `\r` is deleted (never a space, never a newline) — before validation, the TUI, the RPC dialog walker, the answer envelope, and the `rpiv:ask-user:prompt` payload see the text (#192). As a consequence, labels that differed from a reserved or duplicate label only by a stray `\r` are now rejected as before the CR slipped in.
+
+## [2.9.0] - 2026-09-01
+
+## [2.8.0] - 2026-08-29
+
+## [2.7.1] - 2026-08-24
+
+## [2.7.0] - 2026-08-21
+
+### Added
+
+- Press `n` on the Submit tab to attach a global note to the whole questionnaire (#182). The note reaches the model as a trailing `global note: <text>` envelope segment and as `details.globalNote`, survives tab switches, and never marks a question answered; the Submit tab advertises it in the bottom key-hint row (below the picker, matching the question tabs' hint idiom) and shows the committed note as a `Note` entry in the review list.
+- A global note counts as an answer: submitting with every question blank but a non-empty global note returns the answered envelope instead of the decline. A cancelled result keeps its note in `details.globalNote` while the `content` text stays the canonical decline message.
+- Notes — per-question `n` and the Submit-tab global note — are documented as terminal-only: the native `select`/`input` dialogs of RPC/ACP hosts carry no note field.
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+### Fixed
+
+- The dialog footer hint now names the configured `collapseKey` (e.g. `Alt+O to collapse`) instead of always reading `Ctrl+]`, and is omitted entirely when `collapseKey` is `"off"` — previously the dialog advertised a shortcut that could not fire (#176).
+- The collapsed one-line footer (`… to expand`) and the one-shot hide notification use the same display casing as the footer hint (`Ctrl+]`, `Alt+O`), instead of the raw lowercase config spec.
+- Compound named keys display conventionally in hints (`Ctrl+PageDown`, not `Ctrl+Pagedown`).
+- Collapsing no longer hides the overlay on hosts that expose an overlay handle but no raw terminal input — hiding would be irreversible there (pi-tui routes no input to a hidden overlay), so the dialog now falls back to the visible one-line collapsed row, which the same key expands.
+
+## [2.6.2] - 2026-08-18
+
+## [2.6.1] - 2026-08-17
+
+### Added
+
+- New `guidance.description` config field: a non-empty string in `$XDG_CONFIG_HOME/rpiv-ask-user-question/config.json` now replaces the entire built-in `ask_user_question` tool description (no merging); empty or non-string values keep the default. Note: a `description` key that previously sat unused under `guidance` now takes effect.
+- Package card cover on pi.dev: `package.json` now declares `pi.image` pointing at the package's `docs/cover.png`.
+
+## [2.6.0] - 2026-08-15
+
+### Added
+
+- The questionnaire emits one standard terminal BEL (`\x07`) when it starts waiting for input in an interactive TTY — terminal configuration decides whether that is an audible alert, a visual alert, or nothing. Redirected and non-TTY output (including RPC pipes) is untouched (#140).
+
+## [2.5.2] - 2026-08-14
+
+### Fixed
+
+- The questionnaire now honors a remapped `tui.input.submit` key as its confirm action everywhere (notes, custom answers, option rows, multi-select, Submit tab). Previously a Slack-style configuration that folds `enter` into `tui.input.newLine` and moves submit elsewhere (e.g. `ctrl+enter`) left the dialog with no working confirm key, and pressing the submit key silently wiped the typed draft (#156).
+
+## [2.5.1] - 2026-08-14
+
+### Fixed
+
+- Long pasted text in "Type something" answers and notes now reaches the agent as the full pasted content instead of the editor's compact `[paste #N +L lines]` marker, including after tab switches (#160).
+
+## [2.5.0] - 2026-08-13
+
+## [2.4.0] - 2026-08-03
+
+### Fixed
+
+- Preview questionnaires now rebalance after terminal resizing: option descriptions gain useful width without exceeding half the dialog, while content-sized previews align with the right edge.
+- The notes affordance below a right-aligned preview box slides left instead of clipping when a locale string is wider than the box (the French string sits exactly at the box's minimum width).
+
+## [2.3.1] - 2026-07-31
+
+## [2.3.0] - 2026-07-31
+
+## [2.2.0] - 2026-07-29
+
+### Added
+- Custom answers and notes now use Pi's multiline editor semantics: `Shift+Enter` inserts a newline, pasted line breaks are preserved, and vertical arrows move within the draft before returning to row navigation at its boundaries.
+- `Ctrl+G` opens Pi's configured external editor for the focused `Type something.` draft, and `Ctrl+U` clears that draft without cancelling the questionnaire. The input-mode hint bar advertises the context-specific controls at its right edge.
+
+### Fixed
+- Custom-answer drafts now survive browsing other options, remain visible in place of the `Type something.` label while another option has focus, and stay isolated per question instead of being cleared on navigation or leaking across tabs.
+
+## [2.1.0] - 2026-07-23
+
+### Added
+- Press `n` to open the notes editor from every question tab — single- or multi-select, with or without option previews — instead of only when the focused option carried a preview. The hint bar now advertises notes on every tab, except while the custom-answer field is capturing typed text.
+- Emit `rpiv:ask-user:blocked` (`{ active: boolean }`) while the questionnaire awaits input, cleared when the questionnaire resolves, so external status listeners can show `blocked` instead of `working`.
+
+### Changed
+- Tool description and prompt guidelines now describe the custom-answer behavior consistently: the "Type something." row is appended to every question, and the reserved labels `Other` / `Type something.` are rejected in every question mode.
+- README rewritten to follow the documentation standard shared across all packages.
+- npm tarball now includes the versioned `docs/` reference and no longer ships cover or screenshot art.
+
+### Fixed
+- The notes editor no longer discards an in-progress note when it is reopened before the option is confirmed.
+- Collapse toggles now ignore Kitty keyboard repeat and release events, preventing a tap from immediately reopening the questionnaire or a held key from toggling it rapidly in terminals such as cmux/Ghostty.
+- A missing collapse-key value at runtime is treated as disabled instead of crashing the host process (previously possible when a long-lived Pi session spanned a package update).
+
+## [2.0.0] - 2026-07-21
+
+### Added
+- Questionnaires now render in RPC hosts (e.g. the VS Code pendant, Zed) through native select and input dialogs instead of silently reporting a decline.
+- Free-text `Type something.` answers on every question type — added to multi-select and no longer suppressed on single-select questions whose options carry previews.
+- Configurable collapse/expand shortcut via the new `collapseKey` config field (default `ctrl+]`; `off` disables it).
+- Hide the tool from the model entirely in non-interactive runs instead of auto-declining each call.
+- Honor `XDG_CONFIG_HOME` when locating the config file, falling back to the legacy `~/.config` location when the new one is absent.
+
+### Changed
+- Collapsing the questionnaire now fully hides the overlay — chat scrolling and editor focus resume, Esc no longer cancels while hidden, and a one-time notification names the reopen key.
+
+### Removed
+- The `Chat about this` escape hatch; Esc is now the only way to abandon the questionnaire without answering.
+
+### Fixed
+- Hosts with no dialog UI at all now receive an explicit no-UI error telling the model to re-ask in chat, instead of a false report that the user declined.
+- Malformed `collapseKey` values fall back to the default instead of capturing every press of the bare key.
+- The collapse shortcut no longer steals its key from other focused overlays.
+- Report a clear restart remedy when the plugin's files are replaced mid-session (e.g. by a reinstall), instead of failing every later questionnaire with an opaque error.
+- Tool registration no longer fails with a missing-module error under package installers that do not materialise peer dependencies.
+
+## [1.20.0] - 2026-06-15
+
+### Added
+- Chinese (`zh`) translations (`locales/zh.json`) (#68).
+
+## [1.19.1] - 2026-06-10
+
+## [1.19.0] - 2026-06-09
+
+## [1.18.2] - 2026-06-04
+
+## [1.18.1] - 2026-06-04
+
+## [1.18.0] - 2026-06-04
+
+### Changed
+- The questionnaire view/render graph (TUI components, preview, markdown) now loads lazily on the first `ask_user_question` invocation instead of at extension registration, cutting the extension's session-start load cost (~227ms → ~58ms).
+
 ## [1.17.1] - 2026-06-01
 
 ## [1.17.0] - 2026-06-01

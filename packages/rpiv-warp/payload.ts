@@ -91,7 +91,17 @@ export function extractMessageText(content: UserMessage["content"] | AssistantMe
 export function summarizeSkillBlock(text: string): string {
 	const parsed = parseSkillBlock(text);
 	if (!parsed) return text;
-	return parsed.userMessage ? `/skill:${parsed.name} ${parsed.userMessage}` : `/skill:${parsed.name}`;
+	const args = unwrapSkillInput(parsed.userMessage);
+	return args ? `/skill:${parsed.name} ${args}` : `/skill:${parsed.name}`;
+}
+
+/** rpiv-args' token emit path carries the raw argument string in a
+ *  `Skill input:`-labeled trailer after `</skill>` (args.ts
+ *  appendSkillInput) — Pi's parseSkillBlock surfaces it verbatim as
+ *  userMessage. Strip the label so the toast shows what the human typed. */
+function unwrapSkillInput(userMessage: string | undefined): string | undefined {
+	const m = userMessage?.match(/^Skill input: ([\s\S]*)$/);
+	return m ? m[1] : userMessage;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,16 +136,26 @@ export function lastAssistantText(branch: SessionEntry[]): string {
 // Envelope — common fields for every Warp event
 // ---------------------------------------------------------------------------
 
-export function baseEnvelope(event: WarpEvent, ctx: ExtensionContext): WarpPayloadBase {
-	const cwd = ctx.cwd;
+/**
+ * Identity-independent envelope core: builds the shared fields from an
+ * explicit `session_id` + `cwd` rather than an `ExtensionContext`. The root
+ * flow delegates here with the live session; the workflow-question bridge
+ * delegates here with `session_id = runId` (a workflow run is Warp's
+ * logical session for its parked-question badge).
+ */
+export function runEnvelope(event: WarpEvent, session_id: string, cwd: string): WarpPayloadBase {
 	return {
 		v: negotiateProtocolVersion(),
 		agent: AGENT_ID,
 		event,
-		session_id: ctx.sessionManager.getSessionId(),
+		session_id,
 		cwd,
 		project: projectName(cwd),
 	};
+}
+
+export function baseEnvelope(event: WarpEvent, ctx: ExtensionContext): WarpPayloadBase {
+	return runEnvelope(event, ctx.sessionManager.getSessionId(), ctx.cwd);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +201,35 @@ export function buildToolCompletePayload(
 		...baseEnvelope("tool_complete", ctx),
 		tool_name: toolName,
 		...(toolInput !== undefined ? { tool_input: toolInput } : {}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Workflow-question builders — session_id is the workflow runId, NOT the
+// launcher session. Composed from runEnvelope so they share the root flow's
+// field shape. Used by createWorkflowQuestionTransport in index.ts.
+// ---------------------------------------------------------------------------
+
+/** Defensive first emission for a run that just parked its first question —
+ *  mirrors the root flow's agent_start defensive `session_start`. */
+export function buildWorkflowSessionStartPayload(runId: string, cwd: string): WarpPayload {
+	return runEnvelope("session_start", runId, cwd);
+}
+
+/** A workflow run parked its first outstanding question — Warp shows the
+ *  "question" / Blocked badge for this runId. */
+export function buildWorkflowQuestionAskedPayload(runId: string, cwd: string): WarpPayload {
+	return runEnvelope("question_asked", runId, cwd);
+}
+
+/** A workflow run's last outstanding question was answered/cleared — Warp
+ *  clears the badge. Carries `tool_name` so Warp attributes it to the
+ *  blocking tool, but no `tool_input` (the bridge aggregates, it has no
+ *  per-question input). */
+export function buildWorkflowQuestionCompletePayload(runId: string, cwd: string): WarpPayload {
+	return {
+		...runEnvelope("tool_complete", runId, cwd),
+		tool_name: "ask_user_question",
 	};
 }
 

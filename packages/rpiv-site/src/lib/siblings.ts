@@ -3,13 +3,13 @@ import { fileURLToPath } from "node:url";
 
 export interface Sibling {
 	pkg: string; // e.g. @juicesharp/rpiv-advisor
-	name: string; // e.g. rpiv-advisor — directory + cover-import key
+	name: string; // e.g. rpiv-advisor — package directory + SiblingInfographic switch key
 	description: string; // verbatim from package.json
 	homepage: string; // GitHub tree URL from package.json
 	npmUrl: string; // https://www.npmjs.com/package/...
 	version: string; // lockstep semver from package.json
 	role: string; // hand-curated short role label (≤ 18 chars)
-	peers: string[]; // external runtime peers, prefix-stripped (pi-* + typebox)
+	peers: string[]; // external runtime peers, scope-stripped (pi-ai / pi-coding-agent / pi-tui); internal rpiv-* peers dropped
 	installCmd: string; // `pi install npm:@juicesharp/rpiv-...`
 }
 
@@ -28,7 +28,7 @@ export type SiblingName = (typeof SIBLING_NAMES)[number];
 const ROLES: Record<SiblingName, string> = {
 	"rpiv-advisor": "advisor model",
 	"rpiv-args": "prompt args",
-	"rpiv-ask-user-question": "tui prompt",
+	"rpiv-ask-user-question": "question prompt",
 	"rpiv-btw": "side question",
 	"rpiv-todo": "live overlay",
 	"rpiv-web-tools": "web search",

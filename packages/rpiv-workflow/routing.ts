@@ -8,12 +8,19 @@
  * routing layer detected a violation (an `EdgeFn` body threw, or an
  * `EdgeFn` returned an undeclared target).
  *
+ * `{ kind: "stop" }` (and "terminal stages" above/below) is the GRAPH-SINK
+ * sense — a stage with no outgoing edge OR an explicit `STOP`. Unrelated to
+ * the `terminal()` stage factory (stage-def.ts) and to "terminal failure"
+ * run-outcome prose (audit.ts). See the glossary on `stage-def.ts`'s
+ * `terminal` export. The `kind: "stop"` literal is untouched.
+ *
  * Errors are returned, not thrown. The caller (runner) switches on
- * `kind` and routes `"err"` through `recordTerminalFailure` — same as
+ * `kind` and routes `"err"` through `recordFatalFailure` — same as
  * any other halt site.
  */
 
 import { type EdgeContext, type EdgeFn, STOP, type Workflow } from "./api.js";
+import { formatError } from "./internal-utils.js";
 
 /**
  * Three-way return from `nextStage`. Matches the convention established by
@@ -62,10 +69,9 @@ function invokeEdgeFn(
 	try {
 		return { kind: "ok", value: fn(ctx) };
 	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
 		return {
 			kind: "err",
-			reason: `workflow edge function at "${current}" threw: ${msg}`,
+			reason: `workflow edge function at "${current}" threw: ${formatError(e)}`,
 		};
 	}
 }
