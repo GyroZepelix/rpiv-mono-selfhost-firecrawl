@@ -5,7 +5,62 @@ All notable changes to `@juicesharp/rpiv-advisor` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.15.0] - 2026-10-24
+
+### Fixed
+
+- **A temporary provider error no longer fails the advisor call outright.** One "servers are overloaded" response, rate limit or dropped connection ended the consultation with `Advisor call failed`. The advisor now retries such errors under your Pi `retry` settings, the same policy Pi uses for its own turns and compaction (by default up to 3 retries with growing backoff; `"retry": { "enabled": false }` turns it off). Permanent errors such as an invalid key or exhausted quota still fail at once. Needs Pi 1.0 or later; older hosts call once, as before. Thanks @CovetingEpiphany2152 ([#191](https://github.com/juicesharp/rpiv-mono/issues/191)).
+
+## [2.14.2] - 2026-10-23
+
+## [2.14.1] - 2026-10-23
+
+### Fixed
+
+- Advisor calls now send a session id (`advisor-<pi session id>`). On OpenAI-family providers repeated consultations hit the prompt cache instead of re-reading the whole context, and OpenCode / OpenCode Go no longer reject every call with `MissingSessionID`. The id is separate from the executor's, so the advisor never shares the executor's cache key or Codex websocket, and its provider resources are released on session shutdown so headless `pi -p` runs exit promptly. Thanks @piousp for #263, and @Marsor707, @SlanyCukr and @draculalaa for the investigation in #236.
+
+## [2.14.0] - 2026-10-23
+
+## [2.13.10] - 2026-10-23
+
+## [2.13.9] - 2026-10-17
+
+### Changed
+
+- Faster extension startup: relative imports now name the published `.ts` files instead of nonexistent `.js` targets, so Pi's loader (jiti) no longer runs fallback resolution for each of them on every launch. Runtime behavior is unchanged. Thanks @ry4nyu for #306, and @szastupov for #304.
+
+## [2.13.8] - 2026-10-12
+
+## [2.13.7] - 2026-10-12
+
+### Fixed
+- The advisor no longer inherits the executor's tools. On Pi 1.x the copied context declares the executor's tools in its system messages, and providers sent them even with `tools: []`, so the advisor model could call a tool and fail with `Advisor returned no text content` (`stopReason: toolUse`). The declarations are now stripped; the system prompt text is kept (#295, #296).
+
+## [2.13.6] - 2026-10-12
+
+## [2.13.5] - 2026-10-12
+
+## [2.13.4] - 2026-10-11
+
+## [2.13.3] - 2026-10-11
+
+## [2.13.2] - 2026-10-11
+
+## [2.13.1] - 2026-10-11
+
+## [2.13.0] - 2026-10-11
+
+## [2.12.0] - 2026-09-30
+
+### Fixed
+
+- **`typebox` is declared as a `peerDependencies: "*"` entry, no longer a `dependencies` entry.** Pi provides `typebox` to extensions and aliases the bare specifier to its own bundled copy at load time, so the copy this manifest installed was dead weight at best and a second live instance at worst. Pi 0.99.1 warns at every startup about the old shape ("Host-provided extension packages must be declared in peerDependencies with a \"*\" range, not dependencies: typebox"); this clears it once the release is installed. Contributed in #282; reported in #266, #268, #272 and #277.
+
+## [2.11.0] - 2026-09-21
+
+## [2.10.1] - 2026-09-13
+
+## [2.10.0] - 2026-09-12
 
 ## [2.9.0] - 2026-09-01
 

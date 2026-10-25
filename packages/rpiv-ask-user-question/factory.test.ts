@@ -1,8 +1,8 @@
 import { CURSOR_MARKER, getKeybindings } from "@earendil-works/pi-tui";
 import { createMockPi } from "@juicesharp/rpiv-test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerAskUserQuestionTool } from "./ask-user-question.js";
-import { MAX_QUESTIONS, type QuestionAnswer, type QuestionnaireResult } from "./tool/types.js";
+import { registerAskUserQuestionTool } from "./ask-user-question.ts";
+import { MAX_QUESTIONS, type QuestionAnswer, type QuestionnaireResult } from "./tool/types.ts";
 
 /** Narrowed tool-result shape for test assertions. */
 interface ToolResult {
@@ -278,20 +278,22 @@ describe("ask_user_question — 'Type something.' free-text flow", () => {
 		expect(r?.details.answers[0].answer).toBe("hello");
 	});
 
-	it("Type something with no input → kind:'custom', answer=null", async () => {
+	it("Type something with no input or only spaces: Enter records nothing and stays on the row (#301)", async () => {
 		const tool = register();
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.DOWN); // → Second
 			c.handleInput(KEY.DOWN); // → Type something
-			c.handleInput(KEY.ENTER); // confirm with empty buffer
+			c.handleInput(KEY.ENTER); // empty buffer: ignored
+			for (const ch of "  ") c.handleInput(ch);
+			c.handleInput(KEY.ENTER); // blank buffer: ignored
+			for (const ch of "x") c.handleInput(ch);
+			c.handleInput(KEY.ENTER);
 		});
 		const ctx = { hasUI: true, ui: { custom } } as never;
 		const r = (await tool.execute?.("tc", freeTextParams as never, undefined as never, undefined as never, ctx)) as
 			| ToolResult
 			| undefined;
-		expect(r?.details.answers[0].kind).toBe("custom");
-		expect(r?.details.answers[0].answer).toBeNull();
-		expect(r?.content[0].text).toContain("(no input)");
+		expect(r?.details.answers).toEqual([{ questionIndex: 0, question: "Name?", kind: "custom", answer: "  x" }]);
 	});
 
 	it("Type text, backspace removes last char, then Enter", async () => {
@@ -342,7 +344,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 		],
 	};
 
-	it("Space toggles items, then DOWN to Next + Enter confirms selected labels", async () => {
+	it("commits checked options and custom text together through Next", async () => {
 		const tool = register();
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.SPACE); // toggle Frontend ON
@@ -350,6 +352,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 			c.handleInput(KEY.SPACE); // toggle Backend ON
 			c.handleInput(KEY.DOWN); // → DevOps (not toggled)
 			c.handleInput(KEY.DOWN); // → "Type something." row
+			for (const char of "GraphQL") c.handleInput(char);
 			c.handleInput(KEY.DOWN); // → Next sentinel
 			c.handleInput(KEY.ENTER); // commit + advance (single question → submit)
 		});
@@ -358,7 +361,7 @@ describe("ask_user_question — multi-select flow (single question)", () => {
 			| ToolResult
 			| undefined;
 		expect(r?.details.cancelled).toBe(false);
-		expect(r?.details.answers[0].answer).toBeNull();
+		expect(r?.details.answers[0].answer).toBe("GraphQL");
 		expect(r?.details.answers[0].selected).toEqual(["Frontend", "Backend"]);
 	});
 
@@ -463,8 +466,10 @@ describe("ask_user_question — multi-select toggle persistence (regression)", (
 		const { custom } = driveCustom((c) => {
 			c.handleInput(KEY.SPACE); // toggle FE ON
 			c.handleInput(KEY.TAB); // → Q2
-			c.handleInput(KEY.SHIFT_TAB); // ← Q1 (toggles must still be lit)
-			c.handleInput(KEY.DOWN); // optionIndex 1 = BE
+			c.handleInput(KEY.SHIFT_TAB); // ← Q1 (toggles must still be lit; cursor restored to Next)
+			c.handleInput(KEY.UP); // → "Type something." row
+			c.handleInput(KEY.UP); // → DB
+			c.handleInput(KEY.UP); // optionIndex 1 = BE
 			c.handleInput(KEY.SPACE); // toggle BE ON (should NOT erase FE)
 			c.handleInput(KEY.DOWN); // → DB
 			c.handleInput(KEY.DOWN); // → "Type something." row
@@ -607,7 +612,8 @@ describe("ask_user_question — multi-question tab cycling flow", () => {
 	});
 
 	// Confirmed-row indicator: tab back to a previously-answered single-select tab and the
-	// prior option's row should render `<label> ✔` while the cursor (`❯`) stays at row 0.
+	// prior option's row should render `<label> ✔` and the cursor (`❯`) returns to it, so a
+	// stray Enter re-confirms the same answer instead of overwriting it with row 0.
 	it("Tab back to a single-select tab marks the prior option with ` ✔`", async () => {
 		const tool = register();
 		const renderedAfterBack: string[][] = [];
@@ -623,7 +629,7 @@ describe("ask_user_question — multi-question tab cycling flow", () => {
 		const lines = renderedAfterBack[0]!;
 		expect(lines.some((l) => l.includes("B ✔"))).toBe(true);
 		expect(lines.some((l) => l.includes("A ✔"))).toBe(false);
-		expect(lines.some((l) => l.includes("❯ 1. A"))).toBe(true);
+		expect(lines.some((l) => l.includes("❯ 2. B"))).toBe(true);
 	});
 
 	// Confirmed-row + custom text: prior typed text replaces "Type something." and gets ` ✔`.

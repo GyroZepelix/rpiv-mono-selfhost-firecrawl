@@ -15,7 +15,7 @@ keys — they are stored per provider under `apiKeys.<name>`.
 | Tavily | `tavily` | `TAVILY_API_KEY` | [tavily.com](https://tavily.com) | native extraction (plain text) |
 | Serper | `serper` | `SERPER_API_KEY` | [serper.dev](https://serper.dev) | built-in HTTP → text, honours `raw` |
 | Exa | `exa` | `EXA_API_KEY` | [exa.ai](https://exa.ai) | native extraction (plain text) |
-| You.com | `youcom` | `YOUCOM_API_KEY` | [you.com](https://you.com) | native extraction (markdown) |
+| You.com | `youcom` | `YOUCOM_API_KEY` (or `YDC_API_KEY`) | [you.com](https://you.com) | native extraction (markdown) |
 | Jina | `jina` | `JINA_API_KEY` | [jina.ai/reader](https://jina.ai/reader) | native extraction (markdown) |
 | Firecrawl | `firecrawl` | `FIRECRAWL_API_KEY` (required for Cloud, optional self-hosted) | [firecrawl.dev](https://firecrawl.dev) or self-hosted — see [self-hosted.md](self-hosted.md) | native extraction (markdown) |
 | Perplexity | `perplexity` | `PERPLEXITY_API_KEY` | [docs.perplexity.ai](https://docs.perplexity.ai/) | built-in HTTP → text, honours `raw` |
@@ -41,7 +41,10 @@ Four tiers, first match wins:
 4. **`brave`**, the built-in default.
 
 `/web-tools --show` prints the resolved name together with its source
-(`env`, `config`, or `default`), so you can see which tier won.
+(`env`, `config`, or `default`), so you can see which tier won. The model-facing
+`web_search` schema uses the same resolution and labels this provider as the
+default; it exposes only providers configured with a key or explicit base URL,
+plus the active provider.
 
 An unknown name at tier 1 or tier 2 throws:
 
@@ -61,7 +64,8 @@ first match wins:
 1. **The provider's own environment variable** (`BRAVE_SEARCH_API_KEY`,
    `TAVILY_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `YOUCOM_API_KEY`,
    `JINA_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY`,
-   `SEARXNG_API_KEY`, `OLLAMA_API_KEY`).
+   `SEARXNG_API_KEY`, `OLLAMA_API_KEY`). You.com also reads `YDC_API_KEY`
+   when `YOUCOM_API_KEY` is unset.
 2. **`apiKeys.<provider>`** in the config file.
 3. **Legacy top-level `apiKey`**, Brave only. It is auto-migrated into
    `apiKeys.brave` and deleted from the file on the next `/web-tools` save.
@@ -99,10 +103,13 @@ provider that declares a base URL.
 ## Picker markers
 
 The `/web-tools` provider list is ordered with the active provider first, marked
-`✓`. Any provider that already resolves to a key is suffixed `(configured)`. For
-Firecrawl, SearXNG, and Ollama, an explicitly set base URL also earns the marker;
-the bare built-in default does not count because it only indicates the setting
-has never been touched.
+`✓`. Any hosted provider that already resolves to a key is suffixed
+`(configured)`. For Firecrawl, SearXNG, and Ollama, an explicitly set base URL
+earns the marker; the bare built-in default does not count because it only
+indicates the setting has never been touched. Firecrawl also counts a resolved
+key on its own, because its default URL is the hosted Cloud endpoint. SearXNG
+and Ollama need an explicit URL even when an optional key is set. The same rule
+decides which providers the `web_search` schema exposes.
 
 ## Related
 

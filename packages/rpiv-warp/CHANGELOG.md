@@ -5,7 +5,54 @@ All notable changes to `@juicesharp/rpiv-warp` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.15.0] - 2026-10-24
+
+## [2.14.2] - 2026-10-23
+
+## [2.14.1] - 2026-10-23
+
+### Fixed
+
+- **Works with Pi 1.2 and later.** Pi 1.2 also fires `before_agent_start` for runs an extension starts with `pi.sendMessage(..., { triggerTurn: true })`, and those runs carry no prompt. rpiv-warp read the prompt anyway, so such a run blanked the Warp tab's query and announced a new turn with an empty prompt. A run started that way now keeps the last user query and sends no `session_start` or `prompt_submit`; the spinner, heartbeat and `stop` still fire. Older Pi versions behave as before. Thanks @jagaliano. ([#305](https://github.com/juicesharp/rpiv-mono/pull/305))
+
+## [2.14.0] - 2026-10-23
+
+## [2.13.10] - 2026-10-23
+
+## [2.13.9] - 2026-10-17
+
+### Changed
+
+- Faster extension startup: relative imports now name the published `.ts` files instead of nonexistent `.js` targets, so Pi's loader (jiti) no longer runs fallback resolution for each of them on every launch. Runtime behavior is unchanged. Thanks @ry4nyu for #306, and @szastupov for #304.
+
+## [2.13.8] - 2026-10-12
+
+## [2.13.7] - 2026-10-12
+
+## [2.13.6] - 2026-10-12
+
+### Fixed
+- The tab-title spinner keeps the session name: while a turn runs a named session now reads `⠴ - <session> - <repo>` instead of collapsing to `⠴ - <repo>`, so concurrent named tabs stay distinguishable. Unnamed sessions are unchanged.
+
+## [2.13.5] - 2026-10-12
+
+## [2.13.4] - 2026-10-11
+
+## [2.13.3] - 2026-10-11
+
+## [2.13.2] - 2026-10-11
+
+## [2.13.1] - 2026-10-11
+
+## [2.13.0] - 2026-10-11
+
+## [2.12.0] - 2026-09-30
+
+## [2.11.0] - 2026-09-21
+
+## [2.10.1] - 2026-09-13
+
+## [2.10.0] - 2026-09-12
 
 ## [2.9.0] - 2026-09-01
 

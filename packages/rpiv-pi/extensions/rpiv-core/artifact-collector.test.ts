@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type BranchEntry, fs as fsHandle, opaque, type ParseContext } from "@juicesharp/rpiv-workflow/registration";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { frontmatterParser, rpivArtifactCollector, rpivBucketCollector } from "./artifact-collector.js";
+import { frontmatterParser, rpivArtifactCollector, rpivBucketCollector } from "./artifact-collector.ts";
 
 const ctxOf = (cwd: string, artifacts: ParseContext<undefined>["artifacts"]): ParseContext<undefined> => ({
 	cwd,
@@ -208,7 +208,7 @@ describe("disk-corroborated basename fallback", () => {
 		expect(result.kind).toBe("fatal");
 	});
 
-	it("a full-path announcement still wins over the fallback (no disk check needed)", async () => {
+	it("a full-path announcement still wins over a bare-mention fallback", async () => {
 		put("plans", "stray.md");
 		const REAL = ".rpiv/artifacts/elaborations/2026-08-20_20-58-43_review-remediation__phase-5.md";
 		const result = await rpivArtifactCollector.collect(
@@ -223,5 +223,119 @@ describe("disk-corroborated basename fallback", () => {
 			collectCtxOf([asst("see `.rpiv/artifacts/elaborations/...__phase-4.md`")], tmpDir),
 		);
 		expect(result.kind).toBe("fatal");
+	});
+});
+
+// The last announced path is not always the artifact: an agent announces the
+// file it wrote, then cites a sibling's path it misremembered. A last match
+// that is not on disk yields to the newest announced path that is; with none
+// on disk the announcement stands, and the parser fatals on it.
+describe("announced path missing on disk", () => {
+	const OWN = ".rpiv/artifacts/designs/2026-08-24_01-15-00_slice-11_debug-result-json.md";
+	const MISSING_SIBLING = ".rpiv/artifacts/designs/2026-08-24_01-07-47_slice-10-metrics.md";
+	let tmpDir: string;
+
+	const put = (rel: string) => {
+		mkdirSync(join(tmpDir, rel, ".."), { recursive: true });
+		writeFileSync(join(tmpDir, rel), "---\nstatus: ready\n---\n# body\n");
+	};
+	const text = `**Path:** \`${OWN}\`\n\nSources: \`${MISSING_SIBLING}\``;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "rpiv-missing-"));
+	});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("collects the agent's own file over a missing sibling cited after it", async () => {
+		put(OWN);
+		const result = await rpivArtifactCollector.collect(collectCtxOf([asst(text)], tmpDir));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: OWN });
+	});
+
+	it("rpivBucketCollector does the same within its bucket", async () => {
+		put(OWN);
+		const result = await rpivBucketCollector("designs").collect(collectCtxOf([asst(text)], tmpDir));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: OWN });
+	});
+
+	it("keeps the last announcement when no announced path is on disk", async () => {
+		const result = await rpivArtifactCollector.collect(collectCtxOf([asst(text)], tmpDir));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: MISSING_SIBLING });
+	});
+
+	it("never swaps in a file named only by a bare mention", async () => {
+		put(".rpiv/artifacts/plans/stray.md");
+		const result = await rpivArtifactCollector.collect(
+			collectCtxOf([asst(`**Path:** \`${MISSING_SIBLING}\` (see also stray.md)`)], tmpDir),
+		);
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: MISSING_SIBLING });
+	});
+});
+
+// The tool-argument fallback against the branch shape Pi produces (`toolCall`/
+// `arguments`). The contract: a lane that wrote its artifact through `write` or
+// `edit` but never spoke the path is still collected — from the `path` argument
+// of that call and nothing else. Reads of sibling artifacts, `bash` greps and
+// listings, and paths quoted inside a written `content` body are not evidence
+// of authorship and must never outrank the destination the lane wrote to.
+describe("tool-argument fallback against the live Pi branch shape", () => {
+	const MINE = ".rpiv/artifacts/elaborations/2026-09-01_10-00-00_topic__phase-7.md";
+	const SIBLING = ".rpiv/artifacts/elaborations/2026-09-01_10-00-00_topic__phase-4.md";
+	const PLAN = ".rpiv/artifacts/plans/2026-09-01_10-00-00_topic.md";
+	const call = (name: string, args: Record<string, unknown>): BranchEntry =>
+		({
+			type: "message",
+			message: { role: "assistant", content: [{ type: "toolCall", id: `c-${name}`, name, arguments: args }] },
+		}) as unknown as BranchEntry;
+
+	it("collects the path the `write` call actually wrote when the closing text omits it", async () => {
+		const branch = [
+			call("read", { path: PLAN }),
+			call("write", { path: `/abs/repo/${MINE}`, content: `---\nsource: ${PLAN}\n---\n# body` }),
+			call("bash", { command: `test -s ${MINE} && echo ok` }),
+			asst("Phase 7 elaborated: 11 files, 16 code blocks — the tree reverted byte-identical."),
+		];
+		const result = await rpivBucketCollector("elaborations").collect(collectCtxOf(branch));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: MINE });
+	});
+
+	it("a later `read` of a sibling's artifact never outranks the lane's own `write`", async () => {
+		const branch = [
+			call("write", { path: MINE, content: "# mine" }),
+			call("read", { path: SIBLING }),
+			call("bash", { command: `ls .rpiv/artifacts/elaborations/ | grep phase-4` }),
+			asst("Done — see the summary above."),
+		];
+		const result = await rpivBucketCollector("elaborations").collect(collectCtxOf(branch));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: MINE });
+	});
+
+	it("a sibling path quoted inside the written `content` never outranks the `path`", async () => {
+		const branch = [
+			call("write", { path: MINE, content: `Builds on ${SIBLING} — see its Key Interfaces.` }),
+			asst("Done."),
+		];
+		const result = await rpivBucketCollector("elaborations").collect(collectCtxOf(branch));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: MINE });
+	});
+
+	it("an `edit` in place counts as a write (amend re-emits the plan at the same path)", async () => {
+		const branch = [call("edit", { path: PLAN, edits: [{ oldText: "a", newText: "b" }] }), asst("Amended in place.")];
+		const result = await rpivBucketCollector("plans").collect(collectCtxOf(branch));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: PLAN });
+	});
+
+	it("a bucket-narrowed collector ignores a `write` into another bucket", async () => {
+		const branch = [call("write", { path: PLAN, content: "# plan" }), asst("Done.")];
+		const result = await rpivBucketCollector("elaborations").collect(collectCtxOf(branch));
+		expect(result.kind).toBe("fatal");
+	});
+
+	it("the spoken announcement still wins over every tool argument", async () => {
+		const branch = [call("write", { path: SIBLING, content: "" }), asst(`**Path:** \`${MINE}\``)];
+		const result = await rpivBucketCollector("elaborations").collect(collectCtxOf(branch));
+		expect(result.kind === "ok" && result.artifacts[0]?.handle).toEqual({ kind: "fs", path: MINE });
 	});
 });

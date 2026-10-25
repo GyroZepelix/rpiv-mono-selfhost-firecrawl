@@ -14,8 +14,8 @@ import type { SkillContract, SkillContractMap, Workflow } from "@juicesharp/rpiv
 import { acts, defineWorkflow, produces } from "@juicesharp/rpiv-workflow/registration";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { builtInWorkflows } from "./built-in-workflows.js";
-import { BUCKET_BY_KIND, deriveOutcomes } from "./outcome-derivation.js";
+import { builtInWorkflows } from "./built-in-workflows.ts";
+import { BUCKET_BY_KIND, deriveOutcomes } from "./outcome-derivation.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -290,7 +290,6 @@ describe("equivalence — built-in workflows", () => {
 		"build::slice": "slices",
 		"build::slice-design": "designs",
 		"build::plan": "plans",
-		"build::code": "elaborations",
 		"build::validate": "validation",
 		// vet
 		"vet::code-review": "reviews",
@@ -324,6 +323,9 @@ describe("equivalence — built-in workflows", () => {
 		// republishes them on the `designs` channel (latest-wins) for synthesize.
 		"build::design-review": "designs",
 		"build::subplan": "subplans",
+		// code keeps the derived bucket but swaps in the structural elaboration
+		// parser, so the contract can refuse a section the stitch would mis-splice.
+		"build::code": "elaborations",
 		"build::plan-grade": "plan-verdicts",
 		// The confirm arms re-judge on the SAME verdict channel as their gate.
 		"build::plan-confirm": "plan-verdicts",
@@ -342,6 +344,17 @@ describe("equivalence — built-in workflows", () => {
 		"build::reconcile-fix": "reconcile-fix",
 		"vet::reconcile-fix": "reconcile-fix",
 		"ship::reconcile-fix": "reconcile-fix",
+		// meta (meta/unit-graph.ts): every unit producer and
+		// corrector is a PROMPT stage (the compiler owns the whole message — skill
+		// dispatch, lessons, return record), so each carries its bucket explicitly;
+		// the lens panels publish on per-unit verdict channels.
+		"meta::research": "research",
+		"meta::research-grade": "research-verdicts",
+		"meta::acceptance": "acceptance",
+		"meta::plan": "plans",
+		"meta::plan-fix": "plans",
+		"meta::plan-grade": "plan-verdicts",
+		"meta::implement-grade": "implement-verdicts",
 	};
 
 	/**
@@ -391,6 +404,16 @@ describe("equivalence — built-in workflows", () => {
 		"ship::plan-cite-check",
 		"ship::implement-scope-check",
 		"ship::reconcile",
+		// meta: the goal capture plus each unit's deterministic check floor
+		// and its lens-panel fold (the gate).
+		"meta::goal",
+		"meta::research-check",
+		"meta::research-gate",
+		"meta::acceptance-check",
+		"meta::plan-check",
+		"meta::plan-gate",
+		"meta::implement-check",
+		"meta::implement-gate",
 	]);
 
 	// Need architecture-review contract too

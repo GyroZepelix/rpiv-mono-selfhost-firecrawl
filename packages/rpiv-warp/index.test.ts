@@ -18,8 +18,8 @@ vi.mock("node:fs", async () => {
 	};
 });
 
-import register, { __resetState, createWorkflowQuestionTransport } from "./index.js";
-import { FRAME_INTERVAL_MS, __resetState as resetSpinner, SPINNER_FRAMES } from "./title-spinner.js";
+import register, { __resetState, createWorkflowQuestionTransport } from "./index.ts";
+import { FRAME_INTERVAL_MS, __resetState as resetSpinner, SPINNER_FRAMES } from "./title-spinner.ts";
 
 const WARP_ENV_VARS = ["TERM_PROGRAM", "WARP_CLI_AGENT_PROTOCOL_VERSION", "WARP_CLIENT_VERSION"] as const;
 
@@ -52,6 +52,7 @@ beforeEach(() => {
 	(fs.writeSync as unknown as Mock).mockReset();
 	(fs.closeSync as unknown as Mock).mockReset();
 	resetSpinner();
+	__resetState();
 });
 
 describe("registration", () => {
@@ -119,7 +120,7 @@ describe("agent_start handler", () => {
 
 		// Capture query via before_agent_start
 		const beforeStart = captured.events.get("before_agent_start")?.[0];
-		await beforeStart?.({ prompt: "how do I deploy?" } as never, createMockCtx() as never);
+		await beforeStart?.({ messageType: "user", prompt: "how do I deploy?" } as never, createMockCtx() as never);
 
 		const handler = captured.events.get("agent_start")?.[0];
 		await handler?.({} as never, createMockCtx() as never);
@@ -161,6 +162,116 @@ describe("agent_start handler", () => {
 		const promptSubmit = osc777Writes.find((p) => p.event === "prompt_submit");
 		expect(promptSubmit).toBeDefined();
 		expect(promptSubmit!.query).toBe("");
+	});
+
+	it("does NOT emit session_start or prompt_submit for a custom (triggerTurn) run", async () => {
+		setWorkingWarpEnv();
+		const { write } = primeFs();
+		const { pi, captured } = createMockPi();
+		register(pi);
+
+		// Seed a user turn, then start a custom run: Pi 1.2.0 fires
+		// before_agent_start with messageType "custom" and no prompt.
+		const beforeStart = captured.events.get("before_agent_start")?.[0];
+		await beforeStart?.({ messageType: "user", prompt: "first question" } as never, createMockCtx() as never);
+		await beforeStart?.({ messageType: "custom", message: { role: "custom" } } as never, createMockCtx() as never);
+
+		const handler = captured.events.get("agent_start")?.[0];
+		await handler?.({} as never, createMockCtx() as never);
+
+		const osc777Writes = write.mock.calls
+			.filter((c) => String(c[1]).startsWith("\x1b]777;notify;"))
+			.map((c) => {
+				const json = String(c[1])
+					.replace(/^\x1b\]777;notify;warp:\/\/cli-agent;/, "")
+					.replace(/\x07$/, "");
+				return JSON.parse(json);
+			});
+
+		expect(osc777Writes.find((p) => p.event === "session_start")).toBeUndefined();
+		expect(osc777Writes.find((p) => p.event === "prompt_submit")).toBeUndefined();
+	});
+
+	it("keeps suppressing announcements across a same-run continuation with no new before_agent_start", async () => {
+		setWorkingWarpEnv();
+		const { write } = primeFs();
+		const { pi, captured } = createMockPi();
+		register(pi);
+
+		const beforeStart = captured.events.get("before_agent_start")?.[0];
+		const agentStart = captured.events.get("agent_start")?.[0];
+		const agentEnd = captured.events.get("agent_end")?.[0];
+		await beforeStart?.({ messageType: "custom", message: { role: "custom" } } as never, createMockCtx() as never);
+
+		// First leg of the custom run, then a retry/pre-settle continuation: Pi re-emits
+		// agent_start/agent_end pairs for one logical run without another before_agent_start.
+		await agentStart?.({} as never, createMockCtx() as never);
+		await agentEnd?.({ messages: [] } as never, createMockCtx() as never);
+		write.mockClear();
+		await agentStart?.({} as never, createMockCtx() as never);
+
+		const osc777Writes = write.mock.calls
+			.filter((c) => String(c[1]).startsWith("\x1b]777;notify;"))
+			.map((c) => {
+				const json = String(c[1])
+					.replace(/^\x1b\]777;notify;warp:\/\/cli-agent;/, "")
+					.replace(/\x07$/, "");
+				return JSON.parse(json);
+			});
+
+		expect(osc777Writes.find((p) => p.event === "session_start")).toBeUndefined();
+		expect(osc777Writes.find((p) => p.event === "prompt_submit")).toBeUndefined();
+	});
+
+	it("treats an event without messageType (Pi before 1.2) as a user run", async () => {
+		setWorkingWarpEnv();
+		const { write } = primeFs();
+		const { pi, captured } = createMockPi();
+		register(pi);
+
+		const beforeStart = captured.events.get("before_agent_start")?.[0];
+		await beforeStart?.({ prompt: "older pi" } as never, createMockCtx() as never);
+		const handler = captured.events.get("agent_start")?.[0];
+		await handler?.({} as never, createMockCtx() as never);
+
+		const promptSubmit = write.mock.calls
+			.filter((c) => String(c[1]).startsWith("\x1b]777;notify;"))
+			.map((c) =>
+				JSON.parse(
+					String(c[1])
+						.replace(/^\x1b\]777;notify;warp:\/\/cli-agent;/, "")
+						.replace(/\x07$/, ""),
+				),
+			)
+			.find((p) => p.event === "prompt_submit");
+		expect(promptSubmit?.query).toBe("older pi");
+	});
+
+	it("emits session_start and prompt_submit again for the next user run after a custom run", async () => {
+		setWorkingWarpEnv();
+		const { write } = primeFs();
+		const { pi, captured } = createMockPi();
+		register(pi);
+
+		const beforeStart = captured.events.get("before_agent_start")?.[0];
+		await beforeStart?.({ messageType: "custom", message: { role: "custom" } } as never, createMockCtx() as never);
+		await beforeStart?.({ messageType: "user", prompt: "second question" } as never, createMockCtx() as never);
+
+		const handler = captured.events.get("agent_start")?.[0];
+		await handler?.({} as never, createMockCtx() as never);
+
+		const osc777Writes = write.mock.calls
+			.filter((c) => String(c[1]).startsWith("\x1b]777;notify;"))
+			.map((c) => {
+				const json = String(c[1])
+					.replace(/^\x1b\]777;notify;warp:\/\/cli-agent;/, "")
+					.replace(/\x07$/, "");
+				return JSON.parse(json);
+			});
+
+		expect(osc777Writes[0].event).toBe("session_start");
+		expect(osc777Writes[1].event).toBe("prompt_submit");
+		expect(osc777Writes[1].query).toBe("second question");
 	});
 });
 
@@ -250,9 +361,10 @@ describe("tool_execution_end handler", () => {
 describe("spinner lifecycle wiring", () => {
 	const PUSH = "\x1b[22;0t";
 	const POP = "\x1b[23;0t";
-	// createMockCtx() defaults cwd to "/tmp/test-cwd"; index.ts derives the
-	// title suffix as ` - ${basename(cwd)}` so the spinner writes preserve
-	// the rest of the original `π - <repo>` tab title.
+	// createMockCtx() defaults cwd to "/tmp/test-cwd" and leaves the session
+	// unnamed; index.ts derives the title suffix as ` - ${basename(cwd)}`, with
+	// ` - <session>` inserted once the session is named, so the spinner writes
+	// preserve the rest of the original `π - <repo>` tab title.
 	const SUFFIX = " - test-cwd";
 
 	function classify(write: Mock): { osc777: number; titleSets: string[]; pushes: number; pops: number } {
@@ -372,6 +484,50 @@ describe("spinner lifecycle wiring", () => {
 			expect(after.titleSets.length).toBe(before.titleSets.length + 1);
 			expect(after.pushes).toBe(1);
 			expect(after.pops).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a named session keeps its name in the spinner title, on start AND on resume", async () => {
+		setWorkingWarpEnv();
+		const { write } = primeFs();
+		vi.useFakeTimers();
+		try {
+			const named = () => createMockCtx({ sessionName: "session-title" }) as never;
+			const { pi, captured } = createMockPi();
+			register(pi);
+
+			await captured.events.get("agent_start")?.[0]?.({} as never, named());
+			vi.advanceTimersByTime(FRAME_INTERVAL_MS);
+			expect(classify(write).titleSets).toEqual([`${SPINNER_FRAMES[0]} - session-title${SUFFIX}`]);
+
+			await captured.events.get("tool_call")?.[0]?.({ toolName: "ask_user_question", input: {} } as never, named());
+			await captured.events.get("tool_execution_end")?.[0]?.(
+				{ toolCallId: "x", toolName: "ask_user_question", result: {}, isError: false } as never,
+				named(),
+			);
+			vi.advanceTimersByTime(FRAME_INTERVAL_MS);
+			expect(classify(write).titleSets).toEqual([
+				`${SPINNER_FRAMES[0]} - session-title${SUFFIX}`,
+				`${SPINNER_FRAMES[0]} - session-title${SUFFIX}`,
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a blank session name falls back to the unnamed suffix", async () => {
+		setWorkingWarpEnv();
+		const { write } = primeFs();
+		vi.useFakeTimers();
+		try {
+			const { pi, captured } = createMockPi();
+			register(pi);
+
+			await captured.events.get("agent_start")?.[0]?.({} as never, createMockCtx({ sessionName: "   " }) as never);
+			vi.advanceTimersByTime(FRAME_INTERVAL_MS);
+			expect(classify(write).titleSets).toEqual([`${SPINNER_FRAMES[0]}${SUFFIX}`]);
 		} finally {
 			vi.useRealTimers();
 		}

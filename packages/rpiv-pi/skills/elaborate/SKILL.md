@@ -15,6 +15,11 @@ contract:
       properties:
         status:
           enum: [in-progress, in-review, ready]
+        # Derived from the body by the build workflow's elaboration parser, never authored.
+        fence_walk:
+          enum: [balanced]
+        phase_headings:
+          enum: [1]
   consumes:
     meta:
       artifactKind: [plan]
@@ -52,7 +57,7 @@ Copy values verbatim. `<iso>` is the first tab-separated field (use as `date`); 
 3. **Write the code for this phase only.** For each file in the phase's Changes, emit a concrete, paste-ready code block: the full function/section to add, or the exact edit (enough that `implement` applies it without guessing). Match the surrounding code's conventions. Where the phase depends on a sibling phase's symbol, reference it by the shape the plan/Synthesis Notes already fixed — do not redefine it.
 4. **Carry the success criteria.** Preserve the phase's `### Success Criteria` (Automated + Manual), tightening a check only if your code makes it more concrete. Do not drop or weaken a criterion.
 5. **Resolve ambiguity yourself.** Decide from the plan, the Synthesis Notes, and the real code. This skill is **non-interactive** — if a genuine blocker can't be settled from those inputs, make the most defensible call, record it under `## Notes / Deferred`, and let the grade panel catch a bad call. Do **not** ask the user (N lanes run concurrently).
-6. **Self-check (probe → revert → guard).** Before emitting, verify the drafted code blocks actually apply and pass the project's checks at their REAL placement — declaration-order / initialization-order and integration defects only surface when a block lands at its true anchor, not an idealized layout. Define **write-scope** = the set of repo-root-relative paths the phase's `### Changes` names (the files below this step's emitted `#### \`...\`` headings); the whole self-check applies and reverts ONLY those paths — sibling phase lanes run concurrently in the same working tree, so touching a file another phase owns corrupts its in-flight edit. The cycle is exactly:
+6. **Self-check (probe → revert → guard).** Before emitting, verify the drafted code blocks actually apply and pass the project's checks at their REAL placement — declaration-order / initialization-order and integration defects only surface when a block lands at its true anchor, not an idealized layout. Define **write-scope** = the set of repo-root-relative paths the phase's `### Changes` names (the files below this step's emitted `#### \`...\`` headings); the whole self-check applies and reverts ONLY those paths — sibling phase lanes run concurrently in the same working tree (the fanout serializes phases whose `files:` overlap, so a concurrent sibling never owns a path in your write-scope), so touching a file another phase owns corrupts its in-flight edit. Never snapshot, copy back, or rebuild a file from a copy taken earlier: revert is `git restore` only. The cycle is exactly:
    - **Snapshot.** Capture `git status --porcelain` BEFORE the probe (the byte-identical revert target).
    - **Probe.** Apply each drafted code block via `Edit` at its REAL anchor position in the current file (not a speculative layout). New files named by the phase are written for the probe.
    - **Verify, in order, attributing only write-scope errors.** Take the command vocabulary from the project's guidance `# Commands` table — never substitute a tool the project does not use:
@@ -71,7 +76,7 @@ Path: `.rpiv/artifacts/elaborations/<plan-basename>__phase-<N>.md`, where `<plan
 
 The body **must** contain exactly one `## Phase <N>: <title>` section — verbatim heading text matching the plan (same `N`, same title). The `stitch-elaborations` script swaps the plan's `## Phase N:` section for this one, so the heading is the splice anchor: do not rename it or change `N`.
 
-```markdown
+````markdown
 ---
 date: <iso>
 author: <author>
@@ -110,7 +115,7 @@ tags: [elaboration]
 
 ## Notes / Deferred
 <only if a blocker forced an assumption — otherwise omit this section>
-```
+````
 
 ## Hard rules
 
@@ -119,6 +124,7 @@ tags: [elaboration]
 - **Implement-ready code, grounded in the current tree.** Read the cited files first; emit code blocks, not prose hand-waving ("handle appropriately", "etc.").
 - **Repo-root-relative citations, from what you read.** Every `file:line` your elaboration emits — in prose or in code comments — uses the **repo-root-relative** path (`packages/billing/src/invoice.ts:NN`), never a subdirectory-relative form (`src/invoice.ts:NN`) or a bare basename, and comes from a file you actually read; if you're unsure of the line, cite the path alone and omit the `:line`.
 - **Body is exactly one `## Phase N: <title>` section** with the verbatim heading — the deterministic splice folds it back by phase number. Don't rename the heading or change `N`.
+- **A fence that wraps other fences is longer than them.** A block whose content itself contains ``` lines — an embedded markdown or guidance file, a doc edit with examples — opens and closes with four backticks (````). A bare ``` inside a ``` block closes it, the leaked fence swallows the next phase's heading at the splice, and the stitch refuses the elaboration.
 - **Write the doc, not the code.** You only write your elaboration artifact; reading the codebase to ground the code is required, editing it is out of scope — `implement` applies the code later, after the splice. The Self-check step's tree mutation is the ONE exception: a transient, reverted probe that applies drafted blocks to verify them, then reverts byte-identical — it never leaves the edit for `implement` (the elaboration doc carries the code; the tree returns clean).
 - **Byte-identical self-check revert (the sole parallel-safety contract).** The Self-check `git restore <tracked> + rm -f <new>` MUST return the tree to a `git status --porcelain` byte-identical pre-probe snapshot; any residue is a blocking error and the unit emits nothing. Under the parallel phase fanout a sibling unit's in-flight edit can surface as cross-file check noise — attribute ONLY errors in YOUR write-set and revert past the rest.
 - **Per-phase write-scope.** Each unit applies and reverts ONLY the files its phase's `### Changes` names — the same write-scope discipline `implement`'s single-phase mode follows. Never probe, edit, or revert a file another phase owns. A declared production file's co-located test twin (e.g. `x.ts` → `x.test.ts`) is inside the phase's write-scope automatically — the scope floor and the implement DAG both twin-expand `files:` — so a mechanical twin follow-up (mock arity, call-site signature) needs no scope-addition note; only a NON-twin file outside the phase's `files:` is a scope change worth flagging.

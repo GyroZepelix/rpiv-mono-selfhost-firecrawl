@@ -19,6 +19,7 @@ Repository-local planning and execution artifacts.
 <!-- spec-items:archive:start -->
 | Item | Kind | Status | Updated |
 | --- | --- | --- | --- |
+| [Merge upstream v2.15.0 and verify fork behavior](./archive/261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/plan.md) | work-item | completed | 2026-10-25 |
 <!-- spec-items:archive:end -->
 
 ## Templates

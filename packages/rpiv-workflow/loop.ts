@@ -36,12 +36,12 @@
  * no-op (pinned behavior).
  */
 
-import type { AssessLoop, LoopDef } from "./api.js";
-import { applyCompletedStage } from "./chain-state.js";
-import { lifecycleCtxFor, skillStageRef } from "./events.js";
-import { nowIso } from "./internal-utils.js";
-import { type AnyJudge, isPanel, type PanelJudge } from "./judge.js";
-import { panelVerdictChannel, panelVerdictDef } from "./loop-constructors.js";
+import type { AssessLoop, LoopDef } from "./api.ts";
+import { applyCompletedStage } from "./chain-state.ts";
+import { lifecycleCtxFor, skillStageRef } from "./events.ts";
+import { nowIso } from "./internal-utils.ts";
+import { type AnyJudge, isPanel, type PanelJudge } from "./judge.ts";
+import { panelVerdictChannel, panelVerdictDef } from "./loop-constructors.ts";
 import {
 	advanceCursor,
 	allFanoutSlotsFailed,
@@ -55,11 +55,11 @@ import {
 	type NextStep,
 	presentedKindOf,
 	sequentialStrategyOf,
-} from "./loop-kinds.js";
-import { runFanoutGeneration } from "./loop-parallel.js";
-import { MSG_LOOP_CAP_ADVANCE, MSG_LOOP_ZERO_UNITS } from "./messages.js";
-import { appendLoopCap } from "./state/index.js";
-import type { RunContext, WorkflowHostContext } from "./types.js";
+} from "./loop-kinds.ts";
+import { runFanoutGeneration } from "./loop-parallel.ts";
+import { MSG_LOOP_CAP_ADVANCE, MSG_LOOP_ZERO_UNITS } from "./messages.ts";
+import { appendLoopCap } from "./state/index.ts";
+import type { RunContext, WorkflowHostContext } from "./types.ts";
 
 /**
  * The loop-entry announcement — `onStageStart` then `onLoopStart` with the

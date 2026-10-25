@@ -8,7 +8,7 @@ import {
 	type ProviderMeta,
 	type SearchResponse,
 	type SearchResult,
-} from "./types.js";
+} from "./types.ts";
 
 export const FIRECRAWL_API_KEY_ENV_VAR = "FIRECRAWL_API_KEY";
 export const FIRECRAWL_API_URL_ENV_VAR = "FIRECRAWL_API_URL";

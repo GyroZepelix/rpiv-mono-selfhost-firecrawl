@@ -11,7 +11,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { handleToString, type Output, type ScriptContext } from "@juicesharp/rpiv-workflow/registration";
-import { phaseFiles, planPhaseRecords, withTestTwins } from "./plan-phases.js";
+import { phaseFiles, planPhaseRecords, withTestTwins } from "./plan-phases.ts";
 import { classifyApplication, type ReconciliationDirective, reconciliationRecords } from "./reconcile-directives.mjs";
 import {
 	containedPath,
@@ -21,7 +21,7 @@ import {
 	VERDICT_DIR,
 	VERDICT_FAIL_SCORE,
 	VERDICT_PASS_SCORE,
-} from "./shared.js";
+} from "./shared.ts";
 
 /**
  * Apply each `#### Reconciliation` directive, write-restricted to the plan's
@@ -130,7 +130,7 @@ const applyReconciliationDirectives = (
  * commands as an agent, with a real shell and the judgment to tell a legitimate
  * post-rename mismatch from actual plan-vs-tree drift.
  *
- * The route is `reconcileGate` (built-in-workflows.ts) — pass ⇒ validate; fail ⇒
+ * The route is `reconcileGate` (workflows/shared.ts) — pass ⇒ validate; fail ⇒
  * the `reconcile-fix` arm (`/skill:amend` over the plan's directives from this
  * verdict — every reconcile failure class is a plan-TEXT defect, so the plan
  * reviser has authority over all of them; amend never edits directive targets,

@@ -30,13 +30,13 @@ import { join } from "node:path";
 import { createMockSessionChain, mockAssistantMessage } from "@juicesharp/rpiv-test-utils";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { acts, type FanoutFn, fanin, gate, type IterateFn, produces, type Workflow } from "../api.js";
-import { fs as fsHandle } from "../handle.js";
-import { judge } from "../judge.js";
-import { assess, fanout, iterate, majority, panel, verify } from "../loop-constructors.js";
-import { failedOutput, type Output, outputMeta } from "../output.js";
-import type { Outcome } from "../output-spec.js";
-import { eq, gt } from "../predicates.js";
+import { acts, type FanoutFn, fanin, gate, type IterateFn, produces, type Workflow } from "../api.ts";
+import { fs as fsHandle } from "../handle.ts";
+import { judge } from "../judge.ts";
+import { assess, fanout, iterate, majority, panel, verify } from "../loop-constructors.ts";
+import { failedOutput, type Output, outputMeta } from "../output.ts";
+import type { Outcome } from "../output-spec.ts";
+import { eq, gt } from "../predicates.ts";
 import {
 	appendHeader,
 	appendStage,
@@ -44,9 +44,9 @@ import {
 	STATE_SCHEMA_VERSION,
 	type WorkflowHeader,
 	type WorkflowStage,
-} from "../state/index.js";
-import { typeboxSchema } from "../typebox-adapter.js";
-import { resumeWorkflow } from "./runner.js";
+} from "../state/index.ts";
+import { typeboxSchema } from "../typebox-adapter.ts";
+import { resumeWorkflow } from "./runner.ts";
 
 // ---------------------------------------------------------------------------
 // Shared scaffolding

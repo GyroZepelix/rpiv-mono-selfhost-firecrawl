@@ -2,8 +2,8 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { makeTheme } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_QUESTIONS } from "../../tool/types.js";
-import { TabBar, type TabBarProps } from "./tab-bar.js";
+import { MAX_QUESTIONS } from "../../tool/types.ts";
+import { TabBar, type TabBarProps } from "./tab-bar.ts";
 
 const theme = makeTheme() as unknown as Theme;
 

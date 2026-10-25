@@ -39,15 +39,15 @@ import {
 	produces,
 	setRouteNote,
 	type Workflow,
-} from "../api.js";
-import { stageEntryArgs } from "../chain-state.js";
-import type { Artifact } from "../handle.js";
-import { fs as fsHandle, handleToString, opaque } from "../handle.js";
-import { judge } from "../judge.js";
-import { assess, fanout, iterate, majority, panel, verify } from "../loop-constructors.js";
-import { advanceCursor, foldFanoutCompletion, freshCursor } from "../loop-kinds.js";
-import { FAIL_GATE_STOP } from "../messages.js";
-import type { Output } from "../output.js";
+} from "../api.ts";
+import { stageEntryArgs } from "../chain-state.ts";
+import type { Artifact } from "../handle.ts";
+import { fs as fsHandle, handleToString, opaque } from "../handle.ts";
+import { judge } from "../judge.ts";
+import { assess, fanout, iterate, majority, panel, verify } from "../loop-constructors.ts";
+import { advanceCursor, foldFanoutCompletion, freshCursor } from "../loop-kinds.ts";
+import { FAIL_GATE_STOP } from "../messages.ts";
+import type { Output } from "../output.ts";
 import {
 	appendHeader,
 	appendRoutingDecision,
@@ -59,10 +59,10 @@ import {
 	stateFilePath,
 	type WorkflowHeader,
 	type WorkflowStage,
-} from "../state/index.js";
-import type { RunState } from "../types.js";
-import { reconstructState } from "./resume.js";
-import { resumeWorkflow, runWorkflow } from "./runner.js";
+} from "../state/index.ts";
+import type { RunState } from "../types.ts";
+import { reconstructState } from "./resume.ts";
+import { resumeWorkflow, runWorkflow } from "./runner.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -84,7 +84,7 @@ const fakeOutput = (artifacts: readonly Artifact[] = []): Output => ({
  */
 const makeOutcome = (
 	name: string,
-): import("../output-spec.js").Outcome<unknown, "artifact-md", Record<string, unknown>> & { name: string } => ({
+): import("../output-spec.ts").Outcome<unknown, "artifact-md", Record<string, unknown>> & { name: string } => ({
 	name,
 	collector: { collect: () => ({ kind: "ok", artifacts: [] }) },
 });
@@ -1282,7 +1282,7 @@ describe("reconstructState", () => {
 const RPIV_ARTIFACT_PATTERN = /\.rpiv\/artifacts\/(?:(?!\.\.)[\w.-])+\/(?:(?!\.\.)[\w.-])+\.md/g;
 
 /** Minimal outcome that scans assistant text for .rpiv/artifacts paths. */
-const artifactOutcome: import("../output-spec.js").Outcome<unknown, "artifact-md", Record<string, unknown>> = {
+const artifactOutcome: import("../output-spec.ts").Outcome<unknown, "artifact-md", Record<string, unknown>> = {
 	collector: {
 		collect: (ctx) => {
 			let lastMatch: string | undefined;
@@ -2217,7 +2217,7 @@ describe("resumeWorkflow — fresh re-entry budgets (revisits + laps)", () => {
 		},
 	];
 
-	const loopWf = (pick: () => "a" | "stop", progress?: import("../api.js").StageDef["progress"]): Workflow => ({
+	const loopWf = (pick: () => "a" | "stop", progress?: import("../api.ts").StageDef["progress"]): Workflow => ({
 		name: "resume-wf",
 		start: "a",
 		stages: {
@@ -2668,7 +2668,7 @@ describe("resumeWorkflow — gate-stop halts (the re-measure)", () => {
 		// the gate folds it and stops with a note, chain-advance writes the
 		// [stop row, FAIL_GATE_STOP row] pair — and the resume entry then takes
 		// the side-effect arm, dispatching `verify` instead of replaying `fix`.
-		const digestOutcome: import("../output-spec.js").Outcome<unknown, "digest", { changed: boolean }> = {
+		const digestOutcome: import("../output-spec.ts").Outcome<unknown, "digest", { changed: boolean }> = {
 			name: "digest",
 			collector: {
 				collect: () => ({ kind: "ok", artifacts: [{ handle: opaque("digest-unchanged"), role: "digest" }] }),
@@ -2719,6 +2719,25 @@ describe("resumeWorkflow — gate-stop halts (the re-measure)", () => {
 		// re-paying the whole front-load) into "fix and resume".
 		const toast = FAIL_GATE_STOP("validate", 'value "fail" matched no branch', "2026-06-03_07-30-00-ab12").toast;
 		expect(toast).toContain("resume with /wf @2026-06-03_07-30-00-ab12");
+	});
+
+	it("an exhausted-budget halt points at a fresh run, NOT resume (resume would re-decide the same stop)", () => {
+		// meta unit-graph exhaustion vocabulary — the round/generation counters are
+		// derived from the trail and never reset on resume, so `/wf @<id>` re-halts
+		// identically. Each exhaustion note must drop the resume remedy.
+		for (const note of [
+			"plan red — 3/3 rounds spent; 1 failure(s), first: missing await",
+			"plan red — the same failures survived a correction (round 2); 1 failure(s)",
+			"implement FATAL — the user's pre-existing work was lost; see trail",
+			"plan-verdicts: no gate record — terminated (integrity stop)",
+		]) {
+			const { toast, error } = FAIL_GATE_STOP("plan-gate", note, "2026-10-01_08-57-20-042b");
+			expect(toast).toContain("start a fresh run");
+			expect(toast).not.toContain("resume with /wf");
+			// "matched no branch" is wrong for a halt that routed to `stop` on purpose.
+			expect(toast).not.toContain("matched no branch");
+			expect(error).not.toContain("matched no branch");
+		}
 	});
 
 	it("multi-target side-effect gate: resume re-routes (idempotent re-stop) — never replays the arm", async () => {

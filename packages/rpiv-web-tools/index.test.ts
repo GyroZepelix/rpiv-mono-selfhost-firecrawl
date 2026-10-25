@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { configPath } from "@juicesharp/rpiv-config";
 import { createMockCtx, createMockPi, stubFetch } from "@juicesharp/rpiv-test-utils";
 import { beforeEach, describe, expect, it, type vi } from "vitest";
-import registerWebTools from "./index.js";
+import registerWebTools from "./index.ts";
 import {
 	clearCloneCache,
 	configureFirecrawl,
@@ -14,7 +14,7 @@ import {
 	SEARXNG_DEFAULT_URL,
 	SEARXNG_PROVIDER_META,
 	SearxngProvider,
-} from "./providers/index.js";
+} from "./providers/index.ts";
 
 const CONFIG_PATH = configPath("rpiv-web-tools");
 
@@ -36,6 +36,7 @@ beforeEach(() => {
 	delete process.env.SERPER_API_KEY;
 	delete process.env.EXA_API_KEY;
 	delete process.env.YOUCOM_API_KEY;
+	delete process.env.YDC_API_KEY;
 	delete process.env.JINA_API_KEY;
 	delete process.env.FIRECRAWL_API_KEY;
 	delete process.env.FIRECRAWL_API_URL;
@@ -2225,6 +2226,40 @@ describe("web_search.execute — youcom", () => {
 		expect(headers["X-API-Key"]).toBe("env-key");
 	});
 
+	const youcomSearchKey = async () => {
+		const stub = stubFetch([
+			{
+				match: (u) => u.includes("ydc-index.io/v1/search"),
+				response: () => new Response(JSON.stringify({ results: { web: [] } }), { status: 200 }),
+			},
+		]);
+		const { captured } = registerAndCapture();
+		await captured.tools
+			.get("web_search")
+			?.execute?.("tc", { query: "x" }, undefined as never, undefined as never, createMockCtx());
+		const headers = stub.calls[0].init?.headers as Record<string, string>;
+		return headers["X-API-Key"];
+	};
+
+	it("accepts You.com's canonical YDC_API_KEY", async () => {
+		process.env.YDC_API_KEY = "ydc-key";
+		writeConfig({ provider: "youcom" });
+		expect(await youcomSearchKey()).toBe("ydc-key");
+	});
+
+	it("keeps YOUCOM_API_KEY first when both are set", async () => {
+		process.env.YOUCOM_API_KEY = "youcom-key";
+		process.env.YDC_API_KEY = "ydc-key";
+		writeConfig({ provider: "youcom" });
+		expect(await youcomSearchKey()).toBe("youcom-key");
+	});
+
+	it("prefers YDC_API_KEY over a config key, like any env key", async () => {
+		process.env.YDC_API_KEY = "ydc-key";
+		writeConfig({ provider: "youcom", apiKeys: { youcom: "config-key" } });
+		expect(await youcomSearchKey()).toBe("ydc-key");
+	});
+
 	it("falls back to config key", async () => {
 		writeConfig({ provider: "youcom", apiKeys: { youcom: "config-key" } });
 		const stub = stubFetch([
@@ -2597,27 +2632,50 @@ describe("web_search.execute — per-call provider override", () => {
 		expect(stub.calls[0].url).toContain("api.search.brave.com");
 	});
 
-	it("schema declares the provider enum with all known names", () => {
+	it("schema exposes only configured providers and identifies the default", () => {
+		process.env.EXA_API_KEY = "exa-key";
+		process.env.JINA_API_KEY = "jina-key";
+		writeConfig({ provider: "exa" });
 		const { captured } = registerAndCapture();
 		const params = captured.tools.get("web_search")?.parameters as unknown as {
-			properties: { provider: { anyOf: Array<{ const: string }> } };
+			properties: { provider: { anyOf: Array<{ const: string }>; description: string } };
 		};
 		const literals = params.properties.provider?.anyOf?.map((e) => e.const) ?? [];
-		expect(literals).toEqual(
-			expect.arrayContaining([
-				"brave",
-				"tavily",
-				"serper",
-				"exa",
-				"youcom",
-				"jina",
-				"firecrawl",
-				"perplexity",
-				"searxng",
-				"ollama",
-			]),
-		);
-		expect(literals).toHaveLength(10);
+		expect(literals).toEqual(["exa", "jina"]);
+		expect(params.properties.provider.description).toContain("Default provider: exa (source: config)");
+	});
+
+	it("schema keeps the built-in default when no provider is configured", () => {
+		const { captured } = registerAndCapture();
+		const params = captured.tools.get("web_search")?.parameters as unknown as {
+			properties: { provider: { anyOf: Array<{ const: string }>; description: string } };
+		};
+		const literals = params.properties.provider?.anyOf?.map((e) => e.const) ?? [];
+		expect(literals).toEqual(["brave"]);
+		expect(params.properties.provider.description).toContain("Default provider: brave (source: default)");
+	});
+
+	it("schema falls back to brave when the active provider is unknown and no provider is configured", () => {
+		process.env.WEB_SEARCH_PROVIDER = "unknown";
+		const { captured } = registerAndCapture();
+		const params = captured.tools.get("web_search")?.parameters as unknown as {
+			properties: { provider: { anyOf: Array<{ const: string }>; description: string } };
+		};
+		const literals = params.properties.provider?.anyOf?.map((e) => e.const) ?? [];
+		expect(literals).toEqual(["brave"]);
+		expect(params.properties.provider.description).toContain("Default provider: unknown (source: env)");
+	});
+
+	it("does not expose an unknown active provider", () => {
+		process.env.WEB_SEARCH_PROVIDER = "unknown";
+		process.env.EXA_API_KEY = "exa-key";
+		const { captured } = registerAndCapture();
+		const params = captured.tools.get("web_search")?.parameters as unknown as {
+			properties: { provider: { anyOf: Array<{ const: string }>; description: string } };
+		};
+		const literals = params.properties.provider?.anyOf?.map((e) => e.const) ?? [];
+		expect(literals).toEqual(["exa"]);
+		expect(params.properties.provider.description).toContain("Default provider: unknown (source: env)");
 	});
 });
 
@@ -2625,6 +2683,87 @@ describe("web_search.execute — per-call provider override", () => {
 // and config.provider. Lets an operator pin a backend via env without editing
 // config.json; validated like the override so a bogus name throws (no silent
 // fallback) rather than degrading to default.
+describe("web_search provider schema tracks the configured providers (#204)", () => {
+	function providerSchema(captured: ReturnType<typeof registerAndCapture>["captured"]) {
+		const params = captured.tools.get("web_search")?.parameters as unknown as {
+			properties: { provider: { anyOf: Array<{ const: string }>; description: string } };
+		};
+		return {
+			names: params.properties.provider.anyOf.map((e) => e.const),
+			description: params.properties.provider.description,
+		};
+	}
+
+	it("a configured Tavily is the only provider offered — brave is not advertised", () => {
+		writeConfig({ provider: "tavily", apiKeys: { tavily: "tvly-key" } });
+		const { captured } = registerAndCapture();
+		const schema = providerSchema(captured);
+		expect(schema.names).toEqual(["tavily"]);
+		expect(schema.description).not.toContain("brave");
+		expect(schema.description).toContain("Default provider: tavily (source: config)");
+	});
+
+	it("a /web-tools save refreshes the schema without a restart", async () => {
+		const { captured } = registerAndCapture();
+		expect(providerSchema(captured).names).toEqual(["brave"]); // nothing configured yet
+
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce("Tavily");
+		(ctx.ui.input as ReturnType<typeof vi.fn>).mockResolvedValueOnce("tvly-key");
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+
+		const schema = providerSchema(captured);
+		expect(schema.names).toEqual(["tavily"]);
+		expect(schema.description).toContain("Default provider: tavily (source: config)");
+	});
+
+	// Fork rule: Firecrawl's default URL is its hosted Cloud endpoint, so a
+	// key alone makes it usable; SearXNG/Ollama keep upstream's URL-only rule.
+	it("a key-only Firecrawl (config or env) is offered in the schema and marked (configured)", async () => {
+		writeConfig({ apiKeys: { firecrawl: "fc-key" } });
+		const first = registerAndCapture();
+		expect(providerSchema(first.captured).names).toContain("firecrawl");
+
+		writeConfig({});
+		process.env.FIRECRAWL_API_KEY = "fc-env-key";
+		const { captured } = registerAndCapture();
+		expect(providerSchema(captured).names).toContain("firecrawl");
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+		const labels = (ctx.ui.select as ReturnType<typeof vi.fn>).mock.calls[0][1] as string[];
+		expect(labels).toContain("Firecrawl (configured)");
+	});
+
+	it("key-only SearXNG and Ollama (default URL) are neither offered nor marked (configured)", async () => {
+		writeConfig({ apiKeys: { searxng: "sx-key", ollama: "ol-key" } });
+		process.env.SEARXNG_API_KEY = "sx-env-key";
+		process.env.OLLAMA_API_KEY = "ol-env-key";
+		const { captured } = registerAndCapture();
+		const names = providerSchema(captured).names;
+		expect(names).not.toContain("searxng");
+		expect(names).not.toContain("ollama");
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+		const labels = (ctx.ui.select as ReturnType<typeof vi.fn>).mock.calls[0][1] as string[];
+		expect(labels).toContain("SearXNG");
+		expect(labels).toContain("Ollama");
+		expect(labels).not.toContain("SearXNG (configured)");
+		expect(labels).not.toContain("Ollama (configured)");
+	});
+
+	it("an unchanged /web-tools run leaves the schema as registered", async () => {
+		writeConfig({ provider: "tavily", apiKeys: { tavily: "tvly-key" } });
+		const { captured } = registerAndCapture();
+		const before = captured.tools.get("web_search");
+		const ctx = createMockCtx({ hasUI: true });
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+		await captured.commands.get("web-tools")?.handler("", ctx as never);
+		expect(captured.tools.get("web_search")).toBe(before);
+	});
+});
+
 describe("web_search.execute — WEB_SEARCH_PROVIDER precedence", () => {
 	it("WEB_SEARCH_PROVIDER beats config.provider", async () => {
 		process.env.WEB_SEARCH_PROVIDER = "tavily";

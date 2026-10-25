@@ -8,8 +8,8 @@ import {
 	renderLaneList,
 	renderRecap,
 	renderStageBreakdown,
-} from "./lane-list.js";
-import { formatTokens } from "./lane-usage.js";
+} from "./lane-list.ts";
+import { formatTokens } from "./lane-usage.ts";
 import {
 	__resetRunLaneRegistry,
 	captureFinalSnapshot,
@@ -24,8 +24,8 @@ import {
 	setLaneStatus,
 	setRecap,
 	setUnitStarted,
-} from "./run-lane-registry.js";
-import { __resetSubagentUsage, recordSubagentCompletion } from "./subagent-usage.js";
+} from "./run-lane-registry.ts";
+import { __resetSubagentUsage, recordSubagentCompletion } from "./subagent-usage.ts";
 
 /**
  * Identity theme — fg/bg/bold return their text unchanged so a rendered line reads
