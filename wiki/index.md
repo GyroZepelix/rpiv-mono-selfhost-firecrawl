@@ -6,6 +6,12 @@ Start here. Maintenance rules live in [AGENTS.md](AGENTS.md).
 
 - [workflows/upstream-sync.md](workflows/upstream-sync.md): how to merge an upstream rpiv-mono release into this fork. Covers the fork customizations to keep, the conflict strategy, and the verification checks.
 
+## Noticed issues
+
+Informational records the operator is monitoring. No fix is decided.
+
+- [issues/agent-explanation-only-in-thinking-before-ask-user-question.md](issues/agent-explanation-only-in-thinking-before-ask-user-question.md): the agent put its answer only in thinking before calling `ask_user_question`, then wrongly blamed the question box for hiding it.
+
 ## Dream history
 
 - Episode catalog: [dreams/episodes.jsonl](dreams/episodes.jsonl). It holds one metadata line per immutable session log in `wiki/dreams/`. Load a narrative only when you need to recall that session.

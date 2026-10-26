@@ -1,5 +1,15 @@
 # Wiki Log
 
+## [2026-10-25] query | Noticed issue: agent explanation only in thinking
+
+- Trigger: the user asked to analyze a session where the agent claimed it had shown file paths but had not, and to file the result as an informational issue.
+- Inputs: session log `~/.pi/agent/sessions/--Users-dgjalic-Documents-1-Projects-12-devops-home-server-management--/2026-10-25T09-35-57-819Z_01a1726a-b37b-7561-9ce3-6671d5134477.jsonl` (lines 129 to 157).
+- Wiki pages changed:
+  - `wiki/issues/agent-explanation-only-in-thinking-before-ask-user-question.md`: new page, status informational only.
+  - `wiki/index.md`: added the Noticed issues section.
+- Verification: re-read the changed files and checked the relative link.
+- Notes: no fix decided. The operator is monitoring the agent.
+
 ## [2026-10-25] dream | Upstream v2.15.0 sync checkpoint
 
 - Trigger: `/dream` run after "Gamemaster checkpoint: 261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/direct".
