@@ -62,7 +62,7 @@ type are likewise dropped back to their default without a warning.
 | `notesKey` | Key that opens the notes editor. | `"n"` |
 | `guidance.description` | Full text of the tool description the model sees. Replaces the built-in default entirely — no merging. | built-in description |
 | `guidance.promptSnippet` | One-line snippet describing the tool in the system prompt. | built-in snippet |
-| `guidance.promptGuidelines` | List of usage guidelines given to the model. | 4 built-in guidelines |
+| `guidance.promptGuidelines` | List of usage guidelines given to the model. | 5 built-in guidelines |
 | `visibleContextGuard.enabled` | Refuse a call whose own assistant message has no visible text (fork workaround, see below). | `true` |
 | `visibleContextGuard.minChars` | Minimum summed length of the calling message's trimmed text. | `1` |
 | `visibleContextGuard.honorSelfContained` | Let `selfContained: true` on a call skip the guard. | `true` |
@@ -150,6 +150,12 @@ renders progress updates as visible text. `minChars` must be an integer of at le
 type or invalid value falls back to the default for that key. The settings are read on every
 call. The tool schema never changes with them, so toggling the guard does not invalidate the
 prompt cache.
+
+The fork also adds a fifth built-in prompt guideline: when the user needs more than a few
+sentences of context, the model sends it as a reply without any tool call and asks in the next
+turn. Long text before a tool call is the case that slips into thinking most often, so this
+makes the guard fire less. A custom `guidance.promptGuidelines` list replaces it along with the
+other defaults.
 
 ## Environment variables
 

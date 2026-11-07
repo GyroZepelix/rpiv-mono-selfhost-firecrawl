@@ -1,5 +1,13 @@
 # Wiki Log
 
+## [2026-11-07] update | visible-context prompt guideline
+
+- Trigger: live guard tests showed long explanations before `ask_user_question` slip into thinking. The user asked for a structural prompt rule in the fork's default guidelines.
+- Wiki pages changed:
+  - `wiki/issues/agent-explanation-only-in-thinking-before-ask-user-question.md`: added the guideline, the live-test evidence (session lines 245, 247, 253, 257), and the revert note.
+  - `wiki/workflows/upstream-sync.md`: added the guideline to the fork customizations.
+- Verification: re-read the changed pages.
+
 ## [2026-11-07] update | ask_user_question visible-context guard
 
 - Trigger: the issue recurred in an audio-pipeline session. The root cause was confirmed and spec item `261107-1756-ask-user-question-visible-context-guard` added a fork workaround.

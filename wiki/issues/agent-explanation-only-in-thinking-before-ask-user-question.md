@@ -37,6 +37,7 @@ The `visibleContextGuard` in `packages/rpiv-ask-user-question` works as follows:
 - An optional `selfContained: true` parameter excuses calls where the model deliberately wrote no explanation.
 - If the message is not found or the branch cannot be read, the call proceeds (fails open).
 - Config lives in `~/.config/rpiv-ask-user-question/config.json`. Defaults: `{ "visibleContextGuard": { "enabled": true, "minChars": 1, "honorSelfContained": true } }`. Documented in `packages/rpiv-ask-user-question/docs/configuration.md`.
+- A fifth default prompt guideline (`VISIBLE_CONTEXT_GUIDELINE` in `ask-user-question.ts`) tells the model to send context longer than a few sentences as a reply without any tool call, and to ask in the next turn. Live tests on 2026-11-07 showed why: a short text block before the call arrived (session line 253), while both long explanations slipped into thinking and were refused (lines 247 and 257).
 - The tool schema does not depend on config, so toggling the guard never invalidates the prompt cache. Adding `selfContained` caused one cache miss per resumed session when the new schema first loaded.
 
 ## When to revert
@@ -46,7 +47,7 @@ Set `visibleContextGuard.enabled` to `false`, or remove the fork change, when ei
 - Anthropic stops emitting user-facing text as thinking blocks before tool calls (watch Claude Code #97504).
 - Pi supports `display: "updates"` (beta header `thinking-display-updates-2026-08-18`) and renders progress updates as visible text.
 
-Remove `selfContained` from the schema only together with the guard.
+Remove `selfContained` from the schema and `VISIBLE_CONTEXT_GUIDELINE` from the default guidelines only together with the guard.
 
 ## Agent lesson
 

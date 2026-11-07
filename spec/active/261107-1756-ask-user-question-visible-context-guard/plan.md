@@ -53,6 +53,8 @@ Assurance: low - one package, local and reversible; follows the existing config 
   - Update the entry in `wiki/index.md`.
   - Append a `wiki/log.md` entry.
 
+- R9 Structural prompt rule (added 2026-11-07 after live tests): `DEFAULT_PROMPT_GUIDELINES` gains a fifth entry, `VISIBLE_CONTEXT_GUIDELINE`. It tells the model to send context longer than a few sentences as a reply without any tool call and to ask in the next turn. Short context may stay in the same reply. The docs count changes to 5 built-in guidelines, and the configuration doc and wiki describe the rule.
+
 ## Out of scope
 
 - Changing Pi, pi-ai, or the thinking `display` mode (A3), filing upstream issues (A4), and any change to the installed copy under `~/.pi/agent/git/`.
@@ -90,6 +92,7 @@ execute(toolCallId, params, ..., ctx)
 | G4 | bypass | Optional `selfContained` flag, honored unless `honorSelfContained: false` | Saves a retry for self-contained questions; a model whose explanation slipped believes it wrote one, so it has no reason to set the flag; the config switch stops abuse | User decision | Models set the flag habitually |
 | G5 | caching | Schema and description static, independent of config | Tool definitions lead the cached prefix; config toggles must not invalidate the cache | Anthropic prompt-cache prefix order | - |
 | G6 | placement | Check after validation, before prompt events and UI | A refused call must not notify listeners or open an answer channel; validation errors stay first so the model fixes both in one retry | `ask-user-question.ts` execute order | - |
+| G7 | guidance | Put the structural rule in the tool's default guidelines, not in the user's appended system prompt | It is coupled to the guard and reverts with it; it applies wherever the tool is active; `guidance.promptGuidelines` can override it. A static string, so it costs one cache miss when it first loads | Live tests: session lines 247 and 257 slipped and were refused, line 253 (short text) arrived; user decision | Guard reverted |
 
 ## Work breakdown
 
@@ -107,6 +110,9 @@ execute(toolCallId, params, ..., ctx)
     - the refusal text omits the `selfContained` hint when it is not honored.
   - Verification: `npx vitest run packages/rpiv-ask-user-question`.
 - [x] T02: Docs and wiki (R7, R8)
+- [x] T03: Structural prompt guideline (R9)
+  - Expected areas: `ask-user-question.ts`, `ask-user-question.guidance.test.ts`, `README.md`, `docs/configuration.md`, wiki issue page and upstream-sync.
+  - Verification: `npx vitest run packages/rpiv-ask-user-question`, biome, tsc.
   - Depends on: T01
   - Expected areas: `packages/rpiv-ask-user-question/docs/configuration.md`, `docs/tool-schema.md`, README if applicable, `wiki/issues/...`, `wiki/workflows/upstream-sync.md`, `wiki/index.md`, `wiki/log.md`.
   - Acceptance: docs match the implemented keys, defaults, and error code; wiki states the workaround, the evidence, how to disable it, and the revert condition; links resolve.

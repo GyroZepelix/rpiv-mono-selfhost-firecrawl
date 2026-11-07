@@ -18,6 +18,7 @@ These are the user's standing "preserve all" customizations. Every sync so far (
   - the `refuseWithoutVisibleContext` call in `execute` after validation;
   - the `selfContained` schema parameter and the `missing_visible_context` error code in `tool/types.ts`;
   - `visibleContextGuard` and `resolveVisibleContextGuard` in `config.ts`;
+  - `VISIBLE_CONTEXT_GUIDELINE` as the fifth entry of `DEFAULT_PROMPT_GUIDELINES` in `ask-user-question.ts`, with its test in `ask-user-question.guidance.test.ts`;
   - the `files` entry in `package.json`;
   - the doc rows in `README.md`, `docs/configuration.md`, and `docs/tool-schema.md`.
 

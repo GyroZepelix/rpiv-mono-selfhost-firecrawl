@@ -37,6 +37,20 @@ macOS (Apple M5 Pro), repo `~/Documents/1-Projects/10-software-development/50-pi
 | R8 wiki | issue page rewritten (cause, evidence, workaround, revert); upstream-sync customization bullet; index section; log entry | pass |
 | Schema independent of config (G5) | execute test asserts `QuestionParamsSchema` keys are always `questions, selfContained`; the schema is a module constant | pass |
 
+## T03 rerun (structural guideline, R9)
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `npx vitest run packages/rpiv-ask-user-question` | pass | 45 files, 895 tests (new guideline test included) |
+| `npm test` | pass | full suite, see the summary in the session |
+| biome, `tsc`, `check:ts-specifiers`, `check:file-sizes`, `check:decision-codes`, `git diff --check` | pass | biome: 0 errors, the same 3 pre-existing infos |
+
+Live evidence before T03, on the installed `f519ed4f`, session `2026-11-06T17-40-36-485Z_01a1b1f2...` (`claude-opus-5-5`):
+- Line 245: no text, deliberate. Refused.
+- Line 247: explanation slipped into thinking. Refused.
+- Line 253: `thinking, text (213), toolCall`. Allowed; the user saw and answered the box.
+- Line 257: about 1,800-character explanation slipped; only a 231-character thinking summary remained. Refused.
+
 ## Failures and skipped checks
 
 - `npm run check` was not run, because it writes and mirrors `.husky/pre-commit`. Its component checks above were run individually.
