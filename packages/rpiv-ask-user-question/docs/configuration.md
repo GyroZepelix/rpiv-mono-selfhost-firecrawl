@@ -63,6 +63,9 @@ type are likewise dropped back to their default without a warning.
 | `guidance.description` | Full text of the tool description the model sees. Replaces the built-in default entirely — no merging. | built-in description |
 | `guidance.promptSnippet` | One-line snippet describing the tool in the system prompt. | built-in snippet |
 | `guidance.promptGuidelines` | List of usage guidelines given to the model. | 4 built-in guidelines |
+| `visibleContextGuard.enabled` | Refuse a call whose own assistant message has no visible text (fork workaround, see below). | `true` |
+| `visibleContextGuard.minChars` | Minimum summed length of the calling message's trimmed text. | `1` |
+| `visibleContextGuard.honorSelfContained` | Let `selfContained: true` on a call skip the guard. | `true` |
 
 ### `collapseKey`
 
@@ -121,6 +124,32 @@ house style for options.
 only when it is a non-empty array whose entries are all non-empty strings. Anything else
 falls back to the built-in defaults. Both are read once, when the extension registers the
 tool, so changes take effect on the next Pi restart.
+
+### `visibleContextGuard`
+
+A workaround added in this fork, not in upstream `rpiv-mono`. Claude 5.x models (Opus 5.5,
+Sonnet 5.5, Fable 5/5.1, Mythos 5.1) sometimes write the explanation meant for you as a
+"progress update" `thinking` block right before a tool call, instead of as text. Pi requests
+summarized thinking, so you see at most a reworded thinking summary, while the model believes
+you read its explanation. Before `ask_user_question` you then get questions without their
+context.
+
+When enabled, the tool looks up the assistant message that made the call. If that message has
+fewer than `minChars` characters of visible text, the questionnaire is not shown. The model
+receives `error: "missing_visible_context"` and an instruction to write its context as visible
+text and call again. A call with `selfContained: true` (the model states it deliberately wrote
+no explanation) passes unless `honorSelfContained` is `false`. If the message cannot be found,
+the call proceeds.
+
+```json
+{ "visibleContextGuard": { "enabled": false } }
+```
+
+Turns the guard off. Do this once Anthropic stops emitting user-facing text as thinking, or Pi
+renders progress updates as visible text. `minChars` must be an integer of at least 1; a wrong
+type or invalid value falls back to the default for that key. The settings are read on every
+call. The tool schema never changes with them, so toggling the guard does not invalidate the
+prompt cache.
 
 ## Environment variables
 

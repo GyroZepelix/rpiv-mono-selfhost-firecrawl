@@ -1,5 +1,20 @@
 # Wiki Log
 
+## [2026-11-07] update | ask_user_question visible-context guard
+
+- Trigger: the issue recurred in an audio-pipeline session. The root cause was confirmed and spec item `261107-1756-ask-user-question-visible-context-guard` added a fork workaround.
+- Inputs:
+  - session log lines 29, 56, 82, 94, and 98;
+  - Anthropic progress-update docs;
+  - pi-ai `anthropic-messages.js`;
+  - Claude Code #97504 and #96288, VS Code #342814, t3code #18355;
+  - the new guard source in `packages/rpiv-ask-user-question`.
+- Wiki pages changed:
+  - `wiki/issues/agent-explanation-only-in-thinking-before-ask-user-question.md`: status changed from informational to workaround implemented; added the root cause, new evidence, the workaround, and the revert condition.
+  - `wiki/workflows/upstream-sync.md`: added the guard to the fork customizations to preserve.
+  - `wiki/index.md`: renamed the section to Issues and workarounds and updated the entry.
+- Verification: re-read the changed pages and checked their relative links.
+
 ## [2026-10-25] query | Noticed issue: agent explanation only in thinking
 
 - Trigger: the user asked to analyze a session where the agent claimed it had shown file paths but had not, and to file the result as an informational issue.

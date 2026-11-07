@@ -22,9 +22,15 @@ ask_user_question({
       multiSelect?: boolean,       // default false
     },
     // … 1-15 questions total
-  ]
+  ],
+  selfContained?: boolean,         // fork: true only when no explanation was intended
 })
 ```
+
+`selfContained` belongs to this fork's visible-context guard (see
+[configuration.md](./configuration.md#visiblecontextguard)). It excuses a call whose message
+has no visible text, when the model deliberately wrote no explanation and the questions stand
+on their own.
 
 ### Limits
 
@@ -64,6 +70,7 @@ code. The `content[0].text` string is written for the model, not for a log.
 | `no_custom_ui` | the host cannot render custom UI and exposes no `select`/`input` dialogs |
 | `session_load_failed` | the dialog module failed to import (dependencies changed on disk mid-session) |
 | `stale_module_cache` | the loader cached a broken module after an earlier failed import; needs a Pi restart |
+| `missing_visible_context` | fork guard: the calling assistant message had no visible text (and no honored `selfContained: true`); the questions were not shown |
 
 `reserved_label` short-circuits before `duplicate_option_label`.
 

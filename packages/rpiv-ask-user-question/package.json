@@ -63,6 +63,7 @@
 		"tool/response-envelope.ts",
 		"tool/types.ts",
 		"tool/validate-questionnaire.ts",
+		"tool/visible-context-guard.ts",
 		"view/component-binding.ts",
 		"view/components/inline-input.ts",
 		"view/components/multi-select-view.ts",

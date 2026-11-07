@@ -11,6 +11,7 @@ import {
 	loadConfig,
 	resolveCollapseKey,
 	resolveNotesKey,
+	resolveVisibleContextGuard,
 } from "./config.ts";
 
 describe("formatKeySpecForDisplay", () => {
@@ -118,6 +119,24 @@ describe("formatNotesKeyForDisplay", () => {
 		expect(formatNotesKeyForDisplay("n")).toBe("n");
 		expect(formatNotesKeyForDisplay("т")).toBe("т");
 		expect(formatNotesKeyForDisplay("ctrl+n")).toBe("Ctrl+N");
+	});
+});
+
+describe("resolveVisibleContextGuard", () => {
+	it("defaults to enabled, minChars 1, honorSelfContained", () => {
+		expect(resolveVisibleContextGuard({})).toEqual({ enabled: true, minChars: 1, honorSelfContained: true });
+	});
+
+	it("reads valid values and falls back per key on wrong types or invalid minChars", () => {
+		expect(
+			resolveVisibleContextGuard({
+				visibleContextGuard: { enabled: false, minChars: 40, honorSelfContained: false },
+			}),
+		).toEqual({ enabled: false, minChars: 40, honorSelfContained: false });
+		const bad = { visibleContextGuard: { enabled: "no", minChars: 0.5, honorSelfContained: 1 } } as never;
+		expect(resolveVisibleContextGuard(bad)).toEqual({ enabled: true, minChars: 1, honorSelfContained: true });
+		expect(resolveVisibleContextGuard({ visibleContextGuard: { minChars: 0 } }).minChars).toBe(1);
+		expect(resolveVisibleContextGuard({ visibleContextGuard: [] as never }).enabled).toBe(true);
 	});
 });
 

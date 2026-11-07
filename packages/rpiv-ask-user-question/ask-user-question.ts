@@ -7,6 +7,7 @@ import {
 	loadConfig,
 	resolveCollapseKey,
 	resolveNotesKey,
+	resolveVisibleContextGuard,
 	validateGuidanceFields,
 } from "./config.ts";
 import {
@@ -41,6 +42,7 @@ import {
 	QuestionParamsSchema,
 } from "./tool/types.ts";
 import { validateQuestionnaire } from "./tool/validate-questionnaire.ts";
+import { missingVisibleContextMessage, shouldRefuse } from "./tool/visible-context-guard.ts";
 import type { WrappingSelectItem } from "./view/components/wrapping-select.ts";
 import { renderAskCall, renderAskResult } from "./view/transcript.ts";
 
@@ -64,6 +66,23 @@ function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams, toolCa
 function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, toolCallId: string): void {
 	const payload: AskUserBlockedEventPayload = { active, toolCallId };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
+}
+
+/** Fork workaround: refuse a call whose own message has no visible text; fails open on any read problem. */
+function refuseWithoutVisibleContext(ctx: ExtensionContext, toolCallId: string, typed: QuestionParams) {
+	const settings = resolveVisibleContextGuard(loadConfig());
+	let branch: readonly unknown[];
+	try {
+		branch = ctx.sessionManager?.getBranch() ?? [];
+	} catch {
+		return undefined;
+	}
+	if (!shouldRefuse({ branch, toolCallId, selfContained: typed.selfContained, settings })) return undefined;
+	return buildToolResult(missingVisibleContextMessage(settings), {
+		answers: [],
+		cancelled: true,
+		error: "missing_visible_context",
+	});
 }
 
 /** Non-interactive host backstop (the reconciler normally strips the tool first). */
@@ -504,6 +523,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 					error: validation.error,
 				});
 			}
+
+			const refused = refuseWithoutVisibleContext(ctx, toolCallId, typed);
+			if (refused) return refused;
 
 			// RPC hosts (VSCode pendant, ACP clients like Zed/Paseo — issue #78):
 			// ui.custom() cannot render there, but the select/input dialog

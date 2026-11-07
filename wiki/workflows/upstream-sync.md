@@ -12,6 +12,16 @@ These are the user's standing "preserve all" customizations. Every sync so far (
   - The Cloud hostname requires an API key. A self-hosted host may omit `Authorization`.
   - `providers/index.ts` must keep exporting `configureFirecrawl`, `FIRECRAWL_API_URL_ENV_VAR`, and `FIRECRAWL_DEFAULT_URL`.
 - **Provider visibility is a conflict hotspot**: upstream's shared `isProviderConfigured` counts only an explicit URL for providers that have a `baseUrlEnvVar`. The fork also counts a resolved key for Firecrawl only, so that key-only Firecrawl Cloud stays visible. SearXNG and Ollama declare optional key env vars but stay URL-only. The rule is documented in `.rpiv/guidance/packages/rpiv-web-tools/architecture.md` and pinned by tests in the #204 block of `packages/rpiv-web-tools/index.test.ts`.
+- **Visible-context guard** in `rpiv-ask-user-question`: this is a fork-only workaround for Claude 5.x explanations that are emitted as thinking. Keep all of these:
+  - `tool/visible-context-guard.ts` and its test;
+  - `ask-user-question.visible-context.test.ts`;
+  - the `refuseWithoutVisibleContext` call in `execute` after validation;
+  - the `selfContained` schema parameter and the `missing_visible_context` error code in `tool/types.ts`;
+  - `visibleContextGuard` and `resolveVisibleContextGuard` in `config.ts`;
+  - the `files` entry in `package.json`;
+  - the doc rows in `README.md`, `docs/configuration.md`, and `docs/tool-schema.md`.
+
+  Drop it only when [the issue page](../issues/agent-explanation-only-in-thinking-before-ask-user-question.md) says to revert.
 - **15 questions**: `MAX_QUESTIONS = 15` drives the schema, validation, prompt guidance, UI, current docs, the site tagline, and the "2-15" batching text in the rpiv-pi skills. Tests should derive their expectations from the constant. After merging, grep `packages/` for stale "up to 4" or "2-4 independent" text, excluding changelogs.
 
 ## Merge procedure

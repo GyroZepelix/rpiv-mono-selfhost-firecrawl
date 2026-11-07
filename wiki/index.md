@@ -6,11 +6,11 @@ Start here. Maintenance rules live in [AGENTS.md](AGENTS.md).
 
 - [workflows/upstream-sync.md](workflows/upstream-sync.md): how to merge an upstream rpiv-mono release into this fork. Covers the fork customizations to keep, the conflict strategy, and the verification checks.
 
-## Noticed issues
+## Issues and workarounds
 
-Informational records the operator is monitoring. No fix is decided.
+Records of observed problems, their causes, and any fork workaround with its revert condition.
 
-- [issues/agent-explanation-only-in-thinking-before-ask-user-question.md](issues/agent-explanation-only-in-thinking-before-ask-user-question.md): the agent put its answer only in thinking before calling `ask_user_question`, then wrongly blamed the question box for hiding it.
+- [issues/agent-explanation-only-in-thinking-before-ask-user-question.md](issues/agent-explanation-only-in-thinking-before-ask-user-question.md): Claude 5.x emits the explanation before `ask_user_question` as a thinking block (a progress update under Pi's summarized display), so the user never sees it. Workaround: the configurable `visibleContextGuard` in `rpiv-ask-user-question`. The page also covers when to revert.
 
 ## Dream history
 

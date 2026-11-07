@@ -1,5 +1,6 @@
 import type { GuidanceFields } from "@juicesharp/rpiv-config";
 import { loadJsonConfigWithLegacyFallback, validateGuidanceFields } from "@juicesharp/rpiv-config";
+import type { VisibleContextGuardSettings } from "./tool/visible-context-guard.ts";
 
 /** Key spec for the overlay collapse/expand shortcut, e.g. `"ctrl+]"` or `"alt+o"`. */
 export type CollapseKeySpec = string;
@@ -24,6 +25,36 @@ export interface AskUserQuestionConfig {
 	 * key spec in the `collapseKey` format, e.g. `"ctrl+n"`.
 	 */
 	notesKey?: string;
+	/**
+	 * Fork workaround: refuse a call whose own assistant message has no visible text
+	 * (see tool/visible-context-guard.ts). Every key is optional; wrong types fall back
+	 * to the default for that key.
+	 */
+	visibleContextGuard?: {
+		enabled?: boolean;
+		minChars?: number;
+		honorSelfContained?: boolean;
+	};
+}
+
+export const DEFAULT_VISIBLE_CONTEXT_GUARD: VisibleContextGuardSettings = {
+	enabled: true,
+	minChars: 1,
+	honorSelfContained: true,
+};
+
+export function resolveVisibleContextGuard(
+	config: Pick<AskUserQuestionConfig, "visibleContextGuard">,
+): VisibleContextGuardSettings {
+	const raw: unknown = config.visibleContextGuard;
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ...DEFAULT_VISIBLE_CONTEXT_GUARD };
+	const { enabled, minChars, honorSelfContained } = raw as Record<string, unknown>;
+	const d = DEFAULT_VISIBLE_CONTEXT_GUARD;
+	return {
+		enabled: typeof enabled === "boolean" ? enabled : d.enabled,
+		minChars: typeof minChars === "number" && Number.isInteger(minChars) && minChars >= 1 ? minChars : d.minChars,
+		honorSelfContained: typeof honorSelfContained === "boolean" ? honorSelfContained : d.honorSelfContained,
+	};
 }
 
 // Named keys accepted by pi-tui's `matchesKey` (keys.js switch on the parsed base key).

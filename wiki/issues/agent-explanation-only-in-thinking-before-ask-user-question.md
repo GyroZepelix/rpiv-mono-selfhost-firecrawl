@@ -1,46 +1,53 @@
-# Noticed issue: agent explanation only in thinking before ask_user_question
+# Issue: agent explanation only in thinking before ask_user_question
 
-- Status: **Informational only.** No fix is decided. The operator is monitoring agent behavior and will decide later whether a fix is needed.
-- First noticed: 2026-10-25.
-- Component suspected by the agent: `packages/rpiv-ask-user-question` (the question box).
-- Component actually at fault: the model's output, not the plugin (see Analysis).
+- Status: **Workaround implemented** (fork only) in spec item `261107-1756-ask-user-question-visible-context-guard`. Root cause confirmed on 2026-11-07.
+- First noticed: 2026-10-25. Seen again: 2026-11-07.
+- Component suspected by the agent both times: `packages/rpiv-ask-user-question` (the question box). It was wrong both times.
+- Actual cause: model behavior (Claude 5.x progress updates) combined with Pi's thinking display mode. Details under Root cause.
 
 ## Symptom
 
-During a session, the agent said it had told the user something (file paths and line numbers), but the user never saw it. The user asked again twice. The agent then decided that the `ask_user_question` box was hiding its text. It dropped the question box and replied in plain text, which worked.
+The agent writes an explanation, findings, or links for the user and calls `ask_user_question` in the same reply. The user sees only the question box. The agent believes the explanation was delivered. When the user asks where it is, the agent blames the question box for hiding it, which is wrong.
+
+## Root cause
+
+- Anthropic documents "progress updates" on Claude Fable 5/5.1, Mythos 5.1, Opus 5.5, and Sonnet 5.5. A progress update is a note written for the person watching the agent. It comes back as its own `thinking` block, directly before the `tool_use` block it introduces. Source: [Anthropic thinking docs, progress updates](https://platform.claude.com/docs/en/build-with-claude/thinking#progress-updates).
+- Under `display: "summarized"`, a progress update is only a summary and "not distinguishable from a reasoning block". The full note is passed back to the model on the next request, which is why the model is sure the user read it.
+- Pi requests `display: "summarized"` and offers no setting for it. pi-ai sends `thinking: {type: "adaptive", display: options.thinkingDisplay ?? "summarized"}`, and pi-coding-agent never sets `thinkingDisplay` (checked in installed pi 1.5.0, `pi-ai/dist/api/anthropic-messages.js`).
+- The plugin receives a normal tool call and does not hide any text.
 
 ## Evidence
 
-Session log: `~/.pi/agent/sessions/--Users-dgjalic-Documents-1-Projects-12-devops-home-server-management--/2026-10-25T09-35-57-819Z_01a1726a-b37b-7561-9ce3-6671d5134477.jsonl` (model `claude-opus-5-5`). Line numbers below are JSONL lines.
+- 2026-10-25: session `~/.pi/agent/sessions/--Users-dgjalic-Documents-1-Projects-12-devops-home-server-management--/2026-10-25T09-35-57-819Z_01a1726a-b37b-7561-9ce3-6671d5134477.jsonl` (`claude-opus-5-5`). Lines 129, 141, and 145 have thinking blocks followed by `ask_user_question` and no text block. Line 157 repeats the wrong "the box hides text" diagnosis.
+- 2026-11-07: session `~/.pi/agent/sessions/--Users-dgjalic-Documents-1-Projects-10-software-development-50-pi-extensions-audio-processing-noting-pipeline--/2026-11-06T17-40-36-485Z_01a1b1f2-b805-7028-8098-77f5e0133396.jsonl` (`claude-opus-5-5`).
+  - Lines 56, 94, and 98 are `thinking, thinking, toolCall(ask_user_question)`. Each second thinking block is a first-person summary of the intended reply, such as "Your answers are recorded in the dossier ... all linked above".
+  - Lines 29 and 82 are `thinking, text, toolCall`, with 3521 and 2723 characters of text, and were delivered correctly.
+- Other projects report the same problem:
+  - [Claude Code #97504](https://github.com/anthropics/claude-code/issues/97504) (open). It found the shape in 8.5% of replies that contain a tool call, and reports that prompt instructions do not help because the model believes it wrote the text. Its workaround is a hook that refuses `AskUserQuestion` without visible text.
+  - [Claude Code #96288](https://github.com/anthropics/claude-code/issues/96288): long pre-tool text is generated inside thinking, but is emitted when it is the last act of the turn.
+  - [VS Code #342814](https://github.com/microsoft/vscode/issues/342814): `display: "summarized"` is hardcoded there too.
+  - [t3code #18355](https://github.com/pingdotgg/t3code/issues/18355), fixed in PR #18364.
 
-| Line | Assistant content blocks | Visible text to user |
-| --- | --- | --- |
-| 139 | thinking, text, `ask_user_question` | Yes. The user replied to this text at line 140, so the box did not hide it. |
-| 141 | thinking, thinking, `ask_user_question` | No. The second thinking block reads like a reply ("I found both ... config files ... I've paused here awaiting your decision"). |
-| 143 | thinking, short text, `bash` | One lead-in line only. The paths were only in the tool result. |
-| 145 | thinking, thinking, `ask_user_question` | No. The thinking says "I've also given you SSH/dashboard paths", but no text block exists. |
-| 147 | thinking, text (no question box) | Yes. Resolved the confusion. |
+## Workaround in this fork
 
-Other occurrences in the same session:
+The `visibleContextGuard` in `packages/rpiv-ask-user-question` works as follows:
 
-- Line 129: the blocker explanation exists only in thinking, followed directly by `ask_user_question`.
-- Line 157: the agent reasons "since the box hides text", repeating its own wrong diagnosis.
-- Across the session, 18 assistant turns are `thinking,toolCall` and 6 are `thinking,thinking,toolCall` with no text block. Not all of these needed user-facing text, but the pattern is most harmful before `ask_user_question`.
+- `tool/visible-context-guard.ts`, wired into `execute` after validation in `ask-user-question.ts`, finds the assistant message holding the call in `ctx.sessionManager.getBranch()`.
+- If that message has fewer than `minChars` characters of visible text, no questionnaire is shown. The model gets `error: "missing_visible_context"` and is told to write the context as visible text and call again.
+- An optional `selfContained: true` parameter excuses calls where the model deliberately wrote no explanation.
+- If the message is not found or the branch cannot be read, the call proceeds (fails open).
+- Config lives in `~/.config/rpiv-ask-user-question/config.json`. Defaults: `{ "visibleContextGuard": { "enabled": true, "minChars": 1, "honorSelfContained": true } }`. Documented in `packages/rpiv-ask-user-question/docs/configuration.md`.
+- The tool schema does not depend on config, so toggling the guard never invalidates the prompt cache. Adding `selfContained` caused one cache miss per resumed session when the new schema first loaded.
 
-## Analysis
+## When to revert
 
-- Verified: thinking blocks carry provider signatures, so the provider returned them as thinking. Pi stored them faithfully, and the plugin received a normal tool call. Nothing indicates the plugin removed or hid text.
-- Verified: the agent never checked which content blocks it had emitted before blaming the UI.
-- Inference: the model sometimes writes its user-facing answer inside thinking and then goes straight to a tool call, believing it has answered. Going directly from reasoning to `ask_user_question` seems to make this more likely.
-- Unverified: whether thinking summarization or display settings make this more frequent.
-- The operator's prompt addendum already says "Put explanations in your visible reply, never only in thinking or inside a question". The model did not follow it in these turns.
+Set `visibleContextGuard.enabled` to `false`, or remove the fork change, when either of these holds:
 
-## Fix options (not decided)
+- Anthropic stops emitting user-facing text as thinking blocks before tool calls (watch Claude Code #97504).
+- Pi supports `display: "updates"` (beta header `thinking-display-updates-2026-08-18`) and renders progress updates as visible text.
 
-- Prompt rule: before calling `ask_user_question`, the same message must contain a text block with every fact the user needs. Never claim something was said unless it is in a text block.
-- Plugin guard in `packages/rpiv-ask-user-question`: warn or return an error when the current assistant message has thinking and an `ask_user_question` call but no text block. Needs review: whether the extension API exposes the in-progress assistant message.
-- Prompt rule: tool output may be collapsed in the UI, so restate key results (paths, values) in visible text.
+Remove `selfContained` from the schema only together with the guard.
 
-## Monitoring notes
+## Agent lesson
 
-When this recurs, record the session file, JSONL line numbers, model, and whether `ask_user_question` was involved. That evidence will show whether a fix is worth it.
+Before claiming that something was shown to the user, check the session JSONL for a `text` block. Never blame the UI without that check.
