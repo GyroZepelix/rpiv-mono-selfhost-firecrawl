@@ -123,20 +123,20 @@ describe("formatNotesKeyForDisplay", () => {
 });
 
 describe("resolveVisibleContextGuard", () => {
-	it("defaults to enabled, minChars 1, honorSelfContained", () => {
-		expect(resolveVisibleContextGuard({})).toEqual({ enabled: true, minChars: 1, honorSelfContained: true });
+	it("defaults to disabled, minChars 1", () => {
+		expect(resolveVisibleContextGuard({})).toEqual({ enabled: false, minChars: 1 });
 	});
 
 	it("reads valid values and falls back per key on wrong types or invalid minChars", () => {
 		expect(
 			resolveVisibleContextGuard({
-				visibleContextGuard: { enabled: false, minChars: 40, honorSelfContained: false },
+				visibleContextGuard: { enabled: true, minChars: 40 },
 			}),
-		).toEqual({ enabled: false, minChars: 40, honorSelfContained: false });
-		const bad = { visibleContextGuard: { enabled: "no", minChars: 0.5, honorSelfContained: 1 } } as never;
-		expect(resolveVisibleContextGuard(bad)).toEqual({ enabled: true, minChars: 1, honorSelfContained: true });
+		).toEqual({ enabled: true, minChars: 40 });
+		const bad = { visibleContextGuard: { enabled: "no", minChars: 0.5 } } as never;
+		expect(resolveVisibleContextGuard(bad)).toEqual({ enabled: false, minChars: 1 });
 		expect(resolveVisibleContextGuard({ visibleContextGuard: { minChars: 0 } }).minChars).toBe(1);
-		expect(resolveVisibleContextGuard({ visibleContextGuard: [] as never }).enabled).toBe(true);
+		expect(resolveVisibleContextGuard({ visibleContextGuard: [] as never }).enabled).toBe(false);
 	});
 });
 

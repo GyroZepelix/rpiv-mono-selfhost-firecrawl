@@ -7,7 +7,6 @@ import {
 	DEFAULT_PROMPT_SNIPPET,
 	DEFAULT_TOOL_DESCRIPTION,
 	registerAskUserQuestionTool,
-	VISIBLE_CONTEXT_GUIDELINE,
 } from "./ask-user-question.ts";
 
 const TOOL_NAME = "ask_user_question";
@@ -38,14 +37,6 @@ it("describes the all-question custom-answer contract in the registered tool", (
 	const tool = captured.tools.get(TOOL_NAME)!;
 	expect(tool.description).toContain('automatically appended "Type something." row on every question');
 	expect(tool.description).toContain("reserved labels are rejected at runtime");
-});
-
-describe("DEFAULT_PROMPT_GUIDELINES — visible-context rule (fork)", () => {
-	it("tells the model to send long context in a reply without a tool call and ask next turn", () => {
-		expect(DEFAULT_PROMPT_GUIDELINES).toContain(VISIBLE_CONTEXT_GUIDELINE);
-		expect(VISIBLE_CONTEXT_GUIDELINE).toContain("WITHOUT any tool call");
-		expect(VISIBLE_CONTEXT_GUIDELINE).toContain("next turn");
-	});
 });
 
 describe("registerAskUserQuestionTool — guidance overrides", () => {

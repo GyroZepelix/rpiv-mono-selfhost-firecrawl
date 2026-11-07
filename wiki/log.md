@@ -38,7 +38,7 @@
 - Trigger: `/dream` run after "Gamemaster checkpoint: 261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/direct".
 - Inputs:
   - The current conversation.
-  - `spec/archive/261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/` (plan, verification, outcome) and `spec/active/260910-1057-resolve-upstream-2-9-merge-and-verify-fork-behavior/plan.md`.
+  - `spec/archive/261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/` (plan, verification, outcome) and `spec/archive/260910-1057-resolve-upstream-2-9-merge-and-verify-fork-behavior/plan.md`.
   - `packages/rpiv-web-tools/web-tools.ts`, `packages/rpiv-web-tools/index.test.ts`, and `.rpiv/guidance/packages/rpiv-web-tools/architecture.md`.
 - Wiki pages changed:
   - `wiki/index.md`: bootstrapped with the generic Dream routes, with user approval via Gamemaster, and given a workflows route.

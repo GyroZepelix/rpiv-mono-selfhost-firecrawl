@@ -86,12 +86,6 @@ export const QuestionsSchema = Type.Array(QuestionSchema, {
 
 export const QuestionParamsSchema = Type.Object({
 	questions: QuestionsSchema,
-	selfContained: Type.Optional(
-		Type.Boolean({
-			description:
-				"Set true ONLY when you deliberately wrote no explanation before this call and every question is fully understandable on its own. Omit it whenever you wrote, or meant to write, findings, explanations, or recommendations for the user: those must appear as visible text in the same reply as this call.",
-		}),
-	),
 });
 
 export type OptionData = Static<typeof OptionSchema>;

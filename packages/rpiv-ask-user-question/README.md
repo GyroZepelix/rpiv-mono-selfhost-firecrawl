@@ -55,10 +55,9 @@ Optional. Settings live in `~/.config/rpiv-ask-user-question/config.json`; the f
 | `notesKey` | Key that opens the notes editor. Any single character, including non-Latin ones such as `т`, or a Pi keybinding id such as `ctrl+n`. | `"n"` |
 | `guidance.description` | Full replacement for the tool description the model sees. A non-empty string replaces the built-in text entirely — no merging. | built-in description |
 | `guidance.promptSnippet` | One-line description of the tool in the system prompt — tune how eagerly the model asks. | built-in snippet |
-| `guidance.promptGuidelines` | Usage guidelines given to the model, as a list of strings. | 5 built-in guidelines |
-| `visibleContextGuard.enabled` | Fork workaround: refuse a call whose own message has no visible text (Claude 5.x can emit the explanation as thinking). `false` turns it off. | `true` |
+| `guidance.promptGuidelines` | Usage guidelines given to the model, as a list of strings. | 4 built-in guidelines |
+| `visibleContextGuard.enabled` | Fork workaround: refuse a call whose own message has no visible text (Claude 5.x can emit the explanation as thinking). Off by default; `true` turns it on. | `false` |
 | `visibleContextGuard.minChars` | Minimum visible text, in characters, the calling message needs. | `1` |
-| `visibleContextGuard.honorSelfContained` | Whether a call with `selfContained: true` skips the guard. | `true` |
 
 ```json
 { "collapseKey": "alt+o" }

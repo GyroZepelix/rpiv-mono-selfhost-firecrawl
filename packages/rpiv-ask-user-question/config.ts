@@ -27,20 +27,19 @@ export interface AskUserQuestionConfig {
 	notesKey?: string;
 	/**
 	 * Fork workaround: refuse a call whose own assistant message has no visible text
-	 * (see tool/visible-context-guard.ts). Every key is optional; wrong types fall back
-	 * to the default for that key.
+	 * (see tool/visible-context-guard.ts). Off by default: a refused call makes the model
+	 * retry, often fail again, and then stop using the tool. Every key is optional; wrong
+	 * types fall back to the default for that key.
 	 */
 	visibleContextGuard?: {
 		enabled?: boolean;
 		minChars?: number;
-		honorSelfContained?: boolean;
 	};
 }
 
 export const DEFAULT_VISIBLE_CONTEXT_GUARD: VisibleContextGuardSettings = {
-	enabled: true,
+	enabled: false,
 	minChars: 1,
-	honorSelfContained: true,
 };
 
 export function resolveVisibleContextGuard(
@@ -48,12 +47,11 @@ export function resolveVisibleContextGuard(
 ): VisibleContextGuardSettings {
 	const raw: unknown = config.visibleContextGuard;
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ...DEFAULT_VISIBLE_CONTEXT_GUARD };
-	const { enabled, minChars, honorSelfContained } = raw as Record<string, unknown>;
+	const { enabled, minChars } = raw as Record<string, unknown>;
 	const d = DEFAULT_VISIBLE_CONTEXT_GUARD;
 	return {
 		enabled: typeof enabled === "boolean" ? enabled : d.enabled,
 		minChars: typeof minChars === "number" && Number.isInteger(minChars) && minChars >= 1 ? minChars : d.minChars,
-		honorSelfContained: typeof honorSelfContained === "boolean" ? honorSelfContained : d.honorSelfContained,
 	};
 }
 

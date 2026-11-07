@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMockCtx, createMockPi } from "@juicesharp/rpiv-test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAskUserQuestionTool } from "./ask-user-question.ts";
 import { QuestionParamsSchema } from "./tool/types.ts";
 
@@ -37,6 +37,11 @@ function setup(branch: unknown[], getBranch?: () => unknown[]) {
 	return { run, custom, emit };
 }
 
+// The guard is off by default; these tests opt in unless they test the default.
+beforeEach(() => {
+	writeConfig({ visibleContextGuard: { enabled: true } });
+});
+
 afterEach(() => {
 	if (existsSync(configPath)) rmSync(configPath);
 });
@@ -57,16 +62,11 @@ describe("ask_user_question visible-context guard", () => {
 		expect(custom).toHaveBeenCalled();
 	});
 
-	it("allows selfContained: true by default and refuses it when honorSelfContained is false", async () => {
-		const allowed = setup(SLIPPED);
-		await allowed.run({ ...PARAMS, selfContained: true });
-		expect(allowed.custom).toHaveBeenCalled();
-
-		writeConfig({ visibleContextGuard: { honorSelfContained: false } });
-		const refused = setup(SLIPPED);
-		const r = await refused.run({ ...PARAMS, selfContained: true });
-		expect(r?.details).toMatchObject({ error: "missing_visible_context" });
-		expect(r?.content[0]).not.toMatchObject({ text: expect.stringContaining("selfContained") });
+	it("is off by default when no config file exists", async () => {
+		rmSync(configPath);
+		const { run, custom } = setup(SLIPPED);
+		await run();
+		expect(custom).toHaveBeenCalled();
 	});
 
 	it("is off when visibleContextGuard.enabled is false", async () => {
@@ -88,7 +88,7 @@ describe("ask_user_question visible-context guard", () => {
 		expect(throwing.custom).toHaveBeenCalled();
 	});
 
-	it("keeps the tool schema independent of config (selfContained is always declared)", () => {
-		expect(Object.keys(QuestionParamsSchema.properties)).toEqual(["questions", "selfContained"]);
+	it("keeps the tool schema independent of config (no guard-specific parameters)", () => {
+		expect(Object.keys(QuestionParamsSchema.properties)).toEqual(["questions"]);
 	});
 });

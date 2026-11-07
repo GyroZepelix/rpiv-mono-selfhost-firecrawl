@@ -15,8 +15,6 @@ export interface VisibleContextGuardSettings {
 	enabled: boolean;
 	/** Minimum summed length of the trimmed text blocks in the calling message. */
 	minChars: number;
-	/** Whether `selfContained: true` on the call excuses a message without text. */
-	honorSelfContained: boolean;
 }
 
 type ContentBlock = { type?: unknown; text?: unknown; id?: unknown };
@@ -55,31 +53,21 @@ export function visibleTextLength(message: AssistantMessage): number {
 export interface GuardInput {
 	branch: readonly unknown[];
 	toolCallId: string;
-	selfContained: boolean | undefined;
 	settings: VisibleContextGuardSettings;
 }
 
 /** True when the call must be refused. A calling message that cannot be found never refuses. */
-export function shouldRefuse({ branch, toolCallId, selfContained, settings }: GuardInput): boolean {
+export function shouldRefuse({ branch, toolCallId, settings }: GuardInput): boolean {
 	if (!settings.enabled) return false;
-	if (selfContained === true && settings.honorSelfContained) return false;
 	const message = findCallingMessage(branch, toolCallId);
 	if (!message) return false;
 	return visibleTextLength(message) < settings.minChars;
 }
 
-/** Model-facing refusal text; the `selfContained` hint appears only when the flag is honored. */
-export function missingVisibleContextMessage(
-	settings: Pick<VisibleContextGuardSettings, "honorSelfContained">,
-): string {
-	const lines = [
+/** Model-facing refusal text. */
+export function missingVisibleContextMessage(): string {
+	return [
 		"Error: the questions were NOT shown to the user. The assistant message that called ask_user_question contains no visible text, so any explanation, findings, or recommendations you meant to give the user were not delivered (they were likely emitted as a thinking block, which the user does not see as your reply).",
 		"Write the context the user needs (findings, explanation, your recommendation) as visible text in your reply, then call ask_user_question again in that same reply. If this keeps happening, send the context as a reply without any tool call and ask the questions after the user responds.",
-	];
-	if (settings.honorSelfContained) {
-		lines.push(
-			"Only if you deliberately wrote no explanation and every question is fully understandable on its own, call again with selfContained: true.",
-		);
-	}
-	return lines.join("\n");
+	].join("\n");
 }

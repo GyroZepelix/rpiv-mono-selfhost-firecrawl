@@ -34,20 +34,17 @@ The `visibleContextGuard` in `packages/rpiv-ask-user-question` works as follows:
 
 - `tool/visible-context-guard.ts`, wired into `execute` after validation in `ask-user-question.ts`, finds the assistant message holding the call in `ctx.sessionManager.getBranch()`.
 - If that message has fewer than `minChars` characters of visible text, no questionnaire is shown. The model gets `error: "missing_visible_context"` and is told to write the context as visible text and call again.
-- An optional `selfContained: true` parameter excuses calls where the model deliberately wrote no explanation.
 - If the message is not found or the branch cannot be read, the call proceeds (fails open).
-- Config lives in `~/.config/rpiv-ask-user-question/config.json`. Defaults: `{ "visibleContextGuard": { "enabled": true, "minChars": 1, "honorSelfContained": true } }`. Documented in `packages/rpiv-ask-user-question/docs/configuration.md`.
-- A fifth default prompt guideline (`VISIBLE_CONTEXT_GUIDELINE` in `ask-user-question.ts`) tells the model to send context longer than a few sentences as a reply without any tool call, and to ask in the next turn. Live tests on 2026-11-07 showed why: a short text block before the call arrived (session line 253), while both long explanations slipped into thinking and were refused (lines 247 and 257).
-- The tool schema does not depend on config, so toggling the guard never invalidates the prompt cache. Adding `selfContained` caused one cache miss per resumed session when the new schema first loaded.
+- Config lives in `~/.config/rpiv-ask-user-question/config.json`. Defaults: `{ "visibleContextGuard": { "enabled": false, "minChars": 1 } }`. The default was switched from `true` to `false` because, in practice, a refused model retried about three times, kept failing the same way, and then stopped using the tool. Opt in with `"enabled": true`. Documented in `packages/rpiv-ask-user-question/docs/configuration.md`.
+- The tool schema does not depend on config, so toggling the guard never invalidates the prompt cache.
+- Removed later: an optional `selfContained: true` schema parameter (with `honorSelfContained` config) that excused calls with no intended explanation, and a fifth default prompt guideline (`VISIBLE_CONTEXT_GUIDELINE`) telling the model to send long context as a reply without a tool call and ask next turn. Both were dropped together with switching the guard off by default. Removing `selfContained` changes the tool schema, which costs one prompt-cache miss per resumed session.
 
 ## When to revert
 
-Set `visibleContextGuard.enabled` to `false`, or remove the fork change, when either of these holds:
+The guard is already off by default. Remove the fork change when either of these holds:
 
 - Anthropic stops emitting user-facing text as thinking blocks before tool calls (watch Claude Code #97504).
 - Pi supports `display: "updates"` (beta header `thinking-display-updates-2026-08-18`) and renders progress updates as visible text.
-
-Remove `selfContained` from the schema and `VISIBLE_CONTEXT_GUIDELINE` from the default guidelines only together with the guard.
 
 ## Agent lesson
 

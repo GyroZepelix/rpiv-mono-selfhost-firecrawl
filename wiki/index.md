@@ -10,7 +10,7 @@ Start here. Maintenance rules live in [AGENTS.md](AGENTS.md).
 
 Records of observed problems, their causes, and any fork workaround with its revert condition.
 
-- [issues/agent-explanation-only-in-thinking-before-ask-user-question.md](issues/agent-explanation-only-in-thinking-before-ask-user-question.md): Claude 5.x emits the explanation before `ask_user_question` as a thinking block (a progress update under Pi's summarized display), so the user never sees it. Workaround: the configurable `visibleContextGuard` in `rpiv-ask-user-question`. The page also covers when to revert.
+- [issues/agent-explanation-only-in-thinking-before-ask-user-question.md](issues/agent-explanation-only-in-thinking-before-ask-user-question.md): Claude 5.x emits the explanation before `ask_user_question` as a thinking block (a progress update under Pi's summarized display), so the user never sees it. Workaround: the configurable `visibleContextGuard` in `rpiv-ask-user-question` (off by default; refusals made the model give up on the tool). The page also covers when to revert.
 
 ## Dream history
 

@@ -62,10 +62,9 @@ type are likewise dropped back to their default without a warning.
 | `notesKey` | Key that opens the notes editor. | `"n"` |
 | `guidance.description` | Full text of the tool description the model sees. Replaces the built-in default entirely — no merging. | built-in description |
 | `guidance.promptSnippet` | One-line snippet describing the tool in the system prompt. | built-in snippet |
-| `guidance.promptGuidelines` | List of usage guidelines given to the model. | 5 built-in guidelines |
-| `visibleContextGuard.enabled` | Refuse a call whose own assistant message has no visible text (fork workaround, see below). | `true` |
+| `guidance.promptGuidelines` | List of usage guidelines given to the model. | 4 built-in guidelines |
+| `visibleContextGuard.enabled` | Refuse a call whose own assistant message has no visible text (fork workaround, see below). | `false` |
 | `visibleContextGuard.minChars` | Minimum summed length of the calling message's trimmed text. | `1` |
-| `visibleContextGuard.honorSelfContained` | Let `selfContained: true` on a call skip the guard. | `true` |
 
 ### `collapseKey`
 
@@ -134,28 +133,22 @@ summarized thinking, so you see at most a reworded thinking summary, while the m
 you read its explanation. Before `ask_user_question` you then get questions without their
 context.
 
+The guard is off by default. In practice a refused model retried a few times, kept slipping its
+text into thinking, got refused again, and then stopped using the tool altogether.
+
 When enabled, the tool looks up the assistant message that made the call. If that message has
 fewer than `minChars` characters of visible text, the questionnaire is not shown. The model
 receives `error: "missing_visible_context"` and an instruction to write its context as visible
-text and call again. A call with `selfContained: true` (the model states it deliberately wrote
-no explanation) passes unless `honorSelfContained` is `false`. If the message cannot be found,
-the call proceeds.
+text and call again. If the message cannot be found, the call proceeds.
 
 ```json
-{ "visibleContextGuard": { "enabled": false } }
+{ "visibleContextGuard": { "enabled": true } }
 ```
 
-Turns the guard off. Do this once Anthropic stops emitting user-facing text as thinking, or Pi
-renders progress updates as visible text. `minChars` must be an integer of at least 1; a wrong
+Turns the guard on. `minChars` must be an integer of at least 1; a wrong
 type or invalid value falls back to the default for that key. The settings are read on every
 call. The tool schema never changes with them, so toggling the guard does not invalidate the
 prompt cache.
-
-The fork also adds a fifth built-in prompt guideline: when the user needs more than a few
-sentences of context, the model sends it as a reply without any tool call and asks in the next
-turn. Long text before a tool call is the case that slips into thinking most often, so this
-makes the guard fire less. A custom `guidance.promptGuidelines` list replaces it along with the
-other defaults.
 
 ## Environment variables
 
