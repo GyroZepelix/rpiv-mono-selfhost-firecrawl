@@ -22,6 +22,13 @@ These are the user's standing "preserve all" customizations. Every sync so far (
   - the doc rows in `README.md`, `docs/configuration.md`, and `docs/tool-schema.md`.
 
   Drop it only when [the issue page](../issues/agent-explanation-only-in-thinking-before-ask-user-question.md) says to revert.
+- **Anthropic web search provider** (`rpiv-web-tools`, spec item `261120-2305-anthropic-web-search-provider-for-rpiv-web-tools`): fork-only because its subscription billing depends on the separate `@gotgenes/pi-anthropic-auth` extension. Keep all of these:
+  - `providers/anthropic.ts` and `providers/anthropic.test.ts`, the `ANTHROPIC_PROVIDER_META` entry in `PROVIDERS` and its exports in `providers/index.ts`, and the `anthropic` case plus the `ProviderSettings` argument in `providers/factory.ts`;
+  - `SearchResponse.answer`, `SearchContext`, and the optional `context` argument of `SearchProvider.search` in `providers/types.ts`;
+  - the `fallbackProvider`, `fetchProvider`, and `anthropic` keys in `providers/config.ts`;
+  - in `web-tools.ts`: `searchWithFallback`, `instantiateFetchProvider`, the `ctx.modelRegistry` pass-through in `web_search`'s `execute`, the `**Answer:**` rendering and `details.answer`/`details.fallbackFrom`, the anthropic-as-fallback rule in `getVisibleProviderNames`, and the three `--show` lines;
+  - `web-tools.anthropic.test.ts`, the `Anthropic` label in the picker-order test and the `ANTHROPIC_API_KEY` reset in `index.test.ts`, and the fork-keys test in `providers/config.test.ts`;
+  - the fork sections in the package `README.md`, `docs/providers.md`, `docs/configuration.md`, `docs/tools.md`, and the "Anthropic Provider (fork)" section of `.rpiv/guidance/packages/rpiv-web-tools/architecture.md`.
 - **15 questions**: `MAX_QUESTIONS = 15` drives the schema, validation, prompt guidance, UI, current docs, the site tagline, and the "2-15" batching text in the rpiv-pi skills. Tests should derive their expectations from the constant. After merging, grep `packages/` for stale "up to 4" or "2-4 independent" text, excluding changelogs.
 
 ## Merge procedure

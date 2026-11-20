@@ -93,6 +93,31 @@ describe("readConfig — per-field schema salvage", () => {
 		expect(readConfig()).toEqual({ provider: "brave" });
 	});
 
+	it("loads the fork fallback, fetch-provider, and Anthropic keys and drops only invalid ones", () => {
+		const valid = {
+			provider: "anthropic",
+			fallbackProvider: "firecrawl",
+			fetchProvider: "firecrawl",
+			anthropic: { model: "claude-sonnet-5-5", maxUses: 5, extra: "keep" },
+			otherField: "keep",
+		};
+		writeRaw(JSON.stringify(valid));
+		expect(readConfig()).toEqual(valid);
+
+		writeRaw(
+			JSON.stringify({
+				provider: "anthropic",
+				fallbackProvider: 7,
+				fetchProvider: ["firecrawl"],
+				anthropic: { model: 42, maxUses: "3" },
+			}),
+		);
+		expect(readConfig()).toEqual({ provider: "anthropic", anthropic: {} });
+
+		writeRaw(JSON.stringify({ provider: "anthropic", anthropic: "haiku" }));
+		expect(readConfig()).toEqual({ provider: "anthropic" });
+	});
+
 	it("drops a single wrong-typed apiKeys record entry, keeping the valid keys", () => {
 		writeRaw(JSON.stringify({ provider: "brave", apiKeys: { brave: "k", broken: 7 } }));
 		expect(readConfig()).toEqual({ provider: "brave", apiKeys: { brave: "k" } });

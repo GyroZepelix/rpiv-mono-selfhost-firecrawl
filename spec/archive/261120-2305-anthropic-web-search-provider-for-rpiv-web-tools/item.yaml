@@ -1,0 +1,13 @@
+schema_version: 2
+id: 261120-2305-anthropic-web-search-provider-for-rpiv-web-tools
+title: Anthropic web search provider for rpiv-web-tools
+kind: work-item
+work_type: feature
+parent: null
+route: grill-to-spec
+status: completed
+superseded_by: null
+created_at: '2026-11-20T23:05:48+01:00'
+updated_at: '2026-11-20T23:46:04+01:00'
+external_refs: []
+wiki_refs: []

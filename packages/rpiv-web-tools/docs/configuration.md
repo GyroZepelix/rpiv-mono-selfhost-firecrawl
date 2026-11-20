@@ -35,6 +35,10 @@ Failed to save Exa API key to ~/.config/rpiv-web-tools/config.json — disk writ
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `provider` | string | `"brave"` when absent | Active search backend. Tier 3 of 4 — see [providers.md](providers.md#active-provider) |
+| `fallbackProvider` | string | unset | Fork: search backend tried once when the default search provider throws — see [providers.md](providers.md#search-fallback) |
+| `fetchProvider` | string | unset (active provider) | Fork: backend whose native fetch serves `web_fetch` — see [providers.md](providers.md#fetch-provider) |
+| `anthropic.model` | string | `claude-haiku-5-5`, then `claude-sonnet-5-5` | Fork: Anthropic search model override — see [providers.md](providers.md#anthropic-fork-addition) |
+| `anthropic.maxUses` | number | `3` | Fork: Anthropic searches per call, bounded 1 to 10 |
 | `apiKeys` | `Record<string, string>` | `{}` | Per-provider key map, keyed by provider name |
 | `baseUrls` | `Record<string, string>` | `{}` | Base URL per provider; only consulted for `firecrawl`, `searxng`, and `ollama` |
 | `apiKey` | string | unset | Legacy top-level Brave key. Migrated into `apiKeys.brave` and deleted on the next `/web-tools` save |
@@ -105,7 +109,10 @@ Running it with no arguments opens a provider picker (active provider first with
 `✓`, already-configured providers suffixed `(configured)`), then prompts for
 that provider's API key. Pressing Enter on an empty input keeps the existing key
 while still persisting the provider switch. Firecrawl, SearXNG, and Ollama
-drive their own flow instead: base URL first, then the optional key.
+drive their own flow instead: base URL first, then the optional key. Anthropic
+(fork) asks for one optional key; Enter keeps an existing key or leaves it
+unset so searches use Pi's Anthropic login. `fallbackProvider`,
+`fetchProvider`, and `anthropic.*` have no prompts; edit the file.
 
 The command requires an interactive session; without one it reports
 `/web-tools requires interactive mode` and does nothing.
@@ -116,6 +123,9 @@ The only flag. It prints the resolved configuration without changing anything:
 
 - the config file path in use
 - the active provider and which tier it came from (`env`, `config`, `default`)
+- `fallback provider`, `fetch provider` (`(not set) (uses active provider)` when
+  unset), and `anthropic model` (the configured model, or the default
+  preference list) — fork lines
 - one line per provider: the resolved key masked as first four characters,
   `...`, last four characters — with the env-var and config-file values shown
   separately so you can see which one won. Unset values render `(not set)`
@@ -131,7 +141,7 @@ Any other argument is ignored and falls through to the interactive picker.
 | --- | --- |
 | `XDG_CONFIG_HOME` | Config directory root; must be absolute or `~`-prefixed, else ignored |
 | `WEB_SEARCH_PROVIDER` | Pins the active provider above the config file |
-| `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `YOUCOM_API_KEY` (or `YDC_API_KEY`), `JINA_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY`, `SEARXNG_API_KEY`, `OLLAMA_API_KEY` | Per-provider keys; win over `apiKeys.<provider>` |
+| `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `EXA_API_KEY`, `YOUCOM_API_KEY` (or `YDC_API_KEY`), `JINA_API_KEY`, `FIRECRAWL_API_KEY`, `PERPLEXITY_API_KEY`, `SEARXNG_API_KEY`, `OLLAMA_API_KEY`, `ANTHROPIC_API_KEY` | Per-provider keys; win over `apiKeys.<provider>` |
 | `FIRECRAWL_API_URL`, `SEARXNG_URL`, `OLLAMA_HOST` | Hosted or self-hosted base URLs; win over `baseUrls.<provider>` |
 | `GITHUB_TOKEN` | Read only to display it masked in `/web-tools --show`; GitHub auth itself flows through `gh` |
 

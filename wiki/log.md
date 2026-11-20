@@ -1,5 +1,21 @@
 # Wiki Log
 
+## [2026-11-20] dream | Gamemaster checkpoint for the Anthropic web search provider
+
+- Trigger: `/dream` run after Gamemaster checkpoint: 261120-2305-anthropic-web-search-provider-for-rpiv-web-tools/direct.
+- Inputs: the implementing session, `spec/archive/261120-2305-anthropic-web-search-provider-for-rpiv-web-tools/` (plan, verification, outcome), `packages/rpiv-web-tools/` changes, the T04 live-check observations.
+- Wiki pages changed: `wiki/observations.md` (new, two live-check observations), `wiki/index.md` (observations route). The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Verification: re-read changed files, ran the metrics gate against the pre-write snapshot, ran memory safety scan.
+- Notes: no dynamic guidance admitted; the provider contract already lives in `.rpiv/guidance/packages/rpiv-web-tools/architecture.md` and the upstream-sync keep-list. No lint-queue entries.
+
+## [2026-11-20] update | Anthropic web search provider keep-list
+
+- Trigger: spec item `261120-2305-anthropic-web-search-provider-for-rpiv-web-tools` added a fork-only Anthropic search provider, search fallback, and `fetchProvider` to `rpiv-web-tools`.
+- Inputs: `packages/rpiv-web-tools/providers/anthropic.ts`, `providers/types.ts`, `providers/factory.ts`, `providers/index.ts`, `providers/config.ts`, `web-tools.ts`, and their tests; the item's `plan.md`.
+- Wiki pages changed:
+  - `wiki/workflows/upstream-sync.md`: added the Anthropic provider and its orchestrator, config, test, and doc changes to the fork customizations to preserve.
+- Verification: re-read the changed page against the changed source paths.
+
 ## [2026-11-07] update | visible-context prompt guideline
 
 - Trigger: live guard tests showed long explanations before `ask_user_question` slip into thinking. The user asked for a structural prompt rule in the fork's default guidelines.

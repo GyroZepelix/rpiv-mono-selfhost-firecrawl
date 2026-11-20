@@ -1,3 +1,4 @@
+import { AnthropicProvider, type AnthropicSearchSettings } from "./anthropic.ts";
 import { BraveProvider } from "./brave.ts";
 import { ExaProvider } from "./exa.ts";
 import { FirecrawlProvider } from "./firecrawl.ts";
@@ -15,11 +16,21 @@ export interface ProviderCredentials {
 	baseUrl?: string;
 }
 
-// The return union mirrors the role split: Brave/Serper/SearXNG are search-
-// only (SearchProvider); the other six expose native fetch endpoints too
+// Non-credential, provider-specific settings read from config.json. Only
+// Anthropic has any today (search model and max searches per call).
+export interface ProviderSettings {
+	anthropic?: AnthropicSearchSettings;
+}
+
+// The return union mirrors the role split: Brave/Serper/SearXNG/Perplexity/
+// Anthropic are search-only (SearchProvider); the other six expose native fetch endpoints too
 // (FullProvider). Consumers narrow with `"fetch" in provider` when they need
 // to dispatch on capability.
-export function createSearchProvider(name: string, creds: ProviderCredentials): SearchProvider | FullProvider {
+export function createSearchProvider(
+	name: string,
+	creds: ProviderCredentials,
+	settings: ProviderSettings = {},
+): SearchProvider | FullProvider {
 	const apiKey = creds.apiKey ?? "";
 	switch (name) {
 		case "brave":
@@ -42,6 +53,8 @@ export function createSearchProvider(name: string, creds: ProviderCredentials): 
 			return new SearxngProvider({ apiKey: creds.apiKey, baseUrl: creds.baseUrl ?? "" });
 		case "ollama":
 			return new OllamaProvider({ apiKey: creds.apiKey, baseUrl: creds.baseUrl ?? "" });
+		case "anthropic":
+			return new AnthropicProvider({ ...settings.anthropic, apiKey: creds.apiKey });
 		default:
 			throw new Error(`Unknown search provider: "${name}"`);
 	}

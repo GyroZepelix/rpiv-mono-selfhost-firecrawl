@@ -34,9 +34,17 @@ above `10` become `10`, and an omitted value becomes `5`.
     backend: string,                         // the provider that actually ran
     resultCount: number,
     results?: Array<{ title: string, url: string, snippet: string }>,
+    answer?: string,                         // fork: Anthropic's short answer,
+                                             // also shown under "**Answer:**"
+                                             // above the list
+    fallbackFrom?: string,                   // fork: default provider that failed
   }
 }
 ```
+
+When the fallback provider served the call (fork, see
+[providers.md](providers.md#search-fallback)), the text starts with a one-line
+`Note:` naming the failed default, its error, and the fallback.
 
 When the provider returns zero results, the envelope collapses to
 `content: [{ type: "text", text: 'No results found for "<query>".' }]` with
@@ -47,7 +55,7 @@ When the provider returns zero results, the envelope collapses to
 | Condition | Message shape |
 | --- | --- |
 | Resolved provider has no key | `EXA_API_KEY is not set. Run /web-tools to configure, or export the env var.` |
-| Unknown provider name | `Unknown web_search provider: "<name>". Valid providers: brave, tavily, serper, exa, youcom, jina, firecrawl, perplexity, searxng, ollama.` |
+| Unknown provider name | `Unknown web_search provider: "<name>". Valid providers: brave, tavily, serper, exa, youcom, jina, firecrawl, perplexity, searxng, ollama, anthropic.` |
 | Provider API returns non-2xx | vendor-specific, with the status code |
 
 ### Per-call `provider` override
@@ -119,8 +127,9 @@ The text content is prefixed with a header block before the body:
    returns `null` for anything that isn't a github.com code URL. The chain is
    empty when the interceptor is disabled. See
    [github-interceptor.md](github-interceptor.md).
-2. **The active provider's native fetch** — Tavily, Exa, You.com, Jina,
-   Firecrawl and Ollama carry vendor extraction endpoints.
+2. **The fetch provider's native fetch** — `fetchProvider` when set (fork),
+   else the active provider. Tavily, Exa, You.com, Jina, Firecrawl and Ollama
+   carry vendor extraction endpoints.
 3. **The built-in HTTP + HTML-to-text pipeline** — used for search-only
    providers (Brave, Serper, Perplexity, SearXNG) and whenever the active
    provider has no `fetch` method. This path needs no API key at all, so

@@ -60,6 +60,13 @@ works with no API key at all.
 - **Ten backends, one switch, keys never lost** — Brave, Tavily, Serper, Exa,
   You.com, Jina, Firecrawl, Perplexity, SearXNG and Ollama. Keys are stored per
   provider, so switching backends preserves every other one.
+- **Claude's own web search (fork addition)** — the `anthropic` provider runs
+  Anthropic's server-side web search through Pi's Anthropic login (billed to a
+  Claude subscription with `@gotgenes/pi-anthropic-auth`) or an Anthropic API
+  key, from any chat model, and shows Claude's short cited answer above the
+  result list. A `fallbackProvider` is tried once when the default search
+  provider fails, and `fetchProvider` keeps `web_fetch` on a reader such as
+  Firecrawl — see [Providers](docs/providers.md#anthropic-fork-addition).
 - **Compare backends without touching config** — pass `provider` on a single
   `web_search` call to route it elsewhere. No config write, no restart, and an
   uncredentialed target throws instead of silently falling back.
@@ -84,6 +91,9 @@ works with no API key at all.
 | Key | What it does | Default |
 | --- | --- | --- |
 | `provider` | Active search backend | `brave` |
+| `fallbackProvider` | Search backend tried once when the default one fails (fork) | none |
+| `fetchProvider` | Backend whose native fetch serves `web_fetch` (fork) | active provider |
+| `anthropic.model` / `anthropic.maxUses` | Anthropic search model and searches per call (fork) | `claude-haiku-5-5`, then `claude-sonnet-5-5`; `3` |
 | `apiKeys.<provider>` | Per-provider API key | none |
 | `baseUrls.<provider>` | Instance URL for `firecrawl` / `searxng` / `ollama` | provider default |
 | `interceptors.github` | Enables the GitHub URL interceptor | disabled |

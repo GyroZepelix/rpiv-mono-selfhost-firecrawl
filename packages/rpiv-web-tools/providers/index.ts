@@ -1,3 +1,4 @@
+import { ANTHROPIC_PROVIDER_META } from "./anthropic.ts";
 import { BRAVE_PROVIDER_META } from "./brave.ts";
 import { EXA_PROVIDER_META } from "./exa.ts";
 import { FIRECRAWL_PROVIDER_META } from "./firecrawl.ts";
@@ -10,9 +11,17 @@ import { TAVILY_PROVIDER_META } from "./tavily.ts";
 import type { ProviderMeta } from "./types.ts";
 import { YOUCOM_PROVIDER_META } from "./youcom.ts";
 
+export {
+	ANTHROPIC_API_KEY_ENV_VAR,
+	ANTHROPIC_PROVIDER_META,
+	ANTHROPIC_SEARCH_MODELS,
+	AnthropicProvider,
+	type AnthropicSearchSettings,
+	configureAnthropic,
+} from "./anthropic.ts";
 export { BRAVE_API_KEY_ENV_VAR, BRAVE_PROVIDER_META, BraveProvider } from "./brave.ts";
 export { EXA_API_KEY_ENV_VAR, EXA_PROVIDER_META, ExaProvider } from "./exa.ts";
-export { createSearchProvider, type ProviderCredentials } from "./factory.ts";
+export { createSearchProvider, type ProviderCredentials, type ProviderSettings } from "./factory.ts";
 export {
 	configureFirecrawl,
 	FIRECRAWL_API_KEY_ENV_VAR,
@@ -64,6 +73,7 @@ export type {
 	ProviderConfigUi,
 	ProviderMeta,
 	ProviderRole,
+	SearchContext,
 	SearchProvider,
 	SearchResponse,
 	SearchResult,
@@ -85,4 +95,5 @@ export const PROVIDERS: readonly ProviderMeta[] = [
 	PERPLEXITY_PROVIDER_META,
 	SEARXNG_PROVIDER_META,
 	OLLAMA_PROVIDER_META,
+	ANTHROPIC_PROVIDER_META,
 ];

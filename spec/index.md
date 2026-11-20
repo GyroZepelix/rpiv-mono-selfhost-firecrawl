@@ -21,6 +21,7 @@ Repository-local planning and execution artifacts.
 | [Resolve upstream 2.9 merge and verify fork behavior](./archive/260910-1057-resolve-upstream-2-9-merge-and-verify-fork-behavior/plan.md) | work-item | completed | 2026-11-07 |
 | [Merge upstream v2.15.0 and verify fork behavior](./archive/261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/plan.md) | work-item | completed | 2026-10-25 |
 | [ask_user_question visible-context guard](./archive/261107-1756-ask-user-question-visible-context-guard/plan.md) | work-item | completed | 2026-11-07 |
+| [Anthropic web search provider for rpiv-web-tools](./archive/261120-2305-anthropic-web-search-provider-for-rpiv-web-tools/plan.md) | work-item | completed | 2026-11-20 |
 <!-- spec-items:archive:end -->
 
 ## Templates

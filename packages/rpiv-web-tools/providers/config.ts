@@ -54,9 +54,24 @@ const InterceptorsConfigSchema = Type.Object(
 	{ additionalProperties: true },
 );
 
+// Anthropic search settings (fork). `model` overrides the fixed preference
+// list; `maxUses` caps searches per call (bounded 1..10 by the provider).
+const AnthropicSearchConfigSchema = Type.Object(
+	{
+		model: Type.Optional(Type.String()),
+		maxUses: Type.Optional(Type.Number()),
+	},
+	{ additionalProperties: true },
+);
+
 export const WebToolsConfigSchema = Type.Object(
 	{
 		provider: Type.Optional(Type.String()),
+		// Fork: search provider tried once when the default search provider throws.
+		fallbackProvider: Type.Optional(Type.String()),
+		// Fork: provider whose native fetch serves web_fetch (unset = active provider).
+		fetchProvider: Type.Optional(Type.String()),
+		anthropic: Type.Optional(AnthropicSearchConfigSchema),
 		apiKeys: Type.Optional(Type.Record(Type.String(), Type.String())),
 		baseUrls: Type.Optional(Type.Record(Type.String(), Type.String())),
 		// Legacy top-level Brave key. Auto-migrated to `apiKeys.brave` by the

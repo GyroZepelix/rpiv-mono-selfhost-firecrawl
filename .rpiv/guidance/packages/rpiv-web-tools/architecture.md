@@ -4,7 +4,7 @@
 Sibling Pi extension in `rpiv-mono`. Lockstep version with the rest of the `@juicesharp/rpiv-*` family — never bump independently. Listed in `siblings.ts`; peer-pinned by `rpiv-pi` as `"*"`. Provides `web_search`/`web_fetch` consumed by the web-search-class agent in `rpiv-pi/agents/`.
 
 ## Responsibility
-Pi extension exposing two tools (`web_search`, `web_fetch`) and one `/web-tools` slash command for configuration. Search is backed by a registry of ten configurable providers (selected per-call, by env, or via `config.provider` — see below) — hosted REST vendors (Brave, Tavily, Serper, Exa, You.com, Jina, Perplexity) plus endpoint-configurable Firecrawl, SearXNG, and Ollama. Fetch dispatches three ways (URL interceptors → provider native fetch → generic HTML-to-text fallback), with truncation-and-temp-file-spill for context-safe payload sizes.
+Pi extension exposing two tools (`web_search`, `web_fetch`) and one `/web-tools` slash command for configuration. Search is backed by a registry of ten configurable providers (selected per-call, by env, or via `config.provider` — see below) — hosted REST vendors (Brave, Tavily, Serper, Exa, You.com, Jina, Perplexity) plus endpoint-configurable Firecrawl, SearXNG, and Ollama, and the fork-only Anthropic provider (see "Anthropic Provider (fork)"). Fetch dispatches three ways (URL interceptors → fetch provider's native fetch → generic HTML-to-text fallback), with truncation-and-temp-file-spill for context-safe payload sizes.
 
 ## Dependencies
 - **`@earendil-works/pi-coding-agent`** (peer): `ExtensionAPI`, truncation helpers, default size limits
@@ -30,16 +30,18 @@ Pi extension exposing two tools (`web_search`, `web_fetch`) and one `/web-tools`
     ├── fetch-helpers.ts      — Shared HTTP/fetch utilities for provider clients
     ├── index.ts              — Barrel: re-exports types, providers, factory, and `PROVIDERS` metadata array
     ├── <vendor>.ts ×10       — brave, tavily, serper, exa, youcom, jina, firecrawl, perplexity, searxng, ollama
+    ├── anthropic.ts          — Fork: Anthropic server-side web search (Pi login via modelRegistry, else API key)
     └── interceptors/         — URL interceptors (host specialists, e.g. GitHub clone-and-read) + chain
 ```
 
 Stable types (`providers/types.ts`):
 ```ts
 interface SearchResult { title: string; url: string; snippet: string; }
-interface SearchResponse { query: string; results: SearchResult[]; }
+interface SearchResponse { query: string; results: SearchResult[]; answer?: string; }  // answer: Anthropic only
+interface SearchContext { modelRegistry?: ExtensionContext["modelRegistry"]; }        // Pi context for search()
 interface FetchResponse { text: string; title?: string; contentType?: string; contentLength?: number; }
 interface SearchProvider { readonly name; readonly label; readonly envVar;
-  search(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResponse>; }
+  search(query: string, maxResults: number, signal?: AbortSignal, context?: SearchContext): Promise<SearchResponse>; }
 interface FetchProvider { /* …same readonly fields… */
   fetch(url: string, raw: boolean, signal?: AbortSignal): Promise<FetchResponse>; }
 type FullProvider = SearchProvider & FetchProvider;   // role-split: search-only vs full
@@ -49,7 +51,7 @@ interface ProviderMeta { name; label; envVar?; fallbackEnvVar?; baseUrlEnvVar?; 
 // configure() UI contract: ProviderConfigUi, ProviderConfigCurrent, ProviderConfigChange
 ```
 
-`web-tools.ts` is metadata-driven: it reads the `PROVIDERS` `ProviderMeta[]` for resolution and UI listing and never depends on a specific vendor's wire shape. Search-only providers (Brave, Serper, SearXNG, Perplexity) implement `SearchProvider`; full providers (Tavily, Exa, You.com, Jina, Firecrawl, Ollama) also implement `fetch()`.
+`web-tools.ts` is metadata-driven: it reads the `PROVIDERS` `ProviderMeta[]` for resolution and UI listing and never depends on a specific vendor's wire shape. Search-only providers (Brave, Serper, SearXNG, Perplexity, Anthropic) implement `SearchProvider`; full providers (Tavily, Exa, You.com, Jina, Firecrawl, Ollama) also implement `fetch()`.
 
 ## Active-Provider Selection (four-tier chain, first wins)
 `instantiateProvider(config, override?)` (web-tools.ts:175-198) is the single instantiation path shared by both tools: **per-call `provider` tool parameter → `WEB_SEARCH_PROVIDER` env var → `config.provider` → default (brave)**. `web_search`'s optional `provider` param (web-tools.ts:331-341) is a TypeBox union of the CONFIGURED provider names (`getVisibleProviderNames`: `isProviderConfigured` — a resolved key, or an explicit env/config base URL for URL-configurable providers; Firecrawl alone also counts a resolved key with the default Cloud URL, while SearXNG/Ollama stay URL-only and a bare default URL never counts — plus the active provider; `brave` when nothing is) and targets a different backend for a single call without mutating saved config; unknown names throw the uniform `Unknown web_search provider` error, and a named provider still needs its own credentials — never a silent fallback. Advertising every backend let models fill the optional param with an unconfigured provider (`brave`) and override the user's choice (#204). The enum is built at registration, so a successful `/web-tools` save calls `refreshWebSearchSchema` (re-registers `web_search`; Pi replaces a re-registered tool's definition). `isProviderConfigured` is shared with the `/web-tools` picker's `(configured)` marker. `WEB_SEARCH_PROVIDER` lets an operator pin the backend without editing config; it is validated **lazily**: `resolveActiveProviderName` does not validate, so a bogus value renders honestly in `/web-tools --show`/picker and only throws when env is actually the resolving tier for a call (an override wins without consulting it).
@@ -60,8 +62,13 @@ Search supports ten vendors; key resolution is a **per-provider env-then-config 
 ## Base-URL Resolution (configurable endpoints)
 `resolveProviderBaseUrl(meta, config)`: providers that declare `baseUrlEnvVar` (Firecrawl, SearXNG, Ollama) resolve their endpoint **env → `config.baseUrls[<provider>]` → `meta.defaultBaseUrl` → `""`**. Other hosted providers (no `baseUrlEnvVar`) short-circuit to `""`. Firecrawl defaults to Cloud and requires a key for the `api.firecrawl.dev` Cloud hostname (after URL normalization); an endpoint on a different self-hosted hostname may omit the key and therefore the `Authorization` header. The `configure()` META hook lets endpoint-configurable providers drive a richer `/web-tools` prompt instead of the default single-key input.
 
+## Anthropic Provider (fork)
+Fork-only, on the upstream-sync keep-list. `providers/anthropic.ts` runs Anthropic's server-side `web_search_20250305` tool. Transport order: **(1)** Pi's `anthropic` login through `SearchContext.modelRegistry.streamSimple()` — `onPayload` replaces the request's tools with exactly the search tool (and drops `tool_choice`), and `onProviderStreamEvent` captures the `web_search_tool_result` and citation blocks that Pi's message assembly drops; this is the only path where `@gotgenes/pi-anthropic-auth` bills a Claude subscription; **(2)** `ANTHROPIC_API_KEY`/`apiKeys.anthropic` as a plain `x-api-key` request. **Never send an `sk-ant-oat` OAuth token by direct `fetch()`** — it is rejected before any request (third-party "extra usage" risk). Model: fixed preference `claude-haiku-5-5` → `claude-sonnet-5-5`, `config.anthropic.model` overrides; `config.anthropic.maxUses` defaults to 3, bounded 1..10; reasoning is left unset (no `@earendil-works/pi-ai` import). Registry types derive from `pi-coding-agent`'s `ExtensionContext["modelRegistry"]`. The tool's `execute` passes `{ modelRegistry: ctx.modelRegistry }` to every provider's `search()`; other providers ignore it. Tool errors (inside HTTP 200), HTTP errors, missing credentials, and refusals without sources throw; an answer without sources is a result.
+
+**Search fallback** (`searchWithFallback`): when no per-call `provider` was given and the resolved default throws, `config.fallbackProvider` (known, different from the default) runs once; the result carries a `Note:` line and `details.fallbackFrom`. No fallback on zero results, abort, or per-call override (a named provider is still never silently replaced); both failing throws one error with both messages. **Enum:** `anthropic` is listed when active, the configured fallback, or keyed (Pi login is not probed at registration).
+
 ## Three-Way web_fetch Dispatch
-`web_fetch` resolves a body in priority order (web-tools.ts:440-461): **(1)** URL interceptors (`providers/interceptors/`, currently GitHub; cheap-reject `null` for unrelated hosts; enabled either by end-user `config.interceptors.github` boolean-or-options OR by an embedding consumer via `registerWebTools(pi, { interceptors: { github: true } })` — default OFF, end-user config wins, an explicit `false` overrides a consumer default) → **(2)** the active provider's native `fetch()` when `"fetch" in provider` (full providers) → **(3)** generic HTML-to-text fallback. The factory returns `SearchProvider | FullProvider`; consumers narrow on `"fetch" in provider`.
+`web_fetch` resolves a body in priority order (web-tools.ts `registerWebFetchTool`): **(1)** URL interceptors (`providers/interceptors/`, currently GitHub; cheap-reject `null` for unrelated hosts; enabled either by end-user `config.interceptors.github` boolean-or-options OR by an embedding consumer via `registerWebTools(pi, { interceptors: { github: true } })` — default OFF, end-user config wins, an explicit `false` overrides a consumer default) → **(2)** the fetch provider's native `fetch()` when `"fetch" in provider` (full providers) — `config.fetchProvider` when set (fork; validated like a per-call name, unknown throws), else the active provider from the four-tier chain → **(3)** generic HTML-to-text fallback. The factory returns `SearchProvider | FullProvider`; consumers narrow on `"fetch" in provider`.
 
 ## Outbound API Call Shape
 See providers/brave.ts:31-55 for the canonical client shape (`URL`+`searchParams.set`, `AbortSignal` forwarding, `!res.ok` throw, boundary normalization; SSRF guard `parseAndAssertHttpUrl` rejects non-http(s) protocols and loopback/RFC1918/link-local hosts); the rules are enumerated under Architectural Boundaries below.

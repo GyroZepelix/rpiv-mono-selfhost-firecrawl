@@ -28,9 +28,22 @@ import { Type } from "typebox";
 import { getConfigPath, readConfig, type WebToolsConfig, writeConfig } from "./providers/config.ts";
 import { createSearchProvider } from "./providers/factory.ts";
 import { fetchViaGenericHtml } from "./providers/fetch-helpers.ts";
-import { FIRECRAWL_PROVIDER_META, PROVIDERS } from "./providers/index.ts";
+import {
+	ANTHROPIC_PROVIDER_META,
+	ANTHROPIC_SEARCH_MODELS,
+	FIRECRAWL_PROVIDER_META,
+	PROVIDERS,
+} from "./providers/index.ts";
 import { GITHUB_TOKEN_ENV_VAR, getActiveGitHubInterceptor, getInterceptors } from "./providers/interceptors/index.ts";
-import type { FetchResponse, FullProvider, ProviderMeta, SearchProvider, SearchResult } from "./providers/types.ts";
+import type {
+	FetchResponse,
+	FullProvider,
+	ProviderMeta,
+	SearchContext,
+	SearchProvider,
+	SearchResponse,
+	SearchResult,
+} from "./providers/types.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables and external surface
@@ -165,6 +178,10 @@ function getVisibleProviderNames(config: WebToolsConfig): {
 	const configured = PROVIDERS.filter((meta) => isProviderConfigured(meta, config)).map((meta) => meta.name);
 	const names = configured.filter((name) => name !== active.name);
 	if (KNOWN_PROVIDER_NAMES.includes(active.name)) names.unshift(active.name);
+	// Anthropic can run on Pi's login, which is not probed at registration, so
+	// it is also listed when it is the configured search fallback (fork).
+	const anthropic = ANTHROPIC_PROVIDER_META.name;
+	if (config.fallbackProvider?.trim() === anthropic && !names.includes(anthropic)) names.push(anthropic);
 	if (names.length === 0) names.push(DEFAULT_PROVIDER_NAME);
 	return { active, names };
 }
@@ -237,8 +254,78 @@ function instantiateProvider(
 	const apiKey = resolveProviderApiKey(providerName, config);
 	const meta = PROVIDERS.find((p) => p.name === providerName);
 	const baseUrl = meta?.baseUrlEnvVar ? resolveProviderBaseUrl(meta, config) : undefined;
-	const provider = createSearchProvider(providerName, { apiKey: apiKey ?? "", baseUrl });
+	const provider = createSearchProvider(
+		providerName,
+		{ apiKey: apiKey ?? "", baseUrl },
+		{ anthropic: config.anthropic },
+	);
 	return { providerName, provider };
+}
+
+// ---------------------------------------------------------------------------
+// Search fallback + fetch-provider selection (fork)
+// ---------------------------------------------------------------------------
+
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+interface SearchOutcome {
+	providerName: string;
+	response: SearchResponse;
+	fallbackFrom?: string;
+	fallbackNote?: string;
+}
+
+// Runs the resolved search provider, then `config.fallbackProvider` once when
+// the DEFAULT provider throws. Never for a per-call override (a named
+// provider must work on its own), an abort, zero results, or a fallback equal
+// to the default. An unknown fallback name throws the uniform unknown-provider
+// error only when the fallback is actually needed.
+async function searchWithFallback(
+	config: WebToolsConfig,
+	override: string | undefined,
+	query: string,
+	maxResults: number,
+	signal: AbortSignal | undefined,
+	context: SearchContext,
+	onSearching: (label: string, providerName: string) => void,
+): Promise<SearchOutcome> {
+	const primary = instantiateProvider(config, override);
+	onSearching(primary.provider.label, primary.providerName);
+	try {
+		const response = await primary.provider.search(query, maxResults, signal, context);
+		return { providerName: primary.providerName, response };
+	} catch (primaryError) {
+		const fallbackName = config.fallbackProvider?.trim();
+		if (override !== undefined || signal?.aborted || !fallbackName || fallbackName === primary.providerName) {
+			throw primaryError;
+		}
+		const fallback = instantiateProvider(config, fallbackName);
+		const primaryMessage = errorMessage(primaryError);
+		onSearching(fallback.provider.label, fallback.providerName);
+		let response: SearchResponse;
+		try {
+			response = await fallback.provider.search(query, maxResults, signal, context);
+		} catch (fallbackError) {
+			throw new Error(
+				`${primary.providerName} search failed: ${primaryMessage}; fallback ${fallback.providerName} also failed: ${errorMessage(fallbackError)}`,
+			);
+		}
+		return {
+			providerName: fallback.providerName,
+			response,
+			fallbackFrom: primary.providerName,
+			fallbackNote: `Note: ${primary.providerName} search failed (${primaryMessage}); results are from fallback provider ${fallback.providerName}.`,
+		};
+	}
+}
+
+// web_fetch backend: `config.fetchProvider` when set (validated like any
+// provider name), else the active search provider as before.
+function instantiateFetchProvider(config: WebToolsConfig): SearchProvider | FullProvider {
+	const fetchProviderName = config.fetchProvider?.trim();
+	return instantiateProvider(config, fetchProviderName || undefined).provider;
 }
 
 function maskApiKey(key: string | undefined): string {
@@ -331,18 +418,24 @@ function formatFetchHeader(url: string, title: string | undefined, contentType: 
 // web_search result rendering
 // ---------------------------------------------------------------------------
 
-function formatSearchResultsBody(response: { query: string; results: SearchResult[] }): string {
+function withNote(text: string, note: string | undefined): string {
+	return note ? `${note}\n\n${text}` : text;
+}
+
+// An answer-producing provider (Anthropic) puts its short answer above the list.
+function formatSearchResultsBody(response: SearchResponse, note?: string): string {
 	let text = `**Search results for "${response.query}":**\n\n`;
+	if (response.answer) text += `**Answer:**\n${response.answer}\n\n`;
 	response.results.forEach((r, i) => {
 		text += `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.snippet}\n\n`;
 	});
-	return text.trimEnd();
+	return withNote(text.trimEnd(), note);
 }
 
-function buildEmptyResultsEnvelope(query: string, providerName: string) {
+function buildEmptyResultsEnvelope(query: string, providerName: string, fallbackFrom?: string, note?: string) {
 	return {
-		content: [{ type: "text" as const, text: `No results found for "${query}".` }],
-		details: { query, backend: providerName, resultCount: 0 },
+		content: [{ type: "text" as const, text: withNote(`No results found for "${query}".`, note) }],
+		details: { query, backend: providerName, resultCount: 0, ...(fallbackFrom ? { fallbackFrom } : {}) },
 	};
 }
 
@@ -382,29 +475,37 @@ export function registerWebSearchTool(pi: ExtensionAPI): void {
 			),
 		}),
 
-		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const maxResults = clampSearchResultCount(params.max_results);
 			const config = loadConfig();
-			const { providerName, provider } = instantiateProvider(config, params.provider);
 
-			onUpdate?.({
-				content: [{ type: "text", text: `Searching ${provider.label} for: "${params.query}"...` }],
-				details: { query: params.query, backend: providerName, resultCount: 0 },
-			});
+			const { providerName, response, fallbackFrom, fallbackNote } = await searchWithFallback(
+				config,
+				params.provider,
+				params.query,
+				maxResults,
+				signal,
+				{ modelRegistry: ctx?.modelRegistry },
+				(label, backend) =>
+					onUpdate?.({
+						content: [{ type: "text", text: `Searching ${label} for: "${params.query}"...` }],
+						details: { query: params.query, backend, resultCount: 0 },
+					}),
+			);
 
-			const response = await provider.search(params.query, maxResults, signal);
-
-			if (response.results.length === 0) {
-				return buildEmptyResultsEnvelope(params.query, providerName);
+			if (response.results.length === 0 && !response.answer) {
+				return buildEmptyResultsEnvelope(params.query, providerName, fallbackFrom, fallbackNote);
 			}
 
 			return {
-				content: [{ type: "text", text: formatSearchResultsBody(response) }],
+				content: [{ type: "text", text: formatSearchResultsBody(response, fallbackNote) }],
 				details: {
 					query: params.query,
 					backend: providerName,
 					resultCount: response.results.length,
 					results: response.results,
+					...(response.answer ? { answer: response.answer } : {}),
+					...(fallbackFrom ? { fallbackFrom } : {}),
 				},
 			};
 		},
@@ -476,14 +577,15 @@ export function registerWebFetchTool(pi: ExtensionAPI): void {
 			});
 
 			const config = loadConfig();
-			const { provider } = instantiateProvider(config);
+			const provider = instantiateFetchProvider(config);
 
 			// Three-way capability dispatch:
 			//   1. URL interceptors (currently just GitHub) — opt-in URL specialists
 			//      that handle their own host pattern. Cheap-reject to null for
 			//      unrelated URLs; empty chain (interceptor disabled) is a no-op.
 			//   2. Provider's native fetch — full providers (Tavily, Exa, You.com,
-			//      Jina, Firecrawl, Ollama) have vendor endpoints worth using.
+			//      Jina, Firecrawl, Ollama) have vendor endpoints worth using. The
+			//      provider is `fetchProvider` when set, else the active one.
 			//   3. Generic HTML fallback — for search-only providers (Brave, Serper,
 			//      SearXNG) or any provider that doesn't carry a `fetch` method.
 			let fetchResponse: FetchResponse | undefined;
@@ -575,6 +677,12 @@ function formatShowConfigMessage(current: WebToolsConfig): string {
 
 	const { name: providerName, source: providerSource } = resolveActiveProviderName(current);
 	lines.push(`  active provider: ${providerName} (source: ${providerSource})`);
+	lines.push(`  fallback provider: ${current.fallbackProvider?.trim() || UNSET_LABEL}`);
+	lines.push(`  fetch provider: ${current.fetchProvider?.trim() || `${UNSET_LABEL} (uses active provider)`}`);
+	const anthropicModel = current.anthropic?.model?.trim();
+	lines.push(
+		`  anthropic model: ${anthropicModel ? `${anthropicModel} (source: config)` : `${ANTHROPIC_SEARCH_MODELS.join(", then ")} (source: default)`}`,
+	);
 
 	for (const meta of PROVIDERS) {
 		const envKey = envApiKey(meta);

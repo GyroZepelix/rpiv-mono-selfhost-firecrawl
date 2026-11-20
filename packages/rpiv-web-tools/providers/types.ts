@@ -1,3 +1,5 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+
 export interface SearchResult {
 	title: string;
 	url: string;
@@ -7,6 +9,16 @@ export interface SearchResult {
 export interface SearchResponse {
 	query: string;
 	results: SearchResult[];
+	// A short synthesized answer above the result list. Only answer-producing
+	// providers (Anthropic) set it; list-only providers leave it undefined.
+	answer?: string;
+}
+
+// Pi context the orchestrator hands to `search()`. Providers that need Pi
+// itself (Anthropic: the model registry, so searches run through Pi's login)
+// read it; every other provider ignores the argument.
+export interface SearchContext {
+	modelRegistry?: ExtensionContext["modelRegistry"];
 }
 
 export interface FetchResponse {
@@ -25,7 +37,7 @@ export interface SearchProvider {
 	readonly name: string;
 	readonly label: string;
 	readonly envVar: string;
-	search(query: string, maxResults: number, signal?: AbortSignal): Promise<SearchResponse>;
+	search(query: string, maxResults: number, signal?: AbortSignal, context?: SearchContext): Promise<SearchResponse>;
 }
 
 export interface FetchProvider {

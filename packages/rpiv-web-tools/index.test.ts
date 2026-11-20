@@ -47,6 +47,7 @@ beforeEach(() => {
 	delete process.env.OLLAMA_HOST;
 	delete process.env.GITHUB_TOKEN;
 	delete process.env.WEB_SEARCH_PROVIDER;
+	delete process.env.ANTHROPIC_API_KEY;
 	rmSync(CONFIG_PATH, { force: true });
 });
 
@@ -1181,6 +1182,7 @@ describe("/web-tools command", () => {
 			"Perplexity",
 			"SearXNG",
 			"Ollama",
+			"Anthropic",
 		]);
 		expect(labels.filter((l) => l.includes("✓"))).toHaveLength(1);
 

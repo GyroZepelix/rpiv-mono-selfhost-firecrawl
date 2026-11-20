@@ -12,6 +12,10 @@ Records of observed problems, their causes, and any fork workaround with its rev
 
 - [issues/agent-explanation-only-in-thinking-before-ask-user-question.md](issues/agent-explanation-only-in-thinking-before-ask-user-question.md): Claude 5.x emits the explanation before `ask_user_question` as a thinking block (a progress update under Pi's summarized display), so the user never sees it. Workaround: the configurable `visibleContextGuard` in `rpiv-ask-user-question` (off by default; refusals made the model give up on the tool). The page also covers when to revert.
 
+## Observations
+
+- [observations.md](observations.md): tentative findings whose recurrence or scope is still unproven. Read it when running Dream or Wiki Lint, not for normal task context.
+
 ## Dream history
 
 - Episode catalog: [dreams/episodes.jsonl](dreams/episodes.jsonl). It holds one metadata line per immutable session log in `wiki/dreams/`. Load a narrative only when you need to recall that session.

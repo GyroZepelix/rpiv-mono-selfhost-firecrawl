@@ -22,6 +22,8 @@ keys — they are stored per provider under `apiKeys.<name>`.
 | SearXNG | `searxng` | `SEARXNG_API_KEY` (optional) | self-hosted — see [self-hosted.md](self-hosted.md) | built-in HTTP → text, honours `raw` |
 | Ollama | `ollama` | `OLLAMA_API_KEY` (optional locally) | local or [ollama.com](https://ollama.com) | native extraction |
 
+| Anthropic (fork) | `anthropic` | `ANTHROPIC_API_KEY` (optional with Pi's Anthropic login) | Pi `/login anthropic` or [console.anthropic.com](https://console.anthropic.com) | none — search only; see `fetchProvider` |
+
 Firecrawl, SearXNG, and Ollama also take a base URL (`FIRECRAWL_API_URL`,
 `SEARXNG_URL`, `OLLAMA_HOST`) because they can talk to an instance you control.
 All three are covered in [self-hosted.md](self-hosted.md).
@@ -49,7 +51,7 @@ plus the active provider.
 An unknown name at tier 1 or tier 2 throws:
 
 ```
-Unknown web_search provider: "bravo". Valid providers: brave, tavily, serper, exa, youcom, jina, firecrawl, perplexity, searxng, ollama.
+Unknown web_search provider: "bravo". Valid providers: brave, tavily, serper, exa, youcom, jina, firecrawl, perplexity, searxng, ollama, anthropic.
 ```
 
 Tiers 3 and 4 are not validated at resolution time — a typo in the config file
@@ -110,6 +112,79 @@ indicates the setting has never been touched. Firecrawl also counts a resolved
 key on its own, because its default URL is the hosted Cloud endpoint. SearXNG
 and Ollama need an explicit URL even when an optional key is set. The same rule
 decides which providers the `web_search` schema exposes.
+
+## Anthropic (fork addition)
+
+The `anthropic` provider is a fork customization (not upstream). It runs
+Anthropic's server-side `web_search` tool (`web_search_20250305`): Claude
+searches inside one request and answers with citations. `web_search` shows that
+short answer under `**Answer:**` above the result list, and also returns it as
+`details.answer`. Results are the cited sources first, with the citation's
+quoted page text as the snippet (at most about 150 characters from Anthropic),
+then the other sources found with an empty snippet; URLs are deduplicated and
+capped at `max_results`. An answer without sources is still returned; no answer
+and no sources gives the usual `No results found` envelope.
+
+**Credentials, in this order:**
+
+1. **Pi's Anthropic login**, through Pi's own model transport
+   (`modelRegistry.streamSimple`). This works from any chat model. With the
+   `@gotgenes/pi-anthropic-auth` extension loaded, these requests are shaped as
+   Claude Code traffic, so a Claude Pro/Max subscription pays for them.
+2. **An Anthropic API key** from `ANTHROPIC_API_KEY` or `apiKeys.anthropic`,
+   sent as a plain `x-api-key` request to `https://api.anthropic.com/v1/messages`
+   with no Claude Code identity.
+
+A Claude OAuth token (`sk-ant-oat…`) is never sent by a direct request: a
+direct OAuth request is classified as third-party usage and can fail with an
+"extra usage" error. Put such a token in Pi's login, not in `apiKeys`. With
+neither a login nor a key, the call throws and names both options.
+
+**Model and search count.** The search model is the first of
+`claude-haiku-5-5`, then `claude-sonnet-5-5` that Pi knows (the API-key path
+uses `claude-haiku-5-5`); there is no "newest model" guessing.
+`anthropic.model` overrides it. `anthropic.maxUses` caps searches per call
+(default 3, bounded 1 to 10).
+
+**Failures throw**: missing credentials, HTTP errors, web search tool errors
+(which Anthropic reports inside HTTP 200), and a refusal that found no
+sources.
+
+**Per-call enum.** `anthropic` appears in the `web_search` `provider` parameter
+when it is the active provider, the configured `fallbackProvider`, or an
+Anthropic API key resolves. Pi's login is not probed at registration.
+
+**Picker.** `/web-tools` lists Anthropic with one optional API-key prompt;
+Enter keeps an existing key or leaves it unset, so searches use Pi's login.
+
+### Search fallback
+
+`fallbackProvider` names a search backend tried **once** when the default
+provider throws (for example, Anthropic without a login or key, an HTTP error,
+or a tool error). The result starts with a one-line note naming the failed
+provider, its error, and the fallback, and carries `details.fallbackFrom`.
+There is no fallback on zero results, after an abort, for a per-call
+`provider` override, or when the fallback equals the default. If both fail,
+the error contains both messages. An unknown `fallbackProvider` throws the
+usual `Unknown web_search provider` error when the fallback is needed.
+`web_fetch` has no fallback.
+
+### Fetch provider
+
+`fetchProvider` picks the backend whose native fetch serves `web_fetch`,
+independently of the search provider — for example `"provider": "anthropic"`
+with `"fetchProvider": "firecrawl"`. Unset, `web_fetch` keeps using the active
+provider. URL interceptors still run first, and a provider without native
+fetch still uses the built-in HTML-to-text reader. An unknown name throws.
+
+```json
+{
+  "provider": "anthropic",
+  "fallbackProvider": "firecrawl",
+  "fetchProvider": "firecrawl",
+  "baseUrls": { "firecrawl": "https://firecrawl.example.com/v1" }
+}
+```
 
 ## Related
 
