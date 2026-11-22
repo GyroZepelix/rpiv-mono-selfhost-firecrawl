@@ -1,5 +1,21 @@
 # Wiki Log
 
+## [2026-11-22] dream | Gamemaster checkpoint for the Termux install fix
+
+- Trigger: `/dream` run after Gamemaster checkpoint: 261122-1316-make-fork-installable-on-termux-android/direct.
+- Inputs: the implementing session and `spec/archive/261122-1316-make-fork-installable-on-termux-android/` (plan, verification, outcome).
+- Wiki pages changed: `wiki/observations.md` (new Termux install checks section with one observation). The run's episode is discoverable through `wiki/dreams/episodes.jsonl`.
+- Verification: re-read the changed files, ran the metrics gate against the pre-write snapshot, and ran the memory safety scan.
+- Notes: no dynamic guidance was admitted. The keep-list bullet already exists in `wiki/workflows/upstream-sync.md`. No lint-queue entries were added.
+
+## [2026-11-22] update | Optional voice native modules keep-list
+
+- Trigger: spec item `261122-1316-make-fork-installable-on-termux-android` moved `decibri` and `sherpa-onnx-node` to `optionalDependencies` in `rpiv-voice` so that the fork installs on Termux (npm `os: android`).
+- Inputs: `packages/rpiv-voice/package.json`, `package-lock.json`, and the item's `plan.md` and `verification.md`.
+- Wiki pages changed:
+  - `wiki/workflows/upstream-sync.md`: added the optional voice native modules and their lockfile `optional` flags to the fork customizations to preserve, with the revert condition.
+- Verification: re-read the changed page against the changed manifest and lockfile entries.
+
 ## [2026-11-20] dream | Gamemaster checkpoint for the Anthropic web search provider
 
 - Trigger: `/dream` run after Gamemaster checkpoint: 261120-2305-anthropic-web-search-provider-for-rpiv-web-tools/direct.

@@ -83,7 +83,9 @@
 		]
 	},
 	"dependencies": {
-		"@juicesharp/rpiv-config": "^2.15.0",
+		"@juicesharp/rpiv-config": "^2.15.0"
+	},
+	"optionalDependencies": {
 		"sherpa-onnx-node": "^1.13.0",
 		"decibri": "^3.4.0"
 	},

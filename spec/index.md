@@ -22,6 +22,7 @@ Repository-local planning and execution artifacts.
 | [Merge upstream v2.15.0 and verify fork behavior](./archive/261025-0741-merge-upstream-v2-15-0-and-verify-fork-behavior/plan.md) | work-item | completed | 2026-10-25 |
 | [ask_user_question visible-context guard](./archive/261107-1756-ask-user-question-visible-context-guard/plan.md) | work-item | completed | 2026-11-07 |
 | [Anthropic web search provider for rpiv-web-tools](./archive/261120-2305-anthropic-web-search-provider-for-rpiv-web-tools/plan.md) | work-item | completed | 2026-11-20 |
+| [Make fork installable on Termux (Android)](./archive/261122-1316-make-fork-installable-on-termux-android/plan.md) | work-item | completed | 2026-11-22 |
 <!-- spec-items:archive:end -->
 
 ## Templates
